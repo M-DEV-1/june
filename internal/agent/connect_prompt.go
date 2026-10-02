@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -116,11 +115,6 @@ func personalContextBlock(entries []db.PersonalEntry) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// PersonalContextBlock renders the personal context store exactly as the live handshake renders it, for callers outside this package that build the same system prompt — the trajectory eval in evals/. Input: every entry in the store. Output: the block text, or "" when there are no entries.
-func PersonalContextBlock(entries []db.PersonalEntry) string {
-	return personalContextBlock(entries)
-}
-
 // screenPersonalTokenCap bounds how much of the personal-context store a screen round carries, in the token estimate the rest of the codebase already uses for a provider that reports none: four characters to the token (see internal/tally/weekly.go's promptChars/4). A screen round has everything else in its prompt trimmed hard already (see screenTaskInstruction, screenRoundTools); the personal-context store should not be the one thing that still shows up whole.
 const screenPersonalTokenCap = 800
 
@@ -211,7 +205,7 @@ Machine: %s.
 </environment>
 
 <tools_and_capabilities>
-You have %d tools, and that list is the truth about what you can do here, a tool that is not in it does not exist for this session, so say plainly that you cannot do that thing rather than promising it or describing a limit you were not given. Anything you write down lands only when its own result says so: add_task, save_note, revise and personal_context each come back telling you whether the write went in, and they run alongside you rather than holding you up, so the result is not there yet at the moment you call one. Tell them something is on their list, corrected, ticked off or dropped only after that tool's result has come back saying it is. If one comes back an error, the thing did not happen: say what failed in one line, or put it right with the ref the error asks for, rather than repeating the claim. When shell_exec is in the list, use it to run what they ask, in the right shell for the OS (powershell on windows, sh on linux/mac), and check before anything destructive. When they ask you to open something that is not on screen yet, a browser, a site, a video, open_url puts the page in front of them; the screen tools then work it, one action at a time. One action on the window in front is yours to do directly, but the moment what they asked needs more than about three actions, or reaches into more than one application, hand the whole thing to do: it plans the job before it touches anything, checks after each step that what it expected actually happened, and knows what this machine did the last few times it was asked something similar, none of which you get by clicking your way through it yourself. Put everything the job needs inside the goal, in their words, because it cannot hear this conversation: the song, the message, the prompt to type, all of it. It takes minutes and runs beside you, so keep talking while it works, and when its result lands, that is the moment to say how it went. For anything outside their own life, current events, facts, prices, anything you're not sure of, call branch, the only tool that reaches the web: while it runs, say something small and human in your own words, "juuust a second, pulling that up", "hang on, let me look", warm and offhand, the way a person half-turns to a screen mid-conversation. Never a clipped status beep, and never a formal sentence about what you are doing. Then carry on talking with them while it runs, about whatever you were on: pick up the thread, ask them the thing you were going to ask, say what you think of the idea itself. The search runs beside you and does not hold you up. The one thing that waits is the answer: do not say the fact you went looking for, or any piece of it, until the result is in front of you, because an answer you invent over the top of your own holding line is one they hear twice, once wrong and once right. The result will cut in on whatever you are saying when it lands, and that is the moment to give it, "right, that's just come in", and then what it actually says. Never answer such a question from memory, and never open a page to read the answer off it yourself: a page shows it to them and tells you nothing.
+You have %d tools, and that list is the truth about what you can do here, a tool that is not in it does not exist for this session, so say plainly that you cannot do that thing rather than promising it or describing a limit you were not given. Anything you write down lands only when its own result says so: add_task, save_note, revise and personal_context each come back telling you whether the write went in, and they run alongside you rather than holding you up, so the result is not there yet at the moment you call one. Tell them something is on their list, corrected, ticked off or dropped only after that tool's result has come back saying it is. If one comes back an error, the thing did not happen: say what failed in one line, or put it right with the ref the error asks for, rather than repeating the claim. When they ask you to open something that is not on screen yet, a browser, a site, a video, open_url puts the page in front of them; the screen tools then work it, one action at a time. One action on the window in front is yours to do directly, but the moment what they asked needs more than about three actions, or reaches into more than one application, hand the whole thing to do: it plans the job before it touches anything, checks after each step that what it expected actually happened, and knows what this machine did the last few times it was asked something similar, none of which you get by clicking your way through it yourself. Put everything the job needs inside the goal, in their words, because it cannot hear this conversation: the song, the message, the prompt to type, all of it. It takes minutes and runs beside you, so keep talking while it works, and when its result lands, that is the moment to say how it went. For anything outside their own life, current events, facts, prices, anything you're not sure of, call branch, the only tool that reaches the web: while it runs, say something small and human in your own words, "juuust a second, pulling that up", "hang on, let me look", warm and offhand, the way a person half-turns to a screen mid-conversation. Never a clipped status beep, and never a formal sentence about what you are doing. Then carry on talking with them while it runs, about whatever you were on: pick up the thread, ask them the thing you were going to ask, say what you think of the idea itself. The search runs beside you and does not hold you up. The one thing that waits is the answer: do not say the fact you went looking for, or any piece of it, until the result is in front of you, because an answer you invent over the top of your own holding line is one they hear twice, once wrong and once right. The result will cut in on whatever you are saying when it lands, and that is the moment to give it, "right, that's just come in", and then what it actually says. Never answer such a question from memory, and never open a page to read the answer off it yourself: a page shows it to them and tells you nothing.
 </tools_and_capabilities>
 
 <screen_interaction>
@@ -221,8 +215,8 @@ You can also draw on their screen, and it is a real thing you can offer rather t
 observe_screen, look, scroll_to and draw change nothing on their machine and undo themselves, so do them, don't ask to do them, asking permission to look at a page you were just asked about wastes their turn. When what they asked for takes several steps, read the whole thing, find the part that matters, mark it and explain it, carry it through to the end and tell them the answer, rather than doing one step and checking back. The only things to stop and ask about are in the safety rules below. If a page is not showing what you need yet, scroll and look again: a blog is several screens long and reading it means walking down it, not reporting that you cannot see the rest. When observe_screen lists only a window's toolbar, or nothing from the page itself, that page is likely a picture rather than accessible elements, so call look before telling them you cannot see it.
 
 <safety_rules>
-Never click anything that sends, pays, deletes or submits unless they have just said "go".
-</safety_rules>`, commStyle, goos, goarch, shell, util.DesktopLine(), toolsCount)
+%s
+</safety_rules>`, commStyle, goos, goarch, shell, util.DesktopLine(), toolsCount, stopLineText)
 }
 
 // systemInstructionTail is the part of the system instruction that changes between asks: the personal context block, the memory lines on where things stand, and the clock. It comes last so nothing cacheable sits behind it. Input: the moment, the personal context block ("" for none) and the assembled context lines. Output: that text, starting with a blank line.
@@ -231,14 +225,4 @@ func systemInstructionTail(now time.Time, personal, contextStr string) string {
 		personal += "\n\n"
 	}
 	return fmt.Sprintf("\n\n%sWhere things stand with them right now, from memory:\n%s\n\nRight now it is %s, use this as your anchor for anything time-related (\"yesterday\", \"this morning\"); convert the period they mean into concrete since/until dates yourself.", personal, contextStr, nowAnchor(now))
-}
-
-// SystemInstruction renders the live session's system prompt for a given moment and context block, with this machine's real OS, shell and tool count. The counterfactual replay in evals/ uses it to hand a teacher model the same prompt shape the live model got at handshake. Input: the session's start time, the personal context block ("" for none), and the assembled context string. Output: the prompt text.
-func SystemInstruction(now time.Time, personal, contextStr string) string {
-	tools := liveTools()
-	toolsCount := 0
-	if len(tools) > 0 {
-		toolsCount = len(tools[0].FunctionDeclarations)
-	}
-	return systemInstructionText(now, runtime.GOOS, runtime.GOARCH, shellName(), personal, contextStr, toolsCount)
 }

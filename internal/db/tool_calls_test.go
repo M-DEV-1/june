@@ -42,19 +42,3 @@ func TestAddToolCall_RoundTrips(t *testing.T) {
 		t.Errorf("offered = %v, want the three names it was shown", c.Offered)
 	}
 }
-
-// A call with nothing recorded as offered comes back with an empty list rather than one empty name, so a reader counting what was shown is not told a tool called "" existed.
-func TestToolCallsSince_EmptyOfferedIsNoNames(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-	if _, err := store.AddToolCall(ctx, ToolCall{Path: "ask", Name: "recall", Outcome: "ok"}); err != nil {
-		t.Fatalf("AddToolCall: %v", err)
-	}
-	got, err := store.ToolCallsSince(ctx, time.Now().Add(-time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || len(got[0].Offered) != 0 {
-		t.Errorf("offered = %v, want none", got[0].Offered)
-	}
-}

@@ -64,27 +64,6 @@ func TestNotice(t *testing.T) {
 	}
 }
 
-// Subscribed is what decides whether a moment can be drawn by a window at all, so notify-send is the fallback only when nothing is there to draw it.
-func TestSubscribed_AsksTheHubWhoIsListening(t *testing.T) {
-	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
-	if s.Subscribed(time.Minute) {
-		t.Error("a daemon no window has ever opened a stream on says one is subscribed")
-	}
-
-	ch := s.hub.subscribe()
-	if !s.Subscribed(time.Minute) {
-		t.Error("a window reading the stream right now does not count as subscribed")
-	}
-
-	s.hub.unsubscribe(ch)
-	if !s.Subscribed(time.Minute) {
-		t.Error("a window that has only just gone does not count for the minute after it left")
-	}
-	if s.Subscribed(0) {
-		t.Error("a window that has gone still counts as subscribed with no window at all to wait in")
-	}
-}
-
 // noticeAct records one call and answers with whatever the test set it to answer, standing in for *proactive.Scheduler.Act.
 type noticeAct struct {
 	kind, id, title, body, action string

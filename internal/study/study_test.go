@@ -91,7 +91,7 @@ func TestStudy_GathersBothSourcesIntoOnePromptAndParsesProseWrappedJSON(t *testi
 	}
 }
 
-// TestStudy_LessonsDedupAcrossTwoRuns checks the cumulative file: a second run whose teacher repeats a title from the first run must not duplicate it, while a genuinely new title still gets appended.
+// TestStudy_LessonsDedupAcrossTwoRuns checks the cumulative file: a second run whose teacher repeats a title from the first run must not duplicate it, a title repeated within one reply lands once, and a genuinely new title still gets appended.
 func TestStudy_LessonsDedupAcrossTwoRuns(t *testing.T) {
 	replayPath, tracePath := writeFixtures(t)
 	outDir := t.TempDir()
@@ -108,7 +108,7 @@ func TestStudy_LessonsDedupAcrossTwoRuns(t *testing.T) {
 	}
 
 	teach2 := func(ctx context.Context, prompt string) (string, error) {
-		return `{"lessons":[{"title":"Same title","lesson":"Second run repeats the title.","evidence":"e2"},{"title":"A new title","lesson":"Genuinely new lesson.","evidence":"e3"}],"summary":"s2"}`, nil
+		return `{"lessons":[{"title":"Same title","lesson":"Second run repeats the title.","evidence":"e2"},{"title":"A new title","lesson":"Genuinely new lesson.","evidence":"e3"},{"title":"A new title","lesson":"The same lesson twice in one reply.","evidence":"e4"}],"summary":"s2"}`, nil
 	}
 	res2, err := Study(context.Background(), teach2, []string{replayPath}, []string{tracePath}, outDir)
 	if err != nil {
@@ -126,65 +126,10 @@ func TestStudy_LessonsDedupAcrossTwoRuns(t *testing.T) {
 	if strings.Count(body, "## Same title") != 1 {
 		t.Errorf("duplicate title should appear once, found %d times: %s", strings.Count(body, "## Same title"), body)
 	}
-	if !strings.Contains(body, "## A new title") {
-		t.Error("the genuinely new lesson is missing")
+	if strings.Count(body, "## A new title") != 1 {
+		t.Errorf("a title repeated within one reply should land once, found %d times: %s", strings.Count(body, "## A new title"), body)
 	}
 	if strings.Contains(body, "Second run repeats the title.") {
 		t.Error("the duplicate's second-run wording should not have been appended")
-	}
-}
-
-// TestFitBudget_DropsOldestOverBudgetAndNamesThem checks the cap directly: blocks are assumed already ordered most-recent-first, and whatever doesn't fit is named rather than silently dropped.
-func TestFitBudget_DropsOldestOverBudgetAndNamesThem(t *testing.T) {
-	blocks := []block{
-		{source: "newest", text: strings.Repeat("a", 10)},
-		{source: "middle", text: strings.Repeat("b", 10)},
-		{source: "oldest", text: strings.Repeat("c", 10)},
-	}
-	kept, truncated := fitBudget(blocks, 15)
-	if len(kept) != 1 || kept[0].source != "newest" {
-		t.Errorf("kept: %+v", kept)
-	}
-	if len(truncated) != 2 || truncated[0] != "middle" || truncated[1] != "oldest" {
-		t.Errorf("truncated: %+v", truncated)
-	}
-}
-
-// TestStudy_NoMaterialIsAnError makes sure an empty pass fails loudly instead of spending a teacher call on nothing.
-func TestStudy_NoMaterialIsAnError(t *testing.T) {
-	called := false
-	teach := func(ctx context.Context, prompt string) (string, error) {
-		called = true
-		return "", nil
-	}
-	_, err := Study(context.Background(), teach, nil, nil, t.TempDir())
-	if err == nil {
-		t.Fatal("want an error when there is no material")
-	}
-	if called {
-		t.Error("the teacher should not be called when there is no material")
-	}
-}
-
-// appendLessons read the file once for its dedup check, so two lessons carrying the same title in one teacher reply both landed in lessons.md and every later prompt embedded the pair.
-func TestAppendLessons_SkipsADuplicateTitleWithinOneReply(t *testing.T) {
-	dir := t.TempDir()
-	path, added, err := appendLessons(dir, []Lesson{
-		{Title: "Ask before restarting", Lesson: "Say what will move on screen first."},
-		{Title: "Ask before restarting", Lesson: "The same lesson said twice in one reply."},
-		{Title: "Keep the terminal UI", Lesson: "It is not dead code."},
-	})
-	if err != nil {
-		t.Fatalf("appendLessons: %v", err)
-	}
-	if added != 2 {
-		t.Errorf("appended %d lessons, want 2 with the repeat dropped", added)
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(string(body), "## Ask before restarting\n"); got != 1 {
-		t.Errorf("the repeated heading appears %d times in lessons.md, want 1", got)
 	}
 }

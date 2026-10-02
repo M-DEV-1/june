@@ -9,7 +9,7 @@ import (
 	"june/internal/db/dbtest"
 )
 
-// TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows seeds one week's worth of brain-call, vector-contribution, dream-run, and diary fixture rows, and asserts the rendered text names every section and reflects the fixture numbers — the render is the whole point of the weekly log, so every input this package can produce must show up somewhere in the output.
+// TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows seeds one week's worth of brain-call, vector-contribution, dream-run, and diary fixture rows, and asserts the rendered text names every section and reflects the fixture numbers — the render is the whole point of the weekly log, so every input this package can produce must show up somewhere in the output, and a row older than seven days must not.
 func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 	ctx := context.Background()
 	store := dbtest.Open(t)
@@ -54,6 +54,11 @@ func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 		t.Fatalf("SetDiaryEntry(brief): %v", err)
 	}
 
+	// A row older than the seven-day window, which the render must leave out.
+	if _, err := store.DB().Exec(`INSERT INTO tally (day, provider, calls, failures, total_ms) VALUES (?, 'grok-cli', 5, 0, 500)`, now.AddDate(0, 0, -30).Format(weeklyDayFormat)); err != nil {
+		t.Fatalf("seed old tally row: %v", err)
+	}
+
 	text, err := RenderWeeklyLog(ctx, store, now)
 	if err != nil {
 		t.Fatalf("RenderWeeklyLog: %v", err)
@@ -73,23 +78,6 @@ func TestRenderWeeklyLog_IncludesAllSectionsWithFixtureRows(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered weekly log missing %q, got:\n%s", want, text)
 		}
-	}
-}
-
-// TestRenderWeeklyLog_OnlyLooksAtLastSevenDays verifies a tally row older than the window is excluded from the render — otherwise the "weekly" log would grow to cover the store's entire lifetime.
-func TestRenderWeeklyLog_OnlyLooksAtLastSevenDays(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	now := time.Now()
-
-	oldDay := now.AddDate(0, 0, -30).Format(weeklyDayFormat)
-	if _, err := store.DB().Exec(`INSERT INTO tally (day, provider, calls, failures, total_ms) VALUES (?, 'grok-cli', 5, 0, 500)`, oldDay); err != nil {
-		t.Fatalf("seed old tally row: %v", err)
-	}
-
-	text, err := RenderWeeklyLog(ctx, store, now)
-	if err != nil {
-		t.Fatalf("RenderWeeklyLog: %v", err)
 	}
 	if strings.Contains(text, "grok-cli") {
 		t.Errorf("render included a tally row from 30 days ago, want it excluded from the 7-day window:\n%s", text)

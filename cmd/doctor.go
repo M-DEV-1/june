@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -67,12 +67,37 @@ func windowReport(ctx context.Context) string {
 	return b.String()
 }
 
-// runDoctor runs every check against the live desk. Input: a context bounding the bus calls. Output: the checks, in the order the report prints them.
+// runDoctor runs every check against the live desk. Input: a context bounding the bus calls. Output: the checks, in the order the report prints them. The desk checks (the session bus, accessibility, screenshot, pointer consent) are about a Linux desktop and run only there; window frames, the brain, the local pieces and the daemon are checked everywhere. Windows reports window frames through Win32 itself, with no extension to install.
 func runDoctor(ctx context.Context) []doctorCheck {
+	var out []doctorCheck
+	if runtime.GOOS == "linux" {
+		desk, ok := deskChecks(ctx)
+		out = append(out, desk...)
+		if !ok {
+			return out
+		}
+	} else {
+		out = append(out, windowFramesCheck(ctx))
+	}
+	home, _ := os.UserHomeDir()
+	out = append(out, brainCheck(home, os.Getenv("GEMINI_API_KEY")))
+	out = append(out, localPieceChecks(config.DataDir(), os.Getenv("XDG_RUNTIME_DIR"), config.LoadConfig().Embed)...)
+	// Daemon: everything above is driven by it.
+	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {
+		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run june"})
+	} else {
+		resp.Body.Close()
+		out = append(out, doctorCheck{Name: "daemon", Detail: "answering", OK: true})
+	}
+	return out
+}
+
+// deskChecks checks what computer use needs from a Linux desktop. Input: a context bounding the bus calls. Output: the checks, and false when there is no session bus, in which case nothing after it can be checked either.
+func deskChecks(ctx context.Context) ([]doctorCheck, bool) {
 	var out []doctorCheck
 	conn, err := dbus.SessionBus()
 	if err != nil {
-		return append(out, doctorCheck{Name: "session bus", Detail: err.Error(), Fix: "run from a graphical login"})
+		return append(out, doctorCheck{Name: "session bus", Detail: err.Error(), Fix: "run from a graphical login"}), false
 	}
 	// Accessibility: the bus must exist and applications must be told to build their trees, or observe_screen lists nothing.
 	var enabled dbus.Variant
@@ -90,34 +115,28 @@ func runDoctor(ctx context.Context) []doctorCheck {
 	} else {
 		out = append(out, doctorCheck{Name: "screenshot", Detail: "gnome-shell screenshot available", OK: true})
 	}
-	// Window frames: the only source of window positions on Wayland is the bundled extension, and only a build that reports frames places clicks.
-	if r, err := window.New(); err != nil {
-		out = append(out, doctorCheck{Name: "window frames", Detail: err.Error(), Fix: "install the GNOME extension (packaging/gnome-extension) and log in again"})
-	} else {
-		defer r.Close()
-		windows, err := r.List(ctx)
-		switch {
-		case err != nil:
-			out = append(out, doctorCheck{Name: "window frames", Detail: "extension not answering: " + err.Error(), Fix: "enable the june@june.local extension and log in again"})
-		case !anyFrame(windows):
-			out = append(out, doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed, none with a frame", len(windows)), Fix: "the installed extension predates window frames: log out and in to load the new one"})
-		default:
-			out = append(out, doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed with frames", len(windows)), OK: true})
-		}
-	}
+	out = append(out, windowFramesCheck(ctx))
 	// Pointer: a saved restore token means the RemoteDesktop consent was given once and the session opens silently. What it does not say is how many monitors that grant covers, so the desk's live monitor count is read separately and handed alongside it.
 	out = append(out, pointerCheck(filepath.Join(config.DataDir(), "portal-input-token"), monitorCount(ctx, conn)))
-	home, _ := os.UserHomeDir()
-	out = append(out, brainCheck(home, os.Getenv("GEMINI_API_KEY")))
-	out = append(out, localPieceChecks(config.DataDir(), os.Getenv("XDG_RUNTIME_DIR"), config.LoadConfig().Embed)...)
-	// Daemon: everything above is driven by it.
-	if resp, err := http.Get("http://127.0.0.1:" + DaemonPort + "/ping"); err != nil {
-		out = append(out, doctorCheck{Name: "daemon", Detail: "not answering on " + DaemonPort, Fix: "run june"})
-	} else {
-		resp.Body.Close()
-		out = append(out, doctorCheck{Name: "daemon", Detail: "answering", OK: true})
+	return out, true
+}
+
+// windowFramesCheck reports whether open windows can be listed with their frames, which every click is placed against. On Wayland the only source of window positions is the bundled GNOME extension, and only a build that reports frames places clicks. Input: a context bounding the call. Output: the check.
+func windowFramesCheck(ctx context.Context) doctorCheck {
+	r, err := window.New()
+	if err != nil {
+		return doctorCheck{Name: "window frames", Detail: err.Error(), Fix: "install the GNOME extension (packaging/gnome-extension) and log in again"}
 	}
-	return out
+	defer r.Close()
+	windows, err := r.List(ctx)
+	switch {
+	case err != nil:
+		return doctorCheck{Name: "window frames", Detail: "extension not answering: " + err.Error(), Fix: "enable the june@june.local extension and log in again"}
+	case !anyFrame(windows):
+		return doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed, none with a frame", len(windows)), Fix: "the installed extension predates window frames: log out and in to load the new one"}
+	default:
+		return doctorCheck{Name: "window frames", Detail: fmt.Sprintf("%d windows listed with frames", len(windows)), OK: true}
+	}
 }
 
 // pointerCheck reports whether pointer and keyboard consent is saved, and, when it is, the desk's live monitor count next to the exact file a re-grant needs deleted. A restore token saved from an older, narrower grant keeps restoring that same grant forever — the portal never asks again on its own — so a click on a monitor the grant does not cover fails deep inside the coordinate mapping. Input: the saved token's path, and the desk's monitor count (-1 when it could not be read). Output: the check.
@@ -149,12 +168,12 @@ func monitorCount(ctx context.Context, conn *dbus.Conn) int {
 	return len(monitors)
 }
 
-// localPieceChecks reports every piece June runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, the PipeWire pulse socket and pw-dump. Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
+// localPieceChecks reports every piece June runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, and what recording and call detection need from the desktop (see platformChecks). Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
 // Input: the data directory, $XDG_RUNTIME_DIR, and the embed block of the config. Output: one check per piece, in that order.
 func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []doctorCheck {
 	var out []doctorCheck
 	if bin, err := recorder.WhisperCPPBinary(dataDir); err != nil {
-		out = append(out, doctorCheck{Name: "meeting transcription", Detail: err.Error() + "; meeting transcription is off", Fix: "install whisper.cpp's whisper-cli with ggml-medium.bin beside it at the path above, or point JUNE_WHISPER_CPP at one"})
+		out = append(out, doctorCheck{Name: "meeting transcription", Detail: err.Error() + "; meeting transcription is off", Fix: "install whisper.cpp's whisper-cli" + exeSuffix + " with ggml-medium.bin beside it at the path above, or point JUNE_WHISPER_CPP at one"})
 	} else {
 		out = append(out, doctorCheck{Name: "meeting transcription", Detail: "whisper-cli at " + bin, OK: true})
 	}
@@ -169,19 +188,7 @@ func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []do
 		out = append(out, doctorCheck{Name: "speaker diarization", Detail: "diarizer at " + bin, OK: true})
 	}
 	out = append(out, embedCheck(embed))
-	// Recording goes through PipeWire's pulse server, found the way github.com/jfreymuth/pulse finds it: $PULSE_SERVER when set, the socket under $XDG_RUNTIME_DIR otherwise.
-	if server := os.Getenv("PULSE_SERVER"); server != "" {
-		out = append(out, doctorCheck{Name: "audio server", Detail: "PULSE_SERVER is " + server, OK: true})
-	} else if sock := filepath.Join(runtimeDir, "pulse", "native"); !util.Exists(sock) {
-		out = append(out, doctorCheck{Name: "audio server", Detail: "no pulse socket at " + sock + "; meeting recording and voice input are off", Fix: "install and start PipeWire with its pulse server (pipewire-pulse)"})
-	} else {
-		out = append(out, doctorCheck{Name: "audio server", Detail: "pulse socket at " + sock, OK: true})
-	}
-	if bin, err := exec.LookPath("pw-dump"); err != nil {
-		out = append(out, doctorCheck{Name: "call detection", Detail: "no pw-dump on PATH (" + os.Getenv("PATH") + "); noticing a call and offering to record it is off", Fix: "install PipeWire's command-line tools (pipewire-bin on Debian and Ubuntu)"})
-	} else {
-		out = append(out, doctorCheck{Name: "call detection", Detail: "pw-dump at " + bin, OK: true})
-	}
+	out = append(out, platformChecks(runtimeDir)...)
 	return out
 }
 

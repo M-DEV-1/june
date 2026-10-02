@@ -8,7 +8,6 @@ import (
 	"june/internal/tracker"
 	"june/internal/util"
 	"log/slog"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -170,17 +169,40 @@ func describe(users []string, eps []db.Episode) []string {
 	return named
 }
 
-// readMicUsers asks the audio server which applications are in a call, and logs any that hold the microphone without playing anything back so the rule can be checked against the log. It returns nothing when pw-dump is missing or fails, which is also what a machine with no PipeWire reports, so the watcher simply never fires there.
-func readMicUsers(ctx context.Context) []string {
-	out, err := exec.CommandContext(ctx, "pw-dump").Output()
-	if err != nil {
-		return nil
+// consentEntry is one app under Windows' microphone consent store (HKCU\...\CapabilityAccessManager\ConsentStore\microphone): its subkey name and the LastUsedTimeStart and LastUsedTimeStop stamps Windows keeps for it. It lives here rather than in the Windows file so its rule is tested on Linux.
+type consentEntry struct {
+	// key is a package family name for a packaged app, or for a desktop app (under NonPackaged) the exe's full path with # in place of each backslash.
+	key         string
+	packaged    bool
+	start, stop uint64
+}
+
+// consentUsers returns the apps holding the microphone according to the consent store, excluding June itself. An app holds it when it has started using it and not stopped since: a non-zero start stamp and a zero stop stamp.
+// Input: the entries under microphone and microphone\NonPackaged. Output: names as streamName gives them, in order and without repeats.
+// ponytail: every holder counts as a call, so a dictation tool on Windows gets asked about the way Handy was on Linux; telling them apart needs the render sessions (IAudioSessionManager2, GetProcessId) to see which holders also play audio back. An app that crashes mid-call leaves its stop stamp at 0, so it reads as holding the microphone until it next runs; cross-checking that the process still exists would fix that.
+func consentUsers(entries []consentEntry) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if e.start == 0 || e.stop != 0 {
+			continue
+		}
+		bin := e.key[strings.LastIndex(e.key, "#")+1:]
+		if e.packaged {
+			bin, _, _ = strings.Cut(e.key, "_")
+		}
+		// The Windows package ships the daemon twice, june.exe with a console and junew.exe without one for the login entry; either can be the process holding the microphone for voice or a recording.
+		if base := strings.TrimSuffix(bin, ".exe"); base == "" || strings.EqualFold(base, juneBinary) || strings.EqualFold(base, juneBinary+"w") {
+			continue
+		}
+		name := streamName(bin, "")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
 	}
-	calls, captureOnly := micUsers(out)
-	if len(captureOnly) > 0 {
-		slog.Debug("holding the microphone without playing anything back, not a call", "processes", captureOnly)
-	}
-	return calls
+	return names
 }
 
 // meetingWatch remembers enough between polls to ask about a call once, then leave it alone, and then end the recording it started when the call goes away. The zero value is ready to use.

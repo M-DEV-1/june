@@ -321,6 +321,7 @@ type claudeRunner func(ctx context.Context, args []string, stdin string) ([]byte
 func runClaudeCLI(binary string) claudeRunner {
 	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, binary, args...)
+		util.HideConsole(cmd)
 		cmd.Stdin = strings.NewReader(stdin)
 		cmd.Dir = os.TempDir()
 		var out, stderr bytes.Buffer
@@ -433,7 +434,7 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 		instruction = screenTaskInstruction()
 	}
 
-	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancelRecall()
 	if err != nil {

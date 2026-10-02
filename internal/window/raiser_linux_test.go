@@ -1,0 +1,204 @@
+//go:build linux
+
+package window
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os/exec"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/godbus/dbus/v5"
+)
+
+// fakeExtension stands in for the june@june.local shell extension on a private test bus: it records each call it receives and answers with a canned bool, so the test can prove the Raiser sends the right method name and argument without a real gnome-shell.
+type fakeExtension struct {
+	mu       sync.Mutex
+	calls    []string
+	want     string // the pid/title/wmclass value that should be reported found
+	listJSON string // what List() answers with; "[]" when empty
+}
+
+func (f *fakeExtension) record(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, s)
+}
+
+func (f *fakeExtension) List() (string, *dbus.Error) {
+	f.record("List()")
+	if f.listJSON == "" {
+		return "[]", nil
+	}
+	return f.listJSON, nil
+}
+
+func (f *fakeExtension) ActivateByPid(pid uint32) (bool, *dbus.Error) {
+	f.record(fmt.Sprintf("ActivateByPid(%d)", pid))
+	return fmt.Sprint(pid) == f.want, nil
+}
+
+func (f *fakeExtension) ActivateByTitle(substring string) (bool, *dbus.Error) {
+	f.record("ActivateByTitle(" + substring + ")")
+	return substring == f.want, nil
+}
+
+func (f *fakeExtension) ActivateByWmClass(wmClass string) (bool, *dbus.Error) {
+	f.record("ActivateByWmClass(" + wmClass + ")")
+	return wmClass == f.want, nil
+}
+
+// startPrivateBus launches a throwaway dbus-daemon for the test to talk to, so the test never touches the real session bus. Input: none. Output: the bus's address and a func that shuts it down, or t.Skip if no dbus-daemon binary is on PATH.
+func startPrivateBus(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("dbus-daemon"); err != nil {
+		t.Skip("no dbus-daemon on PATH; skipping live D-Bus test")
+	}
+	cmd := exec.Command("dbus-daemon", "--session", "--print-address", "--nofork")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("pipe dbus-daemon stdout: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dbus-daemon: %v", err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+
+	addrCh := make(chan string, 1)
+	go func() {
+		s := bufio.NewScanner(stdout)
+		if s.Scan() {
+			addrCh <- s.Text()
+		}
+	}()
+	select {
+	case addr := <-addrCh:
+		return addr
+	case <-time.After(5 * time.Second):
+		t.Fatal("dbus-daemon never printed an address")
+		return ""
+	}
+}
+
+// serveFakeExtension connects to the private bus as "org.gnome.Shell" and exports the fake extension at the real object path, exactly as the real gnome-shell would once june@june.local is enabled.
+func serveFakeExtension(t *testing.T, addr string, ext *fakeExtension) {
+	t.Helper()
+	conn, err := dbus.Connect(addr)
+	if err != nil {
+		t.Fatalf("connect fake server to private bus: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	reply, err := conn.RequestName(busName, dbus.NameFlagDoNotQueue)
+	if err != nil || reply != dbus.RequestNameReplyPrimaryOwner {
+		t.Fatalf("claim %s on private bus: reply=%v err=%v", busName, reply, err)
+	}
+
+	methods := map[string]any{
+		"List":              ext.List,
+		"ActivateByPid":     ext.ActivateByPid,
+		"ActivateByTitle":   ext.ActivateByTitle,
+		"ActivateByWmClass": ext.ActivateByWmClass,
+	}
+	if err := conn.ExportMethodTable(methods, objectPath, ifaceName); err != nil {
+		t.Fatalf("export fake extension: %v", err)
+	}
+}
+
+// Each Raiser method reaches the june@june.local extension under the method name and argument the extension exports, and reports the extension's own answer.
+func TestRaiser_CallsTheRightMethodWithTheRightArgument(t *testing.T) {
+	addr := startPrivateBus(t)
+	ext := &fakeExtension{want: "1234"}
+	serveFakeExtension(t, addr, ext)
+
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
+	r, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if ok, err := r.Available(ctx); err != nil || !ok {
+		t.Fatalf("Available: ok=%v err=%v", ok, err)
+	}
+	if ok, err := r.ByPid(ctx, 1234); err != nil || !ok {
+		t.Fatalf("ByPid(1234): ok=%v err=%v, want true", ok, err)
+	}
+	if ok, err := r.ByPid(ctx, 9999); err != nil || ok {
+		t.Fatalf("ByPid(9999): ok=%v err=%v, want false", ok, err)
+	}
+	if ok, err := r.ByTitle(ctx, "1234"); err != nil || !ok {
+		t.Fatalf("ByTitle: ok=%v err=%v, want true", ok, err)
+	}
+	if ok, err := r.ByWmClass(ctx, "1234"); err != nil || !ok {
+		t.Fatalf("ByWmClass: ok=%v err=%v, want true", ok, err)
+	}
+
+	ext.mu.Lock()
+	calls := append([]string(nil), ext.calls...)
+	ext.mu.Unlock()
+	want := []string{"List()", "ActivateByPid(1234)", "ActivateByPid(9999)", "ActivateByTitle(1234)", "ActivateByWmClass(1234)"}
+	if len(calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Errorf("call %d = %q, want %q", i, calls[i], want[i])
+		}
+	}
+}
+
+// TestRaiser_NoExtensionMeansUnavailable proves the argument shapes work end to end even when nothing is exported at the extension's object path: every call must return (false, non-nil error) rather than panicking, matching how the real Raiser behaves before the user has installed or enabled june@june.local.
+func TestRaiser_NoExtensionMeansUnavailable(t *testing.T) {
+	addr := startPrivateBus(t)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
+	r, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if ok, err := r.Available(ctx); ok || err == nil {
+		t.Fatalf("Available with no extension exported: ok=%v err=%v, want false and an error", ok, err)
+	}
+	if ok, err := r.ByPid(ctx, 1); ok || err == nil {
+		t.Fatalf("ByPid with no extension exported: ok=%v err=%v, want false and an error", ok, err)
+	}
+}
+
+// TestRaiser_ListParsesTheWindowsTheExtensionReports proves List turns the extension's JSON string into the Window slice the caller reads: every field named, in the order the extension put them in.
+func TestRaiser_ListParsesTheWindowsTheExtensionReports(t *testing.T) {
+	addr := startPrivateBus(t)
+	ext := &fakeExtension{listJSON: `[{"id":1,"pid":1234,"wm_class":"brave-browser","title":"Brave · News","focused":true},{"id":2,"pid":5678,"wm_class":"Slack","title":"Slack · General","focused":false}]`}
+	serveFakeExtension(t, addr, ext)
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
+	r, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := r.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	want := []Window{
+		{ID: 1, Pid: 1234, WmClass: "brave-browser", Title: "Brave · News", Focused: true},
+		{ID: 2, Pid: 5678, WmClass: "Slack", Title: "Slack · General", Focused: false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("List = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("List[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

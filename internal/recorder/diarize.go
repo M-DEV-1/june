@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ func clusterThreshold() string {
 // SherpaBinary returns the path to the diarizer, or an error naming the exact path of each missing file. $JUNE_SHERPA overrides the location.
 func SherpaBinary(dataDir string) (string, error) {
 	bin := filepath.Join(dataDir, "sherpa", sherpaBinaryName)
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	if p := os.Getenv("JUNE_SHERPA"); p != "" {
 		bin = p
 	}

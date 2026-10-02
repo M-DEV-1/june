@@ -8,7 +8,7 @@ import { openStream, type DaemonEvent, type Evidence, type Spend } from "../shar
 import { DAEMON_HOST_PORT } from "./daemon-url";
 
 export { devToken };
-export type { DaemonEvent, Evidence, ModelUsage, Notice, Spend } from "../shared/wire";
+export type { DaemonEvent, Evidence, Notice, Spend } from "../shared/wire";
 
 /** Where the daemon listens. */
 const base = `http://${DAEMON_HOST_PORT}`;

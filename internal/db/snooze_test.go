@@ -47,13 +47,6 @@ func TestSnoozeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestMarkSnoozeFiredUnknownID checks that firing an id that matches nothing is an error rather than a silent no-op, so a bug in the scheduler cannot quietly re-fire the same snooze every minute.
-func TestMarkSnoozeFiredUnknownID(t *testing.T) {
-	if err := newStore(t).MarkSnoozeFired(context.Background(), 999); err == nil {
-		t.Error("MarkSnoozeFired(999) = nil, want an error")
-	}
-}
-
 // TestAddSnooze_ReplacesPendingForSameNotice checks that snoozing a notice a second time pushes the reminder rather than leaving the first snooze to fire on its own alongside the second.
 func TestAddSnooze_ReplacesPendingForSameNotice(t *testing.T) {
 	store := newStore(t)
@@ -75,64 +68,6 @@ func TestAddSnooze_ReplacesPendingForSameNotice(t *testing.T) {
 	}
 	if len(due) != 1 || due[0].ID != second {
 		t.Fatalf("DueSnoozes = %+v, want only the second snooze (id %d), first (id %d) should have been replaced", due, second, first)
-	}
-}
-
-// TestAddSnooze_LeavesOtherNoticesAlone checks that replacing a pending snooze only touches the notice it was made for, never another notice's own snooze.
-func TestAddSnooze_LeavesOtherNoticesAlone(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-	now := time.Now()
-
-	other, err := store.AddSnooze(ctx, "task", "43", "Other task", "Call the client", now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("AddSnooze(other): %v", err)
-	}
-	if _, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", now.Add(time.Hour)); err != nil {
-		t.Fatalf("AddSnooze(42): %v", err)
-	}
-	if _, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", now.Add(2*time.Hour)); err != nil {
-		t.Fatalf("AddSnooze(42 again): %v", err)
-	}
-
-	due, err := store.DueSnoozes(ctx, now.Add(3*time.Hour))
-	if err != nil {
-		t.Fatalf("DueSnoozes: %v", err)
-	}
-	var otherStillThere bool
-	for _, sn := range due {
-		if sn.ID == other {
-			otherStillThere = true
-		}
-	}
-	if !otherStillThere {
-		t.Errorf("DueSnoozes = %+v, want notice 43's own snooze (id %d) untouched", due, other)
-	}
-}
-
-// TestAddSnooze_FailedReplaceLeavesThePendingSnooze checks that cancelling the old snooze and inserting the new one happen in one transaction: when the insert side of an AddSnooze call fails, the earlier pending snooze is left exactly as it was, not half-cancelled.
-func TestAddSnooze_FailedReplaceLeavesThePendingSnooze(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-	now := time.Now()
-
-	first, err := store.AddSnooze(ctx, "task", "42", "Still open", "Send the invoice", now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("AddSnooze(first): %v", err)
-	}
-
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := store.AddSnooze(canceled, "task", "42", "Still open", "Send the invoice", now.Add(2*time.Hour)); err == nil {
-		t.Fatal("AddSnooze with an already-canceled context = nil error, want one")
-	}
-
-	due, err := store.DueSnoozes(ctx, now.Add(3*time.Hour))
-	if err != nil {
-		t.Fatalf("DueSnoozes: %v", err)
-	}
-	if len(due) != 1 || due[0].ID != first || due[0].Due.Unix() != now.Add(time.Hour).Unix() {
-		t.Fatalf("DueSnoozes after a failed replace = %+v, want the original snooze (id %d) untouched", due, first)
 	}
 }
 

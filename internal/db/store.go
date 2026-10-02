@@ -60,9 +60,9 @@ type Store struct {
 
 // constructor, return pointer to struct and err
 func New(path string) (*Store, error) {
-	// WAL lets multiple connections read/write concurrently (daemon LogEpisode + tool HybridSearch); busy_timeout makes them wait instead of erroring SQLITE_BUSY immediately.
+	// WAL lets multiple connections read/write concurrently (daemon LogEpisode + tool HybridSearch); busy_timeout makes them wait instead of erroring SQLITE_BUSY immediately. 30 s rather than 5 s because a commit on Windows waits on a slow disk flush, and under several writers one of them waited past 5 s and lost its write.
 	// foreign_keys is off by default in SQLite and is a property of a connection, not of the database, so it has to be in the DSN: the driver replays every _pragma here on each connection the pool opens, which a one-off Exec after sql.Open would not. Without it every ON DELETE CASCADE below is dead text — deleting a conversation left its turns behind, deleting an episode or a thread left dangling rows in episode_threads, and a turn could be written against a conversation id that names nothing. See foreign_keys_test.go.
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"
 
 	if path != ":memory:" {
 		dir := filepath.Dir(path)

@@ -192,7 +192,7 @@ func fetchWindowHotkey() string {
 	if err != nil {
 		return ""
 	}
-	ipctoken.Attach(req, ipctoken.DefaultPath)
+	ipctoken.Attach(req, ipctoken.DefaultPath())
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Do(req)
 	if err != nil {

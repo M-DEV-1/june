@@ -308,12 +308,6 @@ func (c *Compiler) writeFallbackNode(ctx context.Context, buf []tracker.Activity
 	}
 }
 
-func (c *Compiler) BufferSize() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.buffer)
-}
-
 // ForceFlush drains the buffer and processes it, and returns when either that finishes or ctx is done. The buffer is emptied before the slow work starts, so a caller whose deadline expires first — the shutdown flush is the one that does — would otherwise walk away from activity that is no longer anywhere else. When the deadline wins, the drained activities are written as a raw-activity node under a context the deadline cannot cancel, so the stretch is still in memory as app and title lines even though it never got a summary. Input: a context whose deadline bounds the wait. Output: none.
 func (c *Compiler) ForceFlush(ctx context.Context) {
 	c.mu.Lock()

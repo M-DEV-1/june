@@ -35,10 +35,11 @@ func applyAutostart(value string) error {
 
 // reconcileAutostart makes the on-disk login entry match want, which is the config's Autostart field.
 // The config file is the switch: whatever it says wins over whatever happens to be installed, so a hand-edited config or a stale entry left by an older build is corrected on the next daemon start.
+// An installed entry that is not the one setAutostart would write now (on Windows, after the unzipped folder was moved, or once junew.exe sits beside the binary) is rewritten.
 // Never fatal — autostart failing is not a reason to refuse to run.
-// ponytail: the entry records whatever os.Executable() reports at install time and is never re-checked once installed, so a daemon started via `go run .` (a temp build directory that is deleted on exit) or a binary that is later moved leaves a login entry pointing at a path that no longer exists. Upgrade path: have reconcileAutostart compare the installed Exec= path against the current executable and rewrite when they differ.
+// ponytail: on Linux autostartCurrent always says yes, so a moved binary leaves Exec= pointing at the old path; comparing the file against desktopEntry would also rewrite it to a `go run .` temp build on every dev start.
 func reconcileAutostart(want bool) {
-	if autostartEnabled() == want {
+	if autostartEnabled() == want && (!want || autostartCurrent()) {
 		return
 	}
 	if err := setAutostart(want); err != nil {

@@ -380,7 +380,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	defer session.Close()
 
 	// per-session context: cancels all goroutines for THIS session when Connect returns
-	// w/o this, textSendLoop and audioSendLoop from a dead session linger across reconnects
+	// w/o this, audioSendLoop from a dead session lingers across reconnects
 	sessCtx, sessCancel := context.WithCancel(ctx)
 	defer sessCancel()
 
@@ -418,16 +418,12 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 
 	go a.receiveLoop(sessCtx, session, a.GetModel(), errChan)
 	go a.audioSendLoop(sessCtx, session, micChan, errChan)
-	go a.textSendLoop(sessCtx, session)
 
 	select {
 	case err := <-errChan:
 		return err
 	case <-sessCtx.Done():
 		return sessCtx.Err()
-	case <-a.ReconnectChan:
-		// e.g. /voice changed — the Live session's voice is fixed at handshake, so the only way to apply it is to drop and let the caller's reconnect loop redial with the new config.
-		return fmt.Errorf("reconnecting to apply updated settings")
 	}
 }
 
@@ -542,7 +538,7 @@ type liveSession interface {
 // sessionPictureSender is the road a look's picture takes on a live session. Input: the session. Output: a PictureSender that ships the capture as one realtime video frame.
 // It goes in the Video field, the way the microphone's audio goes in Audio. The Media field serialises to media_chunks, which the API deprecated: measured 2026-09-09 at 03:58:40 and 04:04:33, a picture sent that way closed the socket with "close 1007 realtime_input.media_chunks is deprecated. Use audio, video, or text instead" and took the branch subtask running under it down with the session.
 // It is realtime input rather than a tool result because the Live API takes a function response as text: the picture has to arrive on the same channel as the microphone's audio, and the tool result then only describes the frame it was taken in.
-// It takes a.writeMu around the send, the same as every other write to the session (audioSendLoop, textSendLoop, runToolWithNudge's own nudge below): gorilla/websocket allows only one writer at a time, and a picture pushed without the lock can land mid-frame of a concurrent audio write and panic the connection with "concurrent write to websocket connection".
+// It takes a.writeMu around the send, the same as every other write to the session (audioSendLoop, runToolWithNudge's own nudge below): gorilla/websocket allows only one writer at a time, and a picture pushed without the lock can land mid-frame of a concurrent audio write and panic the connection with "concurrent write to websocket connection".
 func (a *Agent) sessionPictureSender(session liveSession) PictureSender {
 	return func(_ context.Context, c tracker.Capture) error {
 		a.writeMu.Lock()
@@ -615,11 +611,6 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if isNonSpeechTranscript(utterance) {
 			return false
 		}
-		// The mic is off (text-only mode, or /mute) — anything the server still transcribes is audio it already had in hand, or the room rather than the user. Dropping it here, at the one choke point every call site goes through, is what stops text-only mode from answering the conversation happening around the machine.
-		if a.isMuted.Load() {
-			slog.Debug("dropping voice transcript: mic is muted", "text", utterance)
-			return false
-		}
 		// The mic picking up June's own voice and transcribing it as if the user said it: a real production session answered its own greeting, then answered that answer, and looped for minutes. See matchesRecentJuneSpeech.
 		if matchesRecentJuneSpeech(recentJuneSpeech, utterance, time.Now()) {
 			slog.Debug("ignoring echo of june's own speech", "text", utterance)
@@ -644,10 +635,6 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			recvSpan.RecordError(err)
 			recvSpan.SetStatus(codes.Error, "receive failed")
 			errChan <- fmt.Errorf("receive loop error: %w", err)
-			select {
-			case a.ErrorChan <- err:
-			default:
-			}
 			return
 		}
 
@@ -683,12 +670,8 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 					slog.Info("barge-in confirmed by a late transcript", "waited", waited)
 					flushJuneSpeech()
 					a.speaker.Flush()
-					notice := "[june stopped]"
-					if a.typedTurnActive.Load() {
-						notice = "[interrupted by voice input — the answer above is cut short]"
-					}
 					select {
-					case a.TextResponseChan <- ResponseChunk{Text: notice, Sender: SenderSystem}:
+					case a.TextResponseChan <- ResponseChunk{Text: "[june stopped]", Sender: SenderSystem}:
 					default:
 					}
 				}
@@ -728,11 +711,6 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			}
 			// Whether the user is actually saying anything is the one signal that separates a real interruption from everything else that trips the server's voice detector.
 			userSpoke := flushInputTranscript()
-			// Muted means no audio of ours reached the server, so a voice-activity interrupt can only be the room. Ignoring it keeps ambient noise from cutting June off mid-answer in text-only mode.
-			if a.isMuted.Load() {
-				slog.Debug("ignoring barge-in: mic is muted")
-				continue
-			}
 			// Nobody has said anything yet and June's own speaker is audibly running. This is either the room (a ceiling fan produced 47 of these in 17 minutes, every one flushing the audio mid-sentence) or a real interruption whose transcript has not landed yet — the server raises Interrupted on voice detection, and the words follow a few hundred milliseconds later. Hold it open instead of deciding now: the InputTranscription branch above cuts June off if speech arrives inside bargeInConfirmWindow, and nothing happens if it does not.
 			if !userSpoke && a.speaker.CurrentAmplitude() > bargeInEchoAmplitude {
 				pendingBargeIn = time.Now()
@@ -748,13 +726,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			if !userSpoke {
 				continue
 			}
-			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does. A typed turn gets the explicit wording — "you interrupted June" is the wrong story to tell someone who typed the question and never spoke.
-			notice := "[june stopped]"
-			if a.typedTurnActive.Load() {
-				notice = "[interrupted by voice input — the answer above is cut short]"
-			}
+			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does.
 			select {
-			case a.TextResponseChan <- ResponseChunk{Text: notice, Sender: SenderSystem}:
+			case a.TextResponseChan <- ResponseChunk{Text: "[june stopped]", Sender: SenderSystem}:
 			default:
 			}
 			continue
@@ -811,8 +785,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			flushInputTranscript()
 			flushJuneSpeech()
 			flushTurnUsage()
-			// The typed turn (if this was one) is over — a later interruption belongs to whatever comes next. A barge-in still waiting for its transcript goes with it: the turn it would have cut off has already ended on its own.
-			a.typedTurnActive.Store(false)
+			// A barge-in still waiting for its transcript goes with the turn: the turn it would have cut off has already ended on its own.
 			pendingBargeIn = time.Time{}
 			select {
 			case a.TextResponseChan <- ResponseChunk{TurnBoundary: true}:
@@ -822,7 +795,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 
 		// tool calling - check if model wants to use a tool.
 		//
-		// Dispatched to its own goroutine per call: executeTool can block for an arbitrary time (HITL shell_exec waits on approval), and running it inline here used to stall session.Receive() for the duration, backing up the receive buffer and dropping mic frames in audioSendLoop downstream. Now Receive() keeps getting called immediately; the tool's result is sent back later, matched by fc.ID/fc.Name.
+		// Dispatched to its own goroutine per call: executeTool can block for an arbitrary time (open_app waits on a window, a job runs for minutes), and running it inline here used to stall session.Receive() for the duration, backing up the receive buffer and dropping mic frames in audioSendLoop downstream. Now Receive() keeps getting called immediately; the tool's result is sent back later, matched by fc.ID/fc.Name.
 		// One goroutine per MESSAGE, not per call: the calls of one model turn are steps of one plan and run in the order the model gave them. Measured 2026-09-09: click(tab) and press_key Ctrl+W arrived together, the key landed after 62 ms and the click after 666 ms, so the wrong tab closed; click(search box) and type_text arrived together three times and the typing finished before the click landed, so the box stayed empty. Receive() is still never blocked, which is what the goroutine is for.
 		if msg.ToolCall != nil {
 			flushInputTranscript()
@@ -965,7 +938,7 @@ func (a *Agent) runToolCall(ctx context.Context, tracer trace.Tracer, session li
 		Err:           strings.HasPrefix(result, "error"),
 	})
 
-	// The session that spawned this call is gone (e.g. a HITL approval that never arrived before disconnect) — nothing is listening, so skip the write instead of contending writeMu on a session being torn down.
+	// The session that spawned this call is gone (it disconnected while the tool ran) — nothing is listening, so skip the write instead of contending writeMu on a session being torn down.
 	if ctx.Err() != nil {
 		// branch is the one tool worth recovering: it can run tens of seconds across several model round trips, so "session died mid-call" is a real case, not the millisecond non-issue every other tool call is. Persist it so it surfaces at the next handshake instead of vanishing like everything else's dropped response.
 		if fc.Name == "branch" && !strings.HasPrefix(result, "error") {
@@ -1100,7 +1073,7 @@ func (a *Agent) runToolWithNudge(ctx context.Context, session liveSession, fc *g
 	}
 }
 
-// sendToolActivity is a non-blocking send, same drop-on-full pattern as every other Agent channel (TextResponseChan, ErrorChan) — a UI that isn't draining ToolActivityChan must never be able to stall a real tool call.
+// sendToolActivity is a non-blocking send, same drop-on-full pattern as TextResponseChan — a UI that isn't draining ToolActivityChan must never be able to stall a real tool call.
 func (a *Agent) sendToolActivity(ev ToolActivity) {
 	select {
 	case a.ToolActivityChan <- ev:
@@ -1109,17 +1082,6 @@ func (a *Agent) sendToolActivity(ev ToolActivity) {
 }
 
 // micInput wraps one chunk of 24 kHz mono PCM as realtime audio input. It uses the Audio field, which serialises to realtime_input.audio; the Media field serialises to media_chunks, which the Live API deprecated with the gemini-3 models.
-// mutedKeepalive is how often the mic loop sends a chunk of silence while the user is muted. The gemini-3 Live models close a session that has heard no audio from the client for about 150 seconds (measured 2026-09-03: 2m32s across three silent probes, while the 2.5 model stayed open past ten minutes), and an afternoon on mute produced nine drops. A chunk every 60 seconds did not keep it open (closed at 2m51s); a chunk every 10 seconds or every second did (still open at 7 minutes), and a text turn only bought another 150 seconds. Ten seconds is the slowest rate shown to work, at a few audio tokens a minute.
-const mutedKeepalive = 10 * time.Second
-
-// mutedInput decides what the mic loop sends while the user is muted. Input: the length of the mic chunk being dropped and the time since anything was last sent. Output: a chunk of silence of the same length and true once every mutedKeepalive, or nil and false in between.
-func mutedInput(n int, sinceLast time.Duration) ([]byte, bool) {
-	if sinceLast < mutedKeepalive {
-		return nil, false
-	}
-	return make([]byte, n), true
-}
-
 func micInput(pcm []byte) genai.LiveRealtimeInput {
 	return genai.LiveRealtimeInput{Audio: &genai.Blob{Data: pcm, MIMEType: "audio/pcm;rate=24000"}}
 }
@@ -1128,19 +1090,15 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 	otelTracer := obs.GetTracer(ctx, "june.agent")
 	sendCtx, sendSpan := otelTracer.Start(ctx, "Agent.SendLoop")
 	defer sendSpan.End()
-	lastSent := time.Now()
 	for {
 		select {
-		case pcm := <-micChan:
-			if a.isMuted.Load() {
-				chunk, send := mutedInput(len(pcm), time.Since(lastSent))
-				if !send {
-					continue
-				}
-				pcm = chunk
+		case pcm, ok := <-micChan:
+			// A closed channel means the microphone stream died (a device unplugged and no replacement came back), so the session is told rather than fed empty audio forever.
+			if !ok {
+				errChan <- errors.New("the microphone stopped")
+				return
 			}
 			input := micInput(pcm)
-			lastSent = time.Now()
 
 			a.writeMu.Lock()
 			err := session.SendRealtimeInput(input)
@@ -1150,10 +1108,6 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 				sendSpan.RecordError(err)
 				sendSpan.SetStatus(codes.Error, "send failed")
 				errChan <- fmt.Errorf("failed to send audio: %w", err)
-				select {
-				case a.ErrorChan <- err:
-				default:
-				}
 				return
 			}
 		case <-sendCtx.Done():
@@ -1162,41 +1116,5 @@ func (a *Agent) audioSendLoop(ctx context.Context, session *genai.Session, micCh
 	}
 }
 
-// textSendLoopRetrieveTimeout bounds how long a typed turn waits on RetrieveRelevant before sending anyway — RetrieveRelevant's embed call (now a local llama-server request over daemon IPC) has no deadline of its own, so a slow/hung call would otherwise delay delivering the user's message to the live session by however long that takes. On expiry RetrieveRelevant's own ctx.Err() just means recalls comes back empty; HybridSearch already degrades the same way when its embed call fails.
-// This is a ceiling, not a wait: the call returns the moment retrieval finishes and cancel() runs on the next line, so a fast retrieval costs nothing. Nothing on the path sleeps — HybridSearch runs the embed and the index query and returns. Checked against the 2026-08-28 log: zero "retrieve relevant timed out or failed" lines across 170 typed turns, and memory tool calls that day ran a 12ms median (63ms for the slowest query_memory), so the budget is never actually spent. The only case that can consume it is a cold llama-server start, which happens once. Left at three seconds for that case rather than tuned down for a cost that is not being paid.
-const textSendLoopRetrieveTimeout = 3 * time.Second
-
-func (a *Agent) textSendLoop(ctx context.Context, session liveSession) {
-	for {
-		select {
-		case text := <-a.TextChan:
-			if text == "" {
-				continue
-			}
-			// flush when barge-in and stop talking immediately
-			// this is voice haha
-			a.speaker.Flush()
-			slog.Debug("sending text to model", "text", text)
-			a.markTypedTurn()
-
-			recallCtx, cancel := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
-			recalls, err := a.brain.RetrieveRelevant(recallCtx, text, 2)
-			cancel()
-			if err != nil {
-				slog.Warn("retrieve relevant timed out or failed, sending without recalls", "error", err)
-			}
-			a.writeMu.Lock()
-			// re-inject "now" (+ any recalls) every turn since the system prompt is frozen at handshake — otherwise a long conversation drifts off the current date. Sent as a second Part in the same turn as the user's text, not a separate SendClientContent call (see buildTurnContent).
-			sendErr := session.SendClientContent(genai.LiveSendClientContentParameters{
-				Turns: buildTurnContent(time.Now(), recalls, text),
-			})
-			a.writeMu.Unlock()
-
-			if sendErr != nil {
-				slog.Error("failed to send text", "error", sendErr)
-			}
-		case <-ctx.Done():
-			return
-		}
-	}
-}
+// recallTimeout bounds how long an ask waits on RetrieveRelevant before sending its turn without recalls. RetrieveRelevant's embed call (a local llama-server request over daemon IPC) has no deadline of its own, so a hung call would otherwise hold the question back for as long as it hangs. On expiry the recalls come back empty, the same way HybridSearch degrades when its embed call fails.
+const recallTimeout = 3 * time.Second

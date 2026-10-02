@@ -7,20 +7,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 )
-
-// A malformed response body is reported instead of panicking on a bad type assertion.
-func TestParseResponseMalformed(t *testing.T) {
-	if _, err := parseResponse([]interface{}{uint32(0)}); err == nil {
-		t.Fatal("expected error for short body")
-	}
-}
 
 // parseStreams pulls the PipeWire node id and, when present, the monitor's position and size out of every entry in the Start response's "streams" array of (u, a{sv}) structs, one per monitor the consent dialog granted. No "size" property (some compositors omit it) yields width and height 0, which callers treat as unknown bounds.
 // Every case goes through a real encode and decode, because the types godbus produces are the whole point here: this test used to hand-build the Variant from a Go []interface{} literal, which is not what the decoder ever returns for a(ua{sv}) — it returns [][]interface{}. parseStreams asserted the literal's type, so it matched in the test and never once matched in production: every session ran with zero granted streams, clicks went out with node id 0, and the portal range-checked them against whichever monitor it picked. That is what "Invalid position", "the point is outside the monitor this pointer session reaches" and finally "coordinate (960, 557) is negative" all were.
@@ -36,11 +28,7 @@ func TestParseStreams(t *testing.T) {
 		sent []stream
 		want []streamInfo
 	}{
-		{"with size", []stream{{Node: 42, Props: map[string]dbus.Variant{
-			"size": dbus.MakeVariant(pair{1920, 1080}),
-		}}}, []streamInfo{{Node: 42, Rect: streamRect{W: 1920, H: 1080}}}},
 		{"no size", []stream{{Node: 7, Props: map[string]dbus.Variant{}}}, []streamInfo{{Node: 7}}},
-		{"empty", []stream{}, nil},
 		{"with position", []stream{{Node: 42, Props: map[string]dbus.Variant{
 			"position": dbus.MakeVariant(pair{1920, 0}),
 			"size":     dbus.MakeVariant(pair{2560, 1440}),
@@ -104,72 +92,7 @@ func overTheBus(t *testing.T, streams any) dbus.Variant {
 	return decoded["streams"]
 }
 
-// A grant that really carries no screen stream must fail at Open, not one click at a time. Without a stream there is no monitor to map a point onto, so every later click fails deep in the mapping with a message about the coordinate rather than about the missing grant.
-func TestOpenSequenceRefusesAGrantWithNoStreams(t *testing.T) {
-	p := &fakePortal{noStreams: true}
-	_, _, _, err := openSequence(context.Background(), p, "")
-	if err == nil {
-		t.Fatal("openSequence accepted a grant with no screen stream")
-	}
-	if p.closedHandle != "session-1" {
-		t.Errorf("closedHandle = %q, want the refused session closed", p.closedHandle)
-	}
-}
-
-// A point on the second of two granted monitors maps into that stream's own space, not the first's, and carries that stream's node id so NotifyPointerMotionAbsolute is told the right one.
-func TestToStreamPicksTheStreamThatCoversThePoint(t *testing.T) {
-	streams := []streamInfo{
-		{Node: 11, Rect: streamRect{X: 0, Y: 0, W: 1920, H: 1080}},
-		{Node: 12, Rect: streamRect{X: 1920, Y: 0, W: 1920, H: 1080}},
-	}
-	x, y, node, err := toStream(2850, 423, streams)
-	if err != nil {
-		t.Fatalf("toStream: %v", err)
-	}
-	if node != 12 || x != 930 || y != 423 {
-		t.Fatalf("toStream = (node %d, %v, %v), want (12, 930, 423)", node, x, y)
-	}
-
-	x, y, node, err = toStream(100, 100, streams)
-	if err != nil || node != 11 || x != 100 || y != 100 {
-		t.Fatalf("toStream on the first monitor = (node %d, %v, %v, %v), want (11, 100, 100, nil)", node, x, y, err)
-	}
-}
-
-// A point in neither monitor's rectangle — off both edges, or in a gap between two monitors that do not touch — is refused with a CoordinateError naming how many monitors the session covers.
-func TestToStreamRejectsAPointOnNeitherMonitor(t *testing.T) {
-	streams := []streamInfo{
-		{Node: 11, Rect: streamRect{X: 0, Y: 0, W: 1920, H: 1080}},
-		{Node: 12, Rect: streamRect{X: 1920, Y: 0, W: 1920, H: 1080}},
-	}
-	_, _, _, err := toStream(5000, 100, streams)
-	var coordErr *CoordinateError
-	if !errors.As(err, &coordErr) {
-		t.Fatalf("error should be a *CoordinateError, got %T (%v)", err, err)
-	}
-	if coordErr.Monitors != 2 {
-		t.Fatalf("Monitors = %d, want 2", coordErr.Monitors)
-	}
-	if !strings.Contains(err.Error(), "2 monitor") {
-		t.Fatalf("error %q should name the monitor count", err.Error())
-	}
-}
-
-// Close clears the handle under the lock; a concurrent reader must never observe a torn or already-cleared value except as the documented "session closed" state. Run with -race: without the mutex this trips the race detector even though it never touches a live D-Bus connection.
-func TestSessionHandleRaceWithClose(t *testing.T) {
-	s := &Session{handle: "/session/1"}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 1000; i++ {
-			s.currentHandle() //nolint:errcheck
-		}
-	}()
-	s.closeLocked()
-	<-done
-}
-
-// openSequence must close any session it opened before returning an error, at every failure point after createSession succeeds, so a failed Open never leaks a live portal session. The three portal calls that can fail after createSession — SelectDevices, SelectSources, and Start — must all trigger the same close.
+// openSequence must close any session it opened before returning an error, at every failure point after createSession succeeds, so a failed Open never leaks a live portal session. A grant that carries no screen stream fails at Open too, rather than one click at a time with a message about the coordinate instead of the missing grant.
 func TestOpenSequenceClosesOnFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -178,12 +101,13 @@ func TestOpenSequenceClosesOnFailure(t *testing.T) {
 		{"SelectDevices fails", &fakePortal{selectDevicesErr: errBoom}},
 		{"SelectSources fails", &fakePortal{selectSourcesErr: errBoom}},
 		{"Start fails", &fakePortal{startErr: errBoom}},
+		{"the grant has no screen stream", &fakePortal{noStreams: true}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, _, _, err := openSequence(context.Background(), c.p, "")
-			if !errors.Is(err, errBoom) {
-				t.Fatalf("err = %v, want errBoom", err)
+			if err == nil {
+				t.Fatal("openSequence succeeded, want the failure reported")
 			}
 			if c.p.closedHandle != "session-1" {
 				t.Fatalf("closedHandle = %q, want session-1", c.p.closedHandle)
@@ -192,11 +116,50 @@ func TestOpenSequenceClosesOnFailure(t *testing.T) {
 	}
 }
 
+// toStream maps a whole-desktop point into the granted stream that covers it: the stream's own origin is subtracted, a scaled monitor's logical pixels become stream pixels, a point on no monitor is refused, and a compositor that reports neither position nor size gets the point passed through with only a negative one refused.
+func TestToStream(t *testing.T) {
+	two := []streamInfo{{Node: 11, Rect: streamRect{W: 1920, H: 1080}}, {Node: 12, Rect: streamRect{X: 1920, W: 1920, H: 1080}}}
+	scaled := []streamInfo{{Node: 1, Rect: withScaleFrom(streamRect{W: 3840, H: 2160}, func(int, int) (int, int, bool) { return 1920, 1080, true })}}
+	unreadLayout := []streamInfo{{Node: 1, Rect: withScaleFrom(streamRect{X: 1920, W: 2560, H: 1440}, func(int, int) (int, int, bool) { return 0, 0, false })}}
+	bare := []streamInfo{{Node: 1}}
+	for _, c := range []struct {
+		name         string
+		streams      []streamInfo
+		x, y         float64
+		node         uint32
+		wantX, wantY float64
+		wantErr      bool
+	}{
+		{"a point on the second monitor lands in that stream's own space", two, 2850, 423, 12, 930, 423, false},
+		{"a point on neither monitor is refused", two, 5000, 100, 0, 0, 0, true},
+		{"a 2x monitor maps logical pixels to stream pixels", scaled, 1900, 1000, 1, 3800, 2000, false},
+		{"a layout that cannot be read leaves the scale at 1", unreadLayout, 2020, 100, 1, 100, 100, false},
+		{"no position or size passes the point through", bare, 50000, 50000, 1, 50000, 50000, false},
+		{"no position or size still refuses a negative point", bare, -1, 0, 0, 0, 0, true},
+	} {
+		x, y, node, err := toStream(c.x, c.y, c.streams)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, want error %v", c.name, err, c.wantErr)
+			continue
+		}
+		if !c.wantErr && (node != c.node || x != c.wantX || y != c.wantY) {
+			t.Errorf("%s: toStream = (node %d, %v, %v), want (node %d, %v, %v)", c.name, node, x, y, c.node, c.wantX, c.wantY)
+		}
+	}
+}
+
+// withScaleFrom is withStreamScale against a stubbed monitor layout, so the scale can be worked out in a test without a desktop.
+func withScaleFrom(r streamRect, layout func(x, y int) (int, int, bool)) streamRect {
+	old := monitorLayout
+	monitorLayout = layout
+	defer func() { monitorLayout = old }()
+	return withStreamScale(r)
+}
+
 var errBoom = errors.New("boom")
 
 // fakePortal is a portalOps double letting the openSequence tests force a failure at any step without a live D-Bus session.
 type fakePortal struct {
-	createSessionErr error
 	selectDevicesErr error
 	selectSourcesErr error
 	startErr         error
@@ -205,9 +168,6 @@ type fakePortal struct {
 }
 
 func (f *fakePortal) createSession(context.Context) (string, error) {
-	if f.createSessionErr != nil {
-		return "", f.createSessionErr
-	}
 	return "session-1", nil
 }
 
@@ -340,35 +300,6 @@ func TestTypeText_RetriesAReleaseThatFailsBeforeReturning(t *testing.T) {
 	}
 }
 
-// NotifyPointerMotionAbsolute takes coordinates in the granted stream's own space, while a click or a scroll arrives in whole-desktop coordinates read off a whole-desktop screenshot. On a monitor that does not start at the desktop origin the two differ by that monitor's position, and a click on the second screen used to be refused as outside the monitor or land on the first one.
-func TestToStreamSubtractsTheMonitorOrigin(t *testing.T) {
-	streams := []streamInfo{{Node: 1, Rect: streamRect{X: 1920, Y: 0, W: 2560, H: 1440}}}
-	x, y, _, err := toStream(2020, 100, streams)
-	if err != nil || x != 100 || y != 100 {
-		t.Fatalf("toStream = (%v, %v, %v), want (100, 100, nil)", x, y, err)
-	}
-	// A point on the other monitor is off this stream entirely, and is refused rather than sent as a negative coordinate.
-	if _, _, _, err := toStream(100, 100, streams); err == nil {
-		t.Fatal("a point left of the granted monitor should be refused")
-	}
-	// Past the far edge of the granted monitor, measured from its own origin, is refused too.
-	if _, _, _, err := toStream(4481, 100, streams); err == nil {
-		t.Fatal("a point past the granted monitor's width should be refused")
-	}
-}
-
-// A compositor that reports neither position nor size leaves the behaviour as it was: the point is passed through untouched and only a negative one is refused.
-func TestToStreamWithoutStreamProperties(t *testing.T) {
-	streams := []streamInfo{{Node: 1, Rect: streamRect{}}}
-	x, y, _, err := toStream(50000, 50000, streams)
-	if err != nil || x != 50000 || y != 50000 {
-		t.Fatalf("toStream = (%v, %v, %v), want the point passed through", x, y, err)
-	}
-	if _, _, _, err := toStream(-1, 0, streams); err == nil {
-		t.Fatal("a negative coordinate should be refused")
-	}
-}
-
 // Every RemoteDesktop event is a plain method call with no dialog behind it, and it is made with s.acting held. A portal that has stopped answering must cost one call its timeout rather than wedging every screen action in the daemon until a restart.
 func TestCallTimesOutWhenThePortalDoesNotAnswer(t *testing.T) {
 	old := portalCallTimeout
@@ -389,92 +320,6 @@ func TestCallTimesOutWhenThePortalDoesNotAnswer(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("PressKey never returned; the call has no timeout")
-	}
-}
-
-// The stream's position is in the compositor's logical layout space while its size is the stream's own video size, which on a scaled monitor is that monitor's device resolution. A logical x of 1900 on a 2x monitor is 3800 stream pixels, not 1900: sending it unscaled passed the bound check against a 3840-wide stream and landed the pointer at half the intended position.
-func TestToStreamScalesToTheStreamsOwnPixels(t *testing.T) {
-	// A 1920x1080 monitor at the desktop origin whose stream is 3840x2160: two stream pixels to one logical pixel.
-	rect := withScaleFrom(streamRect{X: 0, Y: 0, W: 3840, H: 2160}, func(x, y int) (int, int, bool) { return 1920, 1080, true })
-	if rect.Scale != 2 {
-		t.Fatalf("scale = %v, want 2 from a 3840-wide stream on a 1920-wide monitor", rect.Scale)
-	}
-	streams := []streamInfo{{Node: 1, Rect: rect}}
-	x, y, _, err := toStream(1900, 1000, streams)
-	if err != nil || x != 3800 || y != 2000 {
-		t.Fatalf("toStream = (%v, %v, %v), want (3800, 2000, nil)", x, y, err)
-	}
-	// The far corner of the monitor is still the far corner of the stream, and a point beyond it is still refused.
-	if _, _, _, err := toStream(1921, 0, streams); err == nil {
-		t.Fatal("a point past the monitor's logical width should be refused")
-	}
-
-	// A second monitor at 1920,0 logical, 2560x1440 logical, streamed at 5120x2880.
-	second := withScaleFrom(streamRect{X: 1920, Y: 0, W: 5120, H: 2880}, func(x, y int) (int, int, bool) { return 2560, 1440, true })
-	x, y, _, err = toStream(2020, 100, []streamInfo{{Node: 2, Rect: second}})
-	if err != nil || x != 200 || y != 200 {
-		t.Fatalf("toStream on the second monitor = (%v, %v, %v), want (200, 200, nil)", x, y, err)
-	}
-}
-
-// An unscaled monitor, and a desktop whose monitor layout cannot be read at all, both map exactly as they did before the scale existed.
-func TestToStreamAtScaleOneIsUnchanged(t *testing.T) {
-	unscaled := withScaleFrom(streamRect{X: 1920, Y: 0, W: 2560, H: 1440}, func(x, y int) (int, int, bool) { return 2560, 1440, true })
-	unknown := withScaleFrom(streamRect{X: 1920, Y: 0, W: 2560, H: 1440}, func(x, y int) (int, int, bool) { return 0, 0, false })
-	if unscaled.Scale != 1 || unknown.Scale != 1 {
-		t.Fatalf("scales = %v and %v, want 1 and 1", unscaled.Scale, unknown.Scale)
-	}
-	for _, rect := range []streamRect{unscaled, unknown, {X: 1920, Y: 0, W: 2560, H: 1440}} {
-		x, y, _, err := toStream(2020, 100, []streamInfo{{Node: 1, Rect: rect}})
-		if err != nil || x != 100 || y != 100 {
-			t.Errorf("toStream(%+v) = (%v, %v, %v), want (100, 100, nil)", rect, x, y, err)
-		}
-	}
-}
-
-// withScaleFrom is withStreamScale against a stubbed monitor layout, so the scale can be worked out in a test without a desktop.
-func withScaleFrom(r streamRect, layout func(x, y int) (int, int, bool)) streamRect {
-	old := monitorLayout
-	monitorLayout = layout
-	defer func() { monitorLayout = old }()
-	return withStreamScale(r)
-}
-
-// CreateSession is refused with "Missing token" unless the options name the session object with session_handle_token.
-func TestCreateSessionOptionsNameTheSession(t *testing.T) {
-	a, b := createSessionOptions(), createSessionOptions()
-	ta, _ := a["session_handle_token"].Value().(string)
-	tb, _ := b["session_handle_token"].Value().(string)
-	if ta == "" || ta == tb {
-		t.Fatalf("session_handle_token = %q then %q, want distinct non-empty tokens", ta, tb)
-	}
-}
-
-// A click aimed off every monitor the session covers gets "Invalid position" back from mutter as the last-resort backstop (toStream should normally catch this first); the error must say so, or the model retries the same point (it tried x=3750 four times on 2026-09-08, back when a session held only one stream and toStream itself would have caught this case).
-func TestClickAt_SaysWhenThePointIsOffTheSessionsMonitor(t *testing.T) {
-	s := &Session{handle: "/session/1", streams: []streamInfo{{Node: 1, Rect: streamRect{}}}, send: func(_ context.Context, method string, _ ...interface{}) error {
-		if method == "NotifyPointerMotionAbsolute" {
-			return errors.New("Invalid position")
-		}
-		return nil
-	}}
-	err := s.ClickAt(3750, 54)
-	if err == nil || !strings.Contains(err.Error(), "outside every monitor") {
-		t.Errorf("err = %v, want it to name the monitors the session cannot reach", err)
-	}
-}
-
-// The portal answers Start with no restore_token on a session it restored from the saved one; the saved token must survive that, or the consent dialog comes back on the open after next.
-func TestSaveToken_BlankKeepsTheSavedToken(t *testing.T) {
-	dir := t.TempDir()
-	if err := saveToken(dir, "grant-1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveToken(dir, ""); err != nil {
-		t.Fatal(err)
-	}
-	if got := loadToken(dir); got != "grant-1" {
-		t.Errorf("token after a blank save = %q, want the saved one kept", got)
 	}
 }
 

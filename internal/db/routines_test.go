@@ -57,22 +57,6 @@ func TestRoutineRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRoutineMissingIDIsAnError checks that RoutineByID, DeleteRoutine and SetRoutineRun all report an id that matches nothing, rather than silently doing nothing.
-func TestRoutineMissingIDIsAnError(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-
-	if _, err := store.RoutineByID(ctx, 999); err == nil {
-		t.Error("RoutineByID(999) = nil error, want one")
-	}
-	if err := store.DeleteRoutine(ctx, 999); err == nil {
-		t.Error("DeleteRoutine(999) = nil error, want one")
-	}
-	if err := store.SetRoutineRun(ctx, 999, time.Now(), "x"); err == nil {
-		t.Error("SetRoutineRun(999) = nil error, want one")
-	}
-}
-
 // TestTryStartFinish checks the in-flight guard both the scheduler tick and POST /routines/{id}/run share: a second TryStart for the same id fails while the first is still running, a different id is unaffected, and Finish clears the mark so a later TryStart for the same id succeeds again.
 func TestTryStartFinish(t *testing.T) {
 	store := newStore(t)

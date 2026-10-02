@@ -44,6 +44,7 @@ func NewLlamaServerLifecycle(binary, modelPath string, port int, device string) 
 		if err := c.Start(); err != nil {
 			return fmt.Errorf("shadow lifecycle: start %s: %w", binary, err)
 		}
+		util.KillWithDaemon(c)
 		done := make(chan struct{})
 		go func() { c.Wait(); close(done) }()
 

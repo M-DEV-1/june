@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -196,11 +197,6 @@ func (s *Scheduler) succeeded(duty string) {
 	delete(s.retryAfter, duty)
 }
 
-// waitRoutines blocks until every routine run this scheduler has started has finished. Only tests call it: production starts a run and lets the tick return.
-func (s *Scheduler) waitRoutines() {
-	s.running.Wait()
-}
-
 // notifyWait is how long a notify-send call that waits for a button is given before the child process is killed: past an hour nobody is coming to press it, and on a machine with no session bus every unanswered notice otherwise pinned a goroutine and a process until the daemon exited.
 const notifyWait = time.Hour
 
@@ -209,6 +205,11 @@ const notifySendTimeout = 30 * time.Second
 
 // NotifySendAsk posts a notification carrying one button per action and blocks until the user picks one or dismisses it, returning the chosen action's key ("" for a dismissal). Each action is "key=Label"; notify-send prints the key of whatever was clicked. --action implies --wait, so this call is as long-lived as the notification on screen, up to notifyWait.
 func NotifySendAsk(title, body string, actions []string) (string, error) {
+	// A Windows toast cannot hand a pressed button back to this process, so the question is shown as text and counts as dismissed.
+	if runtime.GOOS == "windows" {
+		toast(title, body)
+		return "", nil
+	}
 	args := []string{"-a", "June"}
 	for _, a := range actions {
 		args = append(args, "--action="+a)
@@ -360,6 +361,13 @@ func NotifyAt(icon, title, body, place, id string) {
 	// The notice carries its one button rather than leaving the window to guess: nothing posted this way has a task behind it, so Done and the snoozes would have nothing to act on.
 	n := Notice{Title: title, Body: body, Place: place, ID: id, Kind: noticeKind(icon), Actions: openOnlyActions}
 	if sendNotice(n) {
+		return
+	}
+	// ponytail: Windows gets a text-only toast with no "Read in full", so a long body is cut off after a few lines; open the text in the June window if that matters.
+	if runtime.GOOS == "windows" {
+		if !notifyThroughBus(n) {
+			toast(title, body)
+		}
 		return
 	}
 	if len([]rune(body)) <= longBodyRunes {

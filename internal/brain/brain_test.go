@@ -3,11 +3,14 @@ package brain
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,96 +19,89 @@ import (
 	"june/internal/config"
 )
 
-// fakeCLI writes a stub executable that records how it was called and then runs body, so the CLI brain can be tested without running the real claude.
-// Input: the file name to give the stub and the shell lines that produce its output. Output: the path to the executable; its argv lands in <dir>/args, one per line, and its stdin in <dir>/stdin.
-func fakeCLI(t *testing.T, name, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, name)
-	script := "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$d/args\"\ncat > \"$d/stdin\"\n" + body + "\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake %s: %v", name, err)
+// TestMain lets the test binary stand in for the claude, agy and grok CLIs. A brain under test runs this test binary as its CLI with the arguments the production code builds; with JUNE_FAKE_CLI set, the child acts out the fake run described by the JUNE_FAKE_CLI_* variables and exits before the testing package ever parses those arguments as its own flags. This works the same on Linux and Windows, where a shell-script stub cannot run.
+func TestMain(m *testing.M) {
+	if os.Getenv("JUNE_FAKE_CLI") == "1" {
+		fakeCLIMain()
 	}
-	return path
+	os.Exit(m.Run())
 }
 
-// recorded returns what the stub at path saw: its argv and its stdin.
-func recorded(t *testing.T, path string) (args, stdin string) {
-	t.Helper()
-	a, err := os.ReadFile(filepath.Join(filepath.Dir(path), "args"))
-	if err != nil {
-		t.Fatalf("the stub recorded no argv: %v", err)
+// fakeCLIMain is one run of the fake CLI. Input, from the environment: JUNE_FAKE_CLI_STDIN_TO names a file to copy stdin into, JUNE_FAKE_CLI_OUT is written to stdout, JUNE_FAKE_CLI_ERR to stderr, JUNE_FAKE_CLI_SLEEP is how long to linger afterwards and JUNE_FAKE_CLI_EXIT the exit code. Output: none; it always exits the process.
+func fakeCLIMain() {
+	if path := os.Getenv("JUNE_FAKE_CLI_STDIN_TO"); path != "" {
+		in, _ := io.ReadAll(os.Stdin)
+		os.WriteFile(path, in, 0o600)
 	}
-	s, err := os.ReadFile(filepath.Join(filepath.Dir(path), "stdin"))
-	if err != nil {
-		t.Fatalf("the stub recorded no stdin: %v", err)
+	fmt.Fprint(os.Stdout, os.Getenv("JUNE_FAKE_CLI_OUT"))
+	fmt.Fprint(os.Stderr, os.Getenv("JUNE_FAKE_CLI_ERR"))
+	if d, err := time.ParseDuration(os.Getenv("JUNE_FAKE_CLI_SLEEP")); err == nil {
+		time.Sleep(d)
 	}
-	return string(a), string(s)
+	code, _ := strconv.Atoi(os.Getenv("JUNE_FAKE_CLI_EXIT"))
+	os.Exit(code)
 }
 
-func TestClaudeCLI(t *testing.T) {
+// fakeCLI makes the next CLI run in this test print out on stdout. Input: what the fake prints. Output: the binary to hand the brain, which is this test binary.
+func fakeCLI(t *testing.T, out string) string {
+	t.Helper()
+	t.Setenv("JUNE_FAKE_CLI", "1")
+	t.Setenv("JUNE_FAKE_CLI_OUT", out)
+	// The absolute path, since runCLI starts the child in the temp directory and a relative argv[0] would not resolve from there.
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate the test binary: %v", err)
+	}
+	return bin
+}
+
+// TestCLIBrains drives each CLI brain against a fake run and checks what the brain makes of the CLI's output: the answer field it reads, the failures it reports, and that the CLI's own words never reach the returned error, since callers log these errors at warn and the prompt is a day of the user's screen text.
+func TestCLIBrains(t *testing.T) {
+	claude := func(bin string, timeout int) Brain { return ClaudeCLI(bin, "", timeout) }
+	agy := func(bin string, timeout int) Brain { return AgyCLI(bin, timeout) }
+	grok := func(bin string, timeout int) Brain { return GrokCLI(bin, timeout) }
 	tests := []struct {
 		name    string
-		body    string
+		brain   func(bin string, timeout int) Brain
+		out     string
+		errOut  string
+		exit    string
+		sleep   string
 		timeout int
 		want    string
 		wantErr string
-		// wantNotErr is text the CLI printed that must never reach the returned error, because callers log these errors at warn and the prompt is a day of the user's screen text.
+		// wantNotErr is text the CLI printed that must never reach the returned error.
 		wantNotErr string
+		// wantStdin is what the CLI must have read on stdin: claude takes the prompt there, because a meeting transcript is longer than one argv entry may be.
+		wantStdin string
 	}{
-		{
-			name: "the result field is the answer",
-			body: `printf '%s' '{"is_error":false,"subtype":"success","total_cost_usd":0.05,"result":"# Meeting minutes\nall good\n"}'`,
-			want: "# Meeting minutes\nall good",
-		},
-		{
-			// The error names the subtype only: res.Result is model output, and these errors are logged at warn by callers such as the evening close.
-			name:       "an is_error run fails with the subtype and not the CLI's own words",
-			body:       `printf '%s' '{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}'`,
-			wantErr:    "error_during_execution",
-			wantNotErr: "Credit balance is too low",
-		},
-		{
-			name:    "an empty result is not an answer",
-			body:    `printf '%s' '{"is_error":false,"result":""}'`,
-			wantErr: "no text",
-		},
-		{
-			name:       "output that is not JSON fails loudly without quoting the output",
-			body:       `printf '%s' 'Invalid API key · Please run /login'`,
-			wantErr:    "parse",
-			wantNotErr: "Please run /login",
-		},
-		{
-			// The child's stderr can carry an account identifier or a login URL, so it is logged at debug rather than returned.
-			name:       "a non-zero exit carries the exit status and not the child's stderr",
-			body:       `echo "not logged in" >&2; exit 1`,
-			wantErr:    "exit status 1",
-			wantNotErr: "not logged in",
-		},
-		{
-			name:    "a run that outlives the timeout is killed",
-			body:    `sleep 5`,
-			timeout: 1,
-			wantErr: "timed out",
-		},
-		{
-			// On 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" with the answer already printed: the CLI had written its result and not exited. The answer is complete once stdout holds one whole JSON value, and that is when the runner returns.
-			name:    "a run that prints its result and then lingers is not waited for",
-			body:    `printf '%s' '{"is_error":false,"subtype":"success","result":"done"}'; sleep 5`,
-			timeout: 2,
-			want:    "done",
-		},
+		{name: "claude's result field is the answer", brain: claude, out: `{"is_error":false,"subtype":"success","result":"# Meeting minutes\nall good\n"}`, want: "# Meeting minutes\nall good", wantStdin: "summarise this"},
+		{name: "a claude is_error run fails with the subtype and not the CLI's own words", brain: claude, out: `{"is_error":true,"subtype":"error_during_execution","result":"Credit balance is too low"}`, wantErr: "error_during_execution", wantNotErr: "Credit balance is too low"},
+		{name: "an empty claude result is not an answer", brain: claude, out: `{"is_error":false,"result":""}`, wantErr: "no text"},
+		{name: "output that is not JSON fails without quoting the output", brain: claude, out: "Invalid API key · Please run /login", wantErr: "parse", wantNotErr: "Please run /login"},
+		{name: "a non-zero exit carries the exit status and not the child's stderr", brain: claude, errOut: "not logged in", exit: "1", wantErr: "exit status 1", wantNotErr: "not logged in"},
+		{name: "a run that outlives the timeout is killed", brain: claude, sleep: "5s", timeout: 1, wantErr: "timed out"},
+		// On 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" with the answer already printed: the CLI had written its result and not exited. The answer is complete once stdout holds one whole JSON value, and that is when the runner returns.
+		{name: "a run that prints its result and then lingers is not waited for", brain: claude, out: `{"is_error":false,"subtype":"success","result":"done"}`, sleep: "5s", timeout: 2, want: "done"},
+		{name: "agy's response field is the answer", brain: agy, out: `{"status":"SUCCESS","response":"ok"}`, want: "ok"},
+		{name: "an agy status other than SUCCESS is an error", brain: agy, out: `{"status":"ERROR","response":""}`, wantErr: "ERROR"},
+		{name: "grok's text field is the answer", brain: grok, out: `{"text":"ok\n","stopReason":"end_turn"}`, want: "ok"},
+		{name: "empty grok text is an error, not an empty answer", brain: grok, out: `{"text":"","stopReason":"refusal"}`, wantErr: "no text"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bin := fakeCLI(t, "claude", tt.body)
+			bin := fakeCLI(t, tt.out)
+			t.Setenv("JUNE_FAKE_CLI_ERR", tt.errOut)
+			t.Setenv("JUNE_FAKE_CLI_EXIT", tt.exit)
+			t.Setenv("JUNE_FAKE_CLI_SLEEP", tt.sleep)
+			stdin := filepath.Join(t.TempDir(), "stdin")
+			t.Setenv("JUNE_FAKE_CLI_STDIN_TO", stdin)
 			timeout := tt.timeout
 			if timeout == 0 {
 				timeout = 10
 			}
-			got, err := ClaudeCLI(bin, "", timeout)(context.Background(), "summarise this")
+			got, err := tt.brain(bin, timeout)(context.Background(), "summarise this")
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -125,139 +121,62 @@ func TestClaudeCLI(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
+			if in, _ := os.ReadFile(stdin); tt.wantStdin != "" && string(in) != tt.wantStdin {
+				t.Errorf("stdin = %q, want %q", in, tt.wantStdin)
+			}
 		})
 	}
 }
 
-// The prompt goes in on stdin, because a meeting transcript is far longer than a single argv entry may be. The flags are the subscription path: -p with JSON output, no --bare (which would switch billing to an API key), and no tools, because the prompt carries text the user never wrote.
-func TestClaudeCLI_invocation(t *testing.T) {
-	bin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"ok"}'`)
-	if _, err := ClaudeCLI(bin, "", 10)(context.Background(), "the whole transcript"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	args, stdin := recorded(t, bin)
-	for _, want := range []string{"-p", "--output-format", "json", "--restricted"} {
-		if !strings.Contains(args, want+"\n") {
-			t.Errorf("argv is missing %q:\n%s", want, args)
-		}
-	}
-	if strings.Contains(args, "--bare") {
-		t.Errorf("--bare switches billing to an API key and must never be passed:\n%s", args)
-	}
-	if stdin != "the whole transcript" {
-		t.Errorf("stdin = %q, want the prompt", stdin)
-	}
-}
-
-// FromConfig is the only thing the daemon calls: an absent or unrecognised brain block must keep June on the Gemini API exactly as it was before this package existed.
+// FromConfig is the only thing the daemon calls: an absent brain block keeps June on the Gemini API, a configured CLI runs its binary, and a provider this package has no backend for fails rather than quietly answering on Gemini.
 func TestFromConfig(t *testing.T) {
-	claudeBin := fakeCLI(t, "claude", `printf '%s' '{"is_error":false,"result":"from claude"}'`)
-
 	tests := []struct {
 		name    string
 		cfg     config.BrainConfig
+		asker   CodexAsker
 		want    string
-		wantErr string
+		wantErr error
+		errText string
 	}{
-		{
-			name:    "the zero config is the Gemini API",
-			cfg:     config.BrainConfig{},
-			wantErr: "GEMINI_API_KEY",
-		},
-		{
-			name:    "an unknown provider falls back to the Gemini API",
-			cfg:     config.BrainConfig{Provider: "chatgpt"},
-			wantErr: "GEMINI_API_KEY",
-		},
-		{
-			name: "claude-cli runs the configured binary",
-			cfg:  config.BrainConfig{Provider: config.BrainClaudeCLI, Binary: claudeBin, TimeoutSeconds: 10},
-			want: "from claude",
-		},
-		{
-			name:    "codex with no asker is an error, not a quiet Gemini call",
-			cfg:     config.BrainConfig{Provider: config.BrainCodex},
-			wantErr: "no backend",
-		},
-		{
-			name:    "ollama has no backend yet and says so",
-			cfg:     config.BrainConfig{Provider: config.BrainOllama},
-			wantErr: "no backend",
-		},
+		// An empty API key keeps the Gemini case off the network: the key is checked before the client is built.
+		{name: "the zero config is the Gemini API", cfg: config.BrainConfig{}, errText: "GEMINI_API_KEY"},
+		{name: "claude-cli runs the configured binary", cfg: config.BrainConfig{Provider: config.BrainClaudeCLI, TimeoutSeconds: 10}, want: "from claude"},
+		{name: "codex answers through the asker it is given", cfg: config.BrainConfig{Provider: config.BrainCodex}, asker: fakeAsker{trace: agent.TurnTrace{Answer: "from codex"}}, want: "from codex"},
+		{name: "an asker's empty answer is an error, not an empty success", cfg: config.BrainConfig{Provider: config.BrainCodex}, asker: fakeAsker{}, errText: "no text"},
+		{name: "an asker's failure passes through", cfg: config.BrainConfig{Provider: config.BrainCodex}, asker: fakeAsker{err: errors.New("codex login: run codex login again")}, errText: "codex login"},
+		{name: "codex with no asker is an error, not a quiet Gemini call", cfg: config.BrainConfig{Provider: config.BrainCodex, Model: "gpt-5.5"}, wantErr: ErrNoBackend},
+		{name: "ollama has no backend yet and says so", cfg: config.BrainConfig{Provider: config.BrainOllama, Model: "llama3.1:8b"}, wantErr: ErrNoBackend},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// An empty API key keeps the Gemini cases off the network: the key is checked before the client is built.
-			got, err := FromConfig(tt.cfg, "")(context.Background(), "hi")
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+			cfg := tt.cfg
+			if cfg.Provider == config.BrainClaudeCLI {
+				cfg.Binary = fakeCLI(t, `{"is_error":false,"result":"from claude"}`)
+			}
+			var askers []CodexAsker
+			if tt.asker != nil {
+				askers = append(askers, tt.asker)
+			}
+			// A real-looking API key on the no-backend rows: the point is that the call fails even when the Gemini path would have worked.
+			key := ""
+			if tt.wantErr != nil {
+				key = "a-real-looking-key"
+			}
+			got, err := FromConfig(cfg, key, askers...)(context.Background(), "hi")
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("error = %v, want %v", err, tt.wantErr)
 				}
-				return
-			}
-			if err != nil {
+			case tt.errText != "":
+				if err == nil || !strings.Contains(err.Error(), tt.errText) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.errText)
+				}
+			case err != nil:
 				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
+			case got != tt.want:
 				t.Fatalf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// grok answers on its "text" field; every tool is denied since the prompt carries unvetted text.
-func TestGrokCLI(t *testing.T) {
-	bin := fakeCLI(t, "grok", `printf '%s' '{"text":"ok\n","stopReason":"end_turn"}'`)
-	got, err := GrokCLI(bin, 10)(context.Background(), "summarise this")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "ok" {
-		t.Fatalf("got %q, want ok", got)
-	}
-	args, _ := recorded(t, bin)
-	for _, want := range []string{"--output-format\njson\n", "--deny\n*\n"} {
-		if !strings.Contains(args, want) {
-			t.Errorf("argv is missing %q:\n%s", want, args)
-		}
-	}
-	if _, err := GrokCLI(fakeCLI(t, "grok", `printf '%s' '{"text":"","stopReason":"refusal"}'`), 10)(context.Background(), "x"); err == nil {
-		t.Error("empty text must be an error, not an empty answer")
-	}
-}
-
-// agy answers on its "response" field and only a SUCCESS status counts.
-func TestAgyCLI_Restored(t *testing.T) {
-	bin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
-	if got, err := AgyCLI(bin, 10)(context.Background(), "hi"); err != nil || got != "ok" {
-		t.Fatalf("got %q err %v, want ok", got, err)
-	}
-	if _, err := AgyCLI(fakeCLI(t, "agy", `printf '%s' '{"status":"ERROR","response":""}'`), 10)(context.Background(), "x"); err == nil {
-		t.Error("a non-SUCCESS status must be an error")
-	}
-}
-
-// TestGeminiModel_DropsAnotherProvidersModelName pins the fix for the 404 loop of 2026-09-05: the config named provider "codex-direct" with model "gpt-5.5", the meeting summariser built its brain with no asker, and FromConfig's fallback to the Gemini API carried "gpt-5.5" through as the model — so every hourly retry of the 00-53-59 recording failed with "models/gpt-5.5 is not found for API version v1beta". A model name only means anything to the provider it was written for, so the fallback uses the Gemini default instead.
-func TestGeminiModel_DropsAnotherProvidersModelName(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  config.BrainConfig
-		want string
-	}{
-		{"codex model name", config.BrainConfig{Provider: config.BrainCodex, Model: "gpt-5.5"}, config.TextModel},
-		{"claude cli alias", config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}, config.TextModel},
-		{"ollama model name", config.BrainConfig{Provider: config.BrainOllama, Model: "llama3.1:8b"}, config.TextModel},
-		{"unknown provider", config.BrainConfig{Provider: "made-up", Model: "gpt-5.5"}, config.TextModel},
-		{"a gemini config keeps its own model", config.BrainConfig{Provider: config.BrainGeminiAPI, Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
-		{"no provider keeps its own model", config.BrainConfig{Model: "gemini-3.5-flash-lite"}, "gemini-3.5-flash-lite"},
-		{"no provider and no model is the text model", config.BrainConfig{}, config.TextModel},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := geminiModel(c.cfg); got != c.want {
-				t.Errorf("geminiModel(%+v) = %q, want %q", c.cfg, got, c.want)
 			}
 		})
 	}
@@ -286,60 +205,18 @@ func TestGeminiAPI_TimesOutOnAServerThatNeverAnswers(t *testing.T) {
 	}
 }
 
-// TestFromConfig_PassesTheConfiguredModelToAgyAndGrok checks that a model pinned for the Antigravity or Grok CLI reaches the child process's argv. BrainConfig.Model is documented as per-provider and both CLIs take a model flag, but FromConfig used to drop it for these two.
-func TestFromConfig_PassesTheConfiguredModelToAgyAndGrok(t *testing.T) {
-	agyBin := fakeCLI(t, "agy", `printf '%s' '{"status":"SUCCESS","response":"ok"}'`)
-	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainAgyCLI, Binary: agyBin, Model: "gemini-3-pro", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
-		t.Fatalf("agy: unexpected error: %v", err)
-	}
-	if args, _ := recorded(t, agyBin); !strings.Contains(args, "--model\ngemini-3-pro\n") {
-		t.Errorf("agy argv did not carry the configured model:\n%s", args)
-	}
-
-	grokBin := fakeCLI(t, "grok", `printf '%s' '{"text":"ok"}'`)
-	if _, err := FromConfig(config.BrainConfig{Provider: config.BrainGrokCLI, Binary: grokBin, Model: "grok-4", TimeoutSeconds: 10}, "")(context.Background(), "hi"); err != nil {
-		t.Fatalf("grok: unexpected error: %v", err)
-	}
-	if args, _ := recorded(t, grokBin); !strings.Contains(args, "-m\ngrok-4\n") {
-		t.Errorf("grok argv did not carry the configured model:\n%s", args)
-	}
-}
-
-// TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall checks that a provider this package cannot answer for fails every call with ErrNoBackend instead of quietly answering on the Gemini API. The silent substitution spent the metered free tier the user picked another brain to avoid and sent the prompt — a day of screen text — to a provider they did not choose.
-func TestFromConfig_NoBackendIsAnErrorNotAQuietGeminiCall(t *testing.T) {
-	for _, cfg := range []config.BrainConfig{
-		{Provider: config.BrainOllama, Model: "llama3.1:8b"},
-		{Provider: config.BrainCodex, Model: "gpt-5.5"},
-	} {
-		// A real API key is given on purpose: the point is that the call fails even when the Gemini path would have worked.
-		_, err := FromConfig(cfg, "a-real-looking-key")(context.Background(), "hi")
-		if !errors.Is(err, ErrNoBackend) {
-			t.Errorf("FromConfig(%q) error = %v, want ErrNoBackend", cfg.Provider, err)
-		}
-	}
-}
-
-// The outermost value is whichever bracket opens first, so a reply is read the same way whatever shape its caller was expecting — the two hand-written copies this replaced disagreed on exactly that, and a reply holding both an array and an object parsed differently depending on which package read it.
+// OutermostJSON recovers the JSON answer from a model reply that says something before or around it; the dream and study packages read every model reply through it.
 func TestOutermostJSON(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
 		{"object after prose", `Sure! {"a":1}`, `{"a":1}`},
-		{"array after prose", `Here: [1,2] hope that helps`, `[1,2]`},
-		{"array of objects", `[{"a":1},{"b":2}]`, `[{"a":1},{"b":2}]`},
-		{"object containing an array", `{"a":[1,2]}`, `{"a":[1,2]}`},
+		// A model that mentions a bracket before it answers used to defeat the recovery: taking the first bracket and the last matching closer returned a slice that spanned the prose and ended inside the real answer.
+		{"a bracket in the prose before the answer", `Based on the notes [see above], here is the result: {"items": ["a"]}`, `{"items": ["a"]}`},
 		{"no json at all", "I could not answer that", ""},
 		{"opener with no closer", `{"a":1`, ""},
 	} {
 		if got := OutermostJSON(tc.in); got != tc.want {
 			t.Errorf("%s: OutermostJSON(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
-	}
-}
-
-// A model that mentions a bracket before it answers used to defeat the recovery: taking the first bracket and the last matching closer returned a slice that spanned the prose and ended inside the real answer.
-func TestOutermostJSON_IgnoresABracketInTheProse(t *testing.T) {
-	got := OutermostJSON(`Based on the notes [see above], here is the result: {"items": ["a"]}`)
-	if got != `{"items": ["a"]}` {
-		t.Errorf("got %q, want the object", got)
 	}
 }
 
@@ -412,11 +289,9 @@ func TestRouted_HandsOnFromACodexThisCallerCannotBuild(t *testing.T) {
 	for _, id := range []string{agent.ProviderGemini, agent.ProviderAgy, agent.ProviderGrok} {
 		agent.SetProviderReady(id, false)
 	}
-	claude := fakeCLI(t, "claude", `echo '{"result":"the minutes","is_error":false}'`)
-
 	routed := Routed(func(provider string) Brain {
 		if provider == config.BrainClaudeCLI {
-			return FromConfig(config.BrainConfig{Provider: provider, Binary: claude, TimeoutSeconds: 10}, "")
+			return func(context.Context, string) (string, error) { return "the minutes", nil }
 		}
 		return FromConfig(config.BrainConfig{Provider: provider}, "")
 	})

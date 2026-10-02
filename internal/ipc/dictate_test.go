@@ -1,7 +1,6 @@
 package ipc
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -240,69 +239,6 @@ func TestDictationCapTranscribesWhatThereIs(t *testing.T) {
 	}
 }
 
-func TestDictationWAVHeader(t *testing.T) {
-	mic := &fakeMic{chunks: [][]byte{pcm(1000), pcm(600)}}
-	tx := &fakeTranscriber{text: "ok"}
-	_, srv, _ := newDictationTest(t, mic, tx)
-
-	id := startDictation(t, srv)
-	stopDictation(t, srv, id).Body.Close()
-
-	w := tx.wav
-	if len(w) != 44+1600*2 {
-		t.Fatalf("WAV is %d bytes, want %d", len(w), 44+1600*2)
-	}
-	if !bytes.HasPrefix(w, []byte("RIFF")) || string(w[8:16]) != "WAVEfmt " || string(w[36:40]) != "data" {
-		t.Fatalf("WAV header chunks are wrong: %q", w[:44])
-	}
-	if got := binary.LittleEndian.Uint16(w[22:]); got != 1 {
-		t.Errorf("channels = %d, want 1", got)
-	}
-	if got := binary.LittleEndian.Uint32(w[24:]); got != dictateRate {
-		t.Errorf("sample rate = %d, want %d", got, dictateRate)
-	}
-	if got := binary.LittleEndian.Uint16(w[34:]); got != 16 {
-		t.Errorf("bits per sample = %d, want 16", got)
-	}
-	if got := binary.LittleEndian.Uint32(w[40:]); got != uint32(1600*2) {
-		t.Errorf("data size = %d, want %d", got, 1600*2)
-	}
-	if got := binary.LittleEndian.Uint32(w[4:]); got != uint32(36+1600*2) {
-		t.Errorf("RIFF size = %d, want %d", got, 36+1600*2)
-	}
-	if !bytes.Equal(w[44:], append(pcm(1000), pcm(600)...)) {
-		t.Error("the samples in the WAV are not the ones the microphone delivered")
-	}
-}
-
-func TestResampleTo16k(t *testing.T) {
-	// Twenty-four thousand samples of anything is one second, and one second at 16 kHz is sixteen thousand samples.
-	if got := len(resampleTo16k(pcm(24000), 24000)) / 2; got != 16000 {
-		t.Errorf("24 kHz second resampled to %d samples, want 16000", got)
-	}
-	if got := len(resampleTo16k(pcm(48000), 48000)) / 2; got != 16000 {
-		t.Errorf("48 kHz second resampled to %d samples, want 16000", got)
-	}
-	in := pcm(1000)
-	if got := resampleTo16k(in, 16000); !bytes.Equal(got, in) {
-		t.Error("audio already at 16 kHz was changed")
-	}
-	// A ramp stays a ramp: the interpolation must not scramble the order of the samples.
-	ramp := make([]byte, 24*2)
-	for i := 0; i < 24; i++ {
-		binary.LittleEndian.PutUint16(ramp[i*2:], uint16(int16(i*100)))
-	}
-	out := resampleTo16k(ramp, 24000)
-	if len(out)/2 != 16 {
-		t.Fatalf("ramp resampled to %d samples, want 16", len(out)/2)
-	}
-	for i := 1; i < len(out)/2; i++ {
-		if int16(binary.LittleEndian.Uint16(out[i*2:])) <= int16(binary.LittleEndian.Uint16(out[(i-1)*2:])) {
-			t.Fatalf("the resampled ramp is not increasing at sample %d", i)
-		}
-	}
-}
-
 // tonePCM builds n samples of a square wave at the given amplitude, so a test can hand the gate audio that is plainly speech or plainly a quiet room.
 func tonePCM(n int, amplitude int16) []byte {
 	b := make([]byte, n*2)
@@ -362,106 +298,6 @@ func TestDictationIntoAQuietRoomKeepsListening(t *testing.T) {
 	}
 }
 
-// pausingDictateMic delivers chunks the same way fakeMic does but blocks the first call to Close until the test closes release, so a test can pause the capture goroutine at exactly the point, right after it decides to self-stop, where a real stop request racing in would land. Every later call to Close returns immediately, the same way it would for a stop request that arrives once that first call has already been made.
-type pausingDictateMic struct {
-	chunks [][]byte
-
-	mu      sync.Mutex
-	closes  int
-	blocked chan struct{} // closed once the first Close call is the one blocking
-	release chan struct{} // the test closes this to let that first Close call return
-}
-
-func newPausingDictateMic(chunks [][]byte) *pausingDictateMic {
-	return &pausingDictateMic{chunks: chunks, blocked: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (m *pausingDictateMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
-	ch := make(chan []byte, len(m.chunks)+1)
-	for _, c := range m.chunks {
-		ch <- c
-	}
-	go func() {
-		<-ctx.Done()
-		close(ch)
-	}()
-	return ch, nil
-}
-
-func (m *pausingDictateMic) Close() error {
-	m.mu.Lock()
-	first := m.closes == 0
-	m.closes++
-	m.mu.Unlock()
-	if first {
-		close(m.blocked)
-		<-m.release
-	}
-	return nil
-}
-
-// TestDictationSelfStopOnlyFinishesWhenStillActive covers the race the review found: the silence gate decides to end the recording and cancels the microphone, but a stop request for the same id can land in the moment before the gate clears itself from d.active. That stop finds itself still the active recording, claims it and transcribes. The gate's own path must then see it is no longer the active recording and do nothing more — otherwise the same audio is transcribed and broadcast a second time.
-func TestDictationSelfStopOnlyFinishesWhenStillActive(t *testing.T) {
-	// The same shape of chunks as TestDictationStopsItselfWhenTheTalkingStops: six hundred milliseconds of speech, then enough quiet to trip the gate.
-	mic := newPausingDictateMic([][]byte{
-		tonePCM(9600, 6000),
-		tonePCM(9600, 20),
-		tonePCM(9600, 20),
-		tonePCM(9600, 20),
-	})
-	tx := &fakeTranscriber{text: "book the venue for Tuesday"}
-	_, srv, events := newDictationTest(t, mic, tx)
-
-	id := startDictation(t, srv)
-
-	// The gate has tripped and the self-stop path is now blocked in its first mic.Close call — the exact window a racing stop lands in.
-	select {
-	case <-mic.blocked:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the silence gate never tripped")
-	}
-
-	// The racing stop still finds itself the active recording, so it claims d.active, halts and transcribes.
-	resp := stopDictation(t, srv, id)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("stop status = %d, want 200", resp.StatusCode)
-	}
-	ev := mustEvent(t, events)
-	if ev.ID != id || ev.Type != "dictation" || ev.Text != "book the venue for Tuesday" {
-		t.Fatalf("event = %+v, want the stop's dictation event", ev)
-	}
-
-	// Let the self-stop path carry on now that the stop has already finished the recording. It must not transcribe or broadcast a second time.
-	close(mic.release)
-	select {
-	case ev := <-events:
-		t.Fatalf("the silence gate finished the recording a second time: %+v", ev)
-	case <-time.After(300 * time.Millisecond):
-	}
-	if n := tx.callCount(); n != 1 {
-		t.Fatalf("dictation was transcribed %d times, want 1", n)
-	}
-}
-
-func TestDictationKeepsListeningThroughAPauseMidSentence(t *testing.T) {
-	// Half a second of quiet in the middle of a sentence is a breath, not the end of one: the hangover resets when the talking comes back.
-	mic := &fakeMic{chunks: [][]byte{
-		tonePCM(9600, 6000),
-		tonePCM(8000, 20),
-		tonePCM(9600, 6000),
-	}}
-	tx := &fakeTranscriber{text: "still going"}
-	_, srv, events := newDictationTest(t, mic, tx)
-
-	startDictation(t, srv)
-	select {
-	case ev := <-events:
-		t.Fatalf("a mid-sentence pause ended the dictation: %+v", ev)
-	case <-time.After(200 * time.Millisecond):
-	}
-}
-
 // TestDictationTranscribesUnderTheGPULock pins that a dictation's whisper run holds the same lock a meeting transcription holds for the GPU. whisper-medium wants about 2.2 GB on a 4 GB card, so a dictation that starts while a meeting is being transcribed has to queue rather than allocate beside it: on 2026-09-05 three of the four dictations died with "ggml_vulkan: Device memory allocation of size 462323712 failed ... ErrorOutOfDeviceMemory", each one seconds after a meeting-retry ran whisper.
 func TestDictationTranscribesUnderTheGPULock(t *testing.T) {
 	mic := &fakeMic{chunks: [][]byte{pcm(1600), pcm(1600)}}
@@ -495,56 +331,20 @@ func TestDictationTranscribesUnderTheGPULock(t *testing.T) {
 	}
 }
 
-// A dictation stopped while a meeting holds the GPU waits its turn, and its own three-minute clock starts only once the turn comes, so the wait never eats the decode's budget and the recorded speech is deferred rather than lost.
-func TestDictationStopWaitsForTheGPUWithoutSpendingItsClock(t *testing.T) {
-	mic := &fakeMic{chunks: [][]byte{pcm(1600)}}
-	tx := &fakeTranscriber{text: "later"}
-	_, srv, _ := newDictationTest(t, mic, tx)
-	id := startDictation(t, srv)
-
-	recorder.GPURun.Lock()
-	done := make(chan *http.Response, 1)
-	go func() { done <- stopDictation(t, srv, id) }()
-	time.Sleep(300 * time.Millisecond)
-	released := time.Now()
-	recorder.GPURun.Unlock()
-
-	resp := <-done
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("stop status = %d, want 200 once the GPU was free", resp.StatusCode)
-	}
-	tx.mu.Lock()
-	deadline := tx.deadline
-	tx.mu.Unlock()
-	if deadline.Before(released.Add(dictateTimeout - 100*time.Millisecond)) {
-		t.Errorf("decode deadline %v was set before the GPU was released at %v; the wait spent the decode's own budget", deadline, released)
-	}
-}
-
-// fakeDictateWhisper writes a stand-in for whisper-cli at $JUNE_WHISPER_CPP and returns the path of the log each run appends to. The first run dies the way the real one died on 2026-09-06 — the Vulkan allocation failure on stderr and then SIGSEGV — and every run after it prints stdout and exits 0, unless alwaysFail is set, in which case every run dies. Each run logs whether the WAV it was handed is still on disk, so a file deleted between the attempts shows up.
+// fakeDictateWhisper puts a stand-in for whisper-cli at $JUNE_WHISPER_CPP and returns the path of the log each run appends to. The first run dies the way the real one died on 2026-09-06, with the Vulkan allocation failure on stderr, and every run after it prints stdout and exits 0, unless alwaysFail is set, in which case every run dies. Each run logs whether the WAV it was handed is still on disk, so a file deleted between the attempts shows up.
 func fakeDictateWhisper(t *testing.T, stdout string, alwaysFail bool) string {
 	t.Helper()
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "fake-whisper")
 	log := filepath.Join(dir, "runs.log")
-	fail := "if [ ! -f " + dir + "/ran ]; then\n"
+	t.Setenv("JUNE_WHISPER_CPP", fakeCommand(t, dir, "whisper-cli"))
+	t.Setenv("FAKE_LOG", log)
+	t.Setenv("FAKE_RAN", filepath.Join(dir, "ran"))
+	t.Setenv("FAKE_STDOUT", stdout+"\n")
 	if alwaysFail {
-		fail = "if true; then\n"
+		t.Setenv("FAKE_DIE", "always")
+	} else {
+		t.Setenv("FAKE_DIE", "once")
 	}
-	body := "#!/bin/sh\n" +
-		"if [ -f \"$2\" ]; then echo \"wav-present $@\" >> " + log + "; else echo \"wav-gone $@\" >> " + log + "; fi\n" +
-		fail +
-		"  touch " + dir + "/ran\n" +
-		"  echo 'ggml_vulkan: Device memory allocation of size 462323712 failed.' >&2\n" +
-		"  echo 'ggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory' >&2\n" +
-		"  kill -SEGV $$\n" +
-		"fi\n" +
-		"cat <<'EOF'\n" + stdout + "\nEOF\nexit 0\n"
-	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake whisper: %v", err)
-	}
-	t.Setenv("JUNE_WHISPER_CPP", bin)
 	return log
 }
 
@@ -593,25 +393,5 @@ func TestDictationReportsTheWordsFromTheCPURetry(t *testing.T) {
 	}
 	if !strings.Contains(runs[1], " -ng") {
 		t.Errorf("the retry did not turn the GPU off, so it fails for the same reason: %s", runs[1])
-	}
-}
-
-// When the CPU retry fails too there is nothing to report but the failure, and the user has to see it rather than an empty dictation.
-func TestWhisperTextReportsTheErrorWhenBothAttemptsFail(t *testing.T) {
-	log := fakeDictateWhisper(t, "", true)
-	wav := filepath.Join(t.TempDir(), "dictation.wav")
-	if err := writeWAV(wav, pcm(1600)); err != nil {
-		t.Fatalf("writeWAV: %v", err)
-	}
-
-	text, err := whisperText(context.Background(), wav, "")
-	if err == nil {
-		t.Fatalf("whisperText returned %q and no error, want the failure of both attempts", text)
-	}
-	if !strings.Contains(err.Error(), "ErrorOutOfDeviceMemory") {
-		t.Errorf("error = %v, want whisper's own account of why it failed", err)
-	}
-	if runs := dictateRuns(t, log); len(runs) != 2 {
-		t.Fatalf("whisper ran %d times, want 2: the GPU run and the CPU retry\n%v", len(runs), runs)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,6 +27,14 @@ const windowStopGrace = 3 * time.Second
 // errNoWindow says the desktop window binary could not be found, which is normal on a machine running only the daemon.
 var errNoWindow = errors.New("no desktop window binary found")
 
+// exeSuffix is the ending the OS gives a program's file name: ".exe" on Windows, nothing elsewhere.
+var exeSuffix = func() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}()
+
 // windowBinary finds the desktop window to run. Input: none; it reads JUNE_WINDOW, the daemon's own location, and the current working directory. Output: the path to run, the full list of candidates it checked (so a caller with nothing to run can tell the user exactly where it looked), and errNoWindow when there is none. It looks at JUNE_WINDOW first so a developer can point at any build, then beside the daemon binary as an installed copy would sit, then at the two paths a checkout builds into, then at those same two paths under the working directory — `go build -o june . && ./june` from the repo root leaves the daemon binary sitting next to nothing, but app/src-tauri/target still hangs off the checkout's own working directory.
 func windowBinary() (string, []string, error) {
 	var candidates []string
@@ -42,14 +51,14 @@ func windowBinary() (string, []string, error) {
 	}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		add(filepath.Join(dir, "june-window"))
-		add(filepath.Join(dir, "app", "src-tauri", "target", "release", "june"))
-		add(filepath.Join(dir, "app", "src-tauri", "target", "debug", "june"))
+		add(filepath.Join(dir, "june-window"+exeSuffix))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "release", "june"+exeSuffix))
+		add(filepath.Join(dir, "app", "src-tauri", "target", "debug", "june"+exeSuffix))
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		add(filepath.Join(cwd, "app", "src-tauri", "target", "release", "june"))
-		add(filepath.Join(cwd, "app", "src-tauri", "target", "debug", "june"))
-		if matches, err := filepath.Glob(filepath.Join(cwd, "dist", "*", "june-window")); err == nil {
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "release", "june"+exeSuffix))
+		add(filepath.Join(cwd, "app", "src-tauri", "target", "debug", "june"+exeSuffix))
+		if matches, err := filepath.Glob(filepath.Join(cwd, "dist", "*", "june-window"+exeSuffix)); err == nil {
 			for _, m := range matches {
 				add(m)
 			}
@@ -57,7 +66,8 @@ func windowBinary() (string, []string, error) {
 	}
 	for _, path := range candidates {
 		info, err := os.Stat(path)
-		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		// Windows has no execute bit, so there any file will do.
+		if err != nil || info.IsDir() || (runtime.GOOS != "windows" && info.Mode()&0o111 == 0) {
 			continue
 		}
 		// The daemon binary is named "june" too, so a candidate resolving back to this very process would fork the daemon endlessly.
@@ -92,8 +102,13 @@ func startWindow(ctx context.Context, path string) (*exec.Cmd, error) {
 	cmd.Dir = filepath.Dir(path)
 	// The window is told which process is running it, so quitting from its tray can stop the daemon too and "Quit" means quitting June rather than leaving a headless daemon with no way back.
 	cmd.Env = append(os.Environ(), fmt.Sprintf("JUNE_SUPERVISOR_PID=%d", os.Getpid()))
-	// The window is asked to close rather than killed outright, so it can hide its windows and release the microphone before it goes.
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	// The window is asked to close rather than killed outright, so it can hide its windows and release the microphone before it goes. Windows cannot deliver an interrupt to another process, so there the failed signal goes straight to the kill.
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
 	cmd.WaitDelay = windowStopGrace
 	// Whatever the window prints, above all the overlay's "event stream" lines, goes to window.log beside june.log; without this it went to /dev/null and a drawing that never appeared left nothing to read.
 	if f, err := windowLog(config.DataDir()); err == nil {

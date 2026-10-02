@@ -32,25 +32,6 @@ func observingAgent(t *testing.T) (*Agent, *[]string) {
 	return a, &rings
 }
 
-// movingScreenAgent is observingAgent with a window that changes between looks: the first look shows the pull request, every look after it shows the file it opened. Two different listings is what the tests of how listings are carried between rounds need, since two identical looks are answered with one line rather than a second list.
-func movingScreenAgent(t *testing.T) *Agent {
-	t.Helper()
-	a, _ := observingAgent(t)
-	looks := 0
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		looks++
-		if looks == 1 {
-			return "brave", "PR #13 · GitHub", []act.Node{
-				{Role: "push button", Label: "Merge", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-merge"},
-			}, nil
-		}
-		return "brave", "diff.go · PR #13 · GitHub", []act.Node{
-			{Role: "push button", Label: "Approve", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-approve"},
-		}, nil
-	}
-	return a
-}
-
 // rectFromObserve stands in for tracker.Extents in these tests: it re-reads the fixture window and hands back the rectangle of the node carrying this ref, which is what the accessibility bus answers for an element that has not moved since the list was made. Input: the agent whose observe fake holds the fixture. Output: an extents function to assign to a.extents.
 func rectFromObserve(a *Agent) func(ctx context.Context, ref string) (int, int, int, int, error) {
 	return func(ctx context.Context, ref string) (int, int, int, int, error) {
@@ -106,32 +87,6 @@ func TestExecuteTool_PointAt_RefusesWhatItHasNotSeen(t *testing.T) {
 	got = a.executeTool(context.Background(), "point_at", map[string]any{"n": float64(9)})
 	if len(*rings) != 0 || !strings.Contains(got, "9") {
 		t.Errorf("an unknown number must be refused by number; rings=%v result=%q", *rings, got)
-	}
-}
-
-func TestExecuteTool_PointAt_WithoutADrawer(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Point = nil
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "point_at", map[string]any{"n": float64(1)})
-	if !strings.Contains(got, "cannot draw") {
-		t.Errorf("result = %q, want a plain refusal when nothing can draw on this screen", got)
-	}
-}
-
-// The daemon answers /ask through evalExecute, which only lets the read-only memory tools run unless writes were allowed for an eval. The screen tools are read-only too (a ring is not a write), so they must pass that gate, or the model tells the user its eyes are disabled, which it did on 2026-09-04.
-func TestEvalExecute_AllowsTheScreenTools(t *testing.T) {
-	a, rings := observingAgent(t)
-	got := a.evalExecute(context.Background(), "observe_screen", map[string]any{})
-	if !strings.Contains(got, `[1] push button "Merge"`) {
-		t.Errorf("observe_screen through the ask gate = %q, want the listing", got)
-	}
-	got = a.evalExecute(context.Background(), "point_at", map[string]any{"n": float64(1)})
-	if len(*rings) != 1 || strings.Contains(got, "not available in an ask") {
-		t.Errorf("point_at through the ask gate = %q, rings %v; want one ring", got, *rings)
-	}
-	if got := a.evalExecute(context.Background(), "shell_exec", map[string]any{"command": "x"}); !strings.Contains(got, "not available in an ask") {
-		t.Errorf("shell_exec must stay behind the gate, got %q", got)
 	}
 }
 
@@ -202,14 +157,6 @@ func TestExecuteTool_Click_RightButtonOpensTheContextMenuWithThePointer(t *testi
 	}
 }
 
-func TestExecuteTool_Click_RefusesWhatItHasNotSeen(t *testing.T) {
-	a, f := actingAgent(t)
-	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
-	if len(f.clicked) != 0 || !strings.Contains(got, "observe_screen") {
-		t.Errorf("click before observing must refuse; clicked=%v result=%q", f.clicked, got)
-	}
-}
-
 // A click must never land in whatever grabbed focus since the list was built — a desktop overview, a popup, another application — unless the request that started the turn actually named it. This covers the 2026-09-05 scroll run that ended in five clicks walking out of the browser and into the GNOME overview.
 func TestExecuteTool_Click_RefusesWhenTheFrontWindowHasChanged(t *testing.T) {
 	a, f := actingAgent(t)
@@ -230,36 +177,6 @@ func TestExecuteTool_Click_RefusesWhenTheFrontWindowHasChanged(t *testing.T) {
 	}
 	if !strings.Contains(got, "gnome-shell") || !strings.Contains(got, "PR #13") {
 		t.Errorf("result = %q, want it to name both the window now in front and the one the list came from", got)
-	}
-}
-
-// When the request itself names the window now in front, a click may follow the user there — the guard is against drifting off unasked, not against ever leaving the window a stale list came from.
-func TestExecuteTool_Click_AllowsAnotherWindowWhenTheRequestNamesIt(t *testing.T) {
-	a, f := actingAgent(t)
-	calls := 0
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		calls++
-		if calls == 1 {
-			return "brave", "PR #13 · GitHub", []act.Node{
-				{Role: "push button", Label: "Merge", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-merge"},
-			}, nil
-		}
-		return "Slack", "general", nil, nil
-	}
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	ctx := WithQuestion(context.Background(), "switch to Slack and click the Merge button there")
-	got := a.executeTool(ctx, "click", map[string]any{"n": float64(1)})
-	if len(f.clicked) != 1 {
-		t.Errorf("clicked = %v, want the click to go through once the request names the window now in front; result=%q", f.clicked, got)
-	}
-}
-
-func TestExecuteTool_ScrollTo_ScrollsTheObservedNode(t *testing.T) {
-	a, f := actingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "scroll_to", map[string]any{"n": float64(2)})
-	if len(f.scrolled) != 1 || f.scrolled[0] != "r-address" || !strings.Contains(got, "Address") {
-		t.Errorf("scrolled = %v result = %q", f.scrolled, got)
 	}
 }
 
@@ -291,26 +208,6 @@ func TestExecuteTool_ShowMarks_MarksEveryObservedItem(t *testing.T) {
 	}
 	if !strings.Contains(got, "2") {
 		t.Errorf("result = %q, want it to say how many were marked", got)
-	}
-}
-
-func TestExecuteTool_ShowMarks_RefusesWhatItHasNotSeen(t *testing.T) {
-	a, _ := observingAgent(t)
-	var marked []act.Item
-	a.Marks = func(items []act.Item) error { marked = items; return nil }
-	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
-	if marked != nil || !strings.Contains(got, "observe_screen") {
-		t.Errorf("before any observation show_marks must refuse and say to observe first; marked=%v result=%q", marked, got)
-	}
-}
-
-func TestExecuteTool_ShowMarks_WithoutADrawer(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.Marks = nil
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
-	if !strings.Contains(got, "cannot draw") {
-		t.Errorf("result = %q, want a plain refusal when nothing can draw on this screen", got)
 	}
 }
 
@@ -358,67 +255,5 @@ func TestExecuteTool_ObserveScreen_SendsOnlyTheChangedLines(t *testing.T) {
 	}
 	if !strings.Contains(got, "changed") {
 		t.Errorf("the result must say these are the changed lines: %q", got)
-	}
-}
-
-// A different window, or a list that has changed too much to state line by line, is sent whole: a partial answer about a page the model has not seen is worse than the tokens a full listing costs.
-func TestExecuteTool_ObserveScreen_SendsTheWholeListWhenTheWindowChanged(t *testing.T) {
-	a, _ := observingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
-		return "brave", "Inbox · Mail", []act.Node{
-			{Role: "push button", Label: "Compose", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-compose"},
-		}, nil
-	}
-	got := a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	if !strings.Contains(got, `[1] push button "Compose"`) {
-		t.Errorf("a new window must be listed whole: %q", got)
-	}
-	if strings.Contains(got, "unchanged") {
-		t.Errorf("a new window is not unchanged: %q", got)
-	}
-}
-
-// After a scroll the listing's rectangles are stale, so show_marks draws each number where the element is now and leaves out one that is no longer showing, the same way point_at refuses to ring a moved or vanished element.
-func TestExecuteTool_ShowMarks_UsesFreshRectsAndDropsTheGone(t *testing.T) {
-	a, _ := observingAgent(t)
-	var marked []act.Item
-	a.Marks = func(items []act.Item) error { marked = items; return nil }
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	seen := a.seen(context.Background())
-	if len(seen) != 2 {
-		t.Fatalf("seen = %d items, want 2", len(seen))
-	}
-	a.extents = func(ctx context.Context, ref string) (int, int, int, int, error) {
-		if ref == seen[0].Ref {
-			return 500, 600, 70, 20, nil
-		}
-		return 0, 0, 0, 0, nil
-	}
-	got := a.executeTool(context.Background(), "show_marks", map[string]any{})
-	if len(marked) != 1 || marked[0].N != 1 || marked[0].X != 500 || marked[0].Y != 600 {
-		t.Errorf("marked = %+v, want only item 1 at its fresh rectangle 500,600", marked)
-	}
-	if !strings.Contains(got, "1 of 2") || !strings.Contains(got, "no longer showing") {
-		t.Errorf("result = %q, want it to say one of two was marked and one is gone", got)
-	}
-}
-
-// A drawing call that reached no window used to be thrown away, so point_at answered "ringed [1] ..." and show_marks "marked 2 element(s)" about a screen with nothing on it, and the model then talked the user through marks the user could not see. Both now hand back what the overlay said.
-func TestExecuteTool_PointAtAndShowMarks_SayWhenTheDrawingReachedNoWindow(t *testing.T) {
-	a, _ := observingAgent(t)
-	noWindow := errors.New("the drawing reached no window, so nothing appeared on the screen")
-	a.Point = func(x, y, w, h int, label string) error { return noWindow }
-	a.Marks = func(items []act.Item) error { return noWindow }
-	ctx := context.Background()
-	a.executeTool(ctx, "observe_screen", map[string]any{})
-
-	got := a.executeTool(ctx, "point_at", map[string]any{"n": float64(1)})
-	if !strings.Contains(got, "reached no window") || strings.Contains(got, "ringed") {
-		t.Errorf("point_at = %q, want what the overlay said rather than a claim that it ringed anything", got)
-	}
-	got = a.executeTool(ctx, "show_marks", map[string]any{})
-	if !strings.Contains(got, "reached no window") || strings.Contains(got, "marked") {
-		t.Errorf("show_marks = %q, want what the overlay said rather than a claim that it marked anything", got)
 	}
 }

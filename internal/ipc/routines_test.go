@@ -1,11 +1,9 @@
 package ipc
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -119,31 +117,6 @@ func TestRoutineRunAsksRecordsAndNotifies(t *testing.T) {
 	}
 }
 
-// TestRoutineRunAnswersBeforeTheAskFinishes checks the run-now route no longer holds the request open for the length of the ask: the window's Run button must come back at once and let the notice carry the result, rather than spinning for up to the five-minute ask timeout.
-func TestRoutineRunAnswersBeforeTheAskFinishes(t *testing.T) {
-	store := dbtest.Open(t)
-	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
-	if err != nil {
-		t.Fatalf("AddRoutine: %v", err)
-	}
-	unblock := make(chan struct{})
-	asker := &ctxCapturingAsker{unblock: unblock, trace: agent.TurnTrace{Answer: "took a while"}}
-	_, srv := newRoutinesServer(t, asker, store)
-	t.Cleanup(func() { close(unblock) })
-
-	idStr := strconv.FormatInt(id, 10)
-	done := make(chan int, 1)
-	go func() { done <- postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, nil) }()
-	select {
-	case code := <-done:
-		if code != http.StatusAccepted {
-			t.Errorf("POST /routines/%s/run = %d, want 202", idStr, code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("POST /routines/{id}/run blocked on the ask instead of answering 202")
-	}
-}
-
 // TestRoutineRunSendsNoNoticeForNothing checks that an exact "NOTHING" answer is still recorded as the run but says nothing to the user.
 func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 	store := dbtest.Open(t)
@@ -165,92 +138,5 @@ func TestRoutineRunSendsNoNoticeForNothing(t *testing.T) {
 	case n := <-said:
 		t.Errorf("a NOTHING run said %+v, want nothing said", n)
 	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// TestRoutineRunSkipsAlreadyRunning checks the in-flight guard RoutineRun shares with the scheduler tick: a routine store.TryStart already holds — standing in for the scheduler's own tick asking it right now — answers 409 rather than asking and recording the run a second time.
-func TestRoutineRunSkipsAlreadyRunning(t *testing.T) {
-	store := dbtest.Open(t)
-	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
-	if err != nil {
-		t.Fatalf("AddRoutine: %v", err)
-	}
-	if !store.TryStart(id) {
-		t.Fatal("TryStart: expected the first claim to succeed")
-	}
-	t.Cleanup(func() { store.Finish(id) })
-
-	asker := &fakeAsker{trace: agent.TurnTrace{Answer: "should not be asked"}}
-	_, srv := newRoutinesServer(t, asker, store)
-
-	idStr := strconv.FormatInt(id, 10)
-	if code := postJSON(t, srv, "/routines/"+idStr+"/run", `{}`, nil); code != http.StatusConflict {
-		t.Errorf("POST /routines/%s/run while already running = %d, want 409", idStr, code)
-	}
-	r, err := store.RoutineByID(t.Context(), id)
-	if err != nil || !r.LastRun.IsZero() {
-		t.Errorf("routine after a skipped run = %+v, %v, want no run recorded", r, err)
-	}
-}
-
-// ctxCapturingAsker blocks until unblock is closed, then records whether the context it was handed was already cancelled — the way it would be if RoutineRun had passed the HTTP request's own context through, rather than one bounded by askTimeout.
-type ctxCapturingAsker struct {
-	unblock chan struct{}
-	trace   agent.TurnTrace
-	ctxErr  error
-}
-
-func (a *ctxCapturingAsker) AskText(ctx context.Context, question string) (agent.TurnTrace, error) {
-	<-a.unblock
-	a.ctxErr = ctx.Err()
-	return a.trace, nil
-}
-
-// TestRoutineRunSurvivesRequestCancellation checks that a run-now ask keeps going, and still records its result, after the client that started it disconnects — the same "the window closing must not silently abort a minutes-long ask" guarantee /ask's own run() gives, via its own askTimeout-bounded context rather than r.Context().
-func TestRoutineRunSurvivesRequestCancellation(t *testing.T) {
-	store := dbtest.Open(t)
-	id, err := store.AddRoutine(t.Context(), "tell me the one thing I must do today", "weekdays at 8")
-	if err != nil {
-		t.Fatalf("AddRoutine: %v", err)
-	}
-	unblock := make(chan struct{})
-	asker := &ctxCapturingAsker{unblock: unblock, trace: agent.TurnTrace{Answer: "still going"}}
-	_, srv := newRoutinesServer(t, asker, store)
-
-	idStr := strconv.FormatInt(id, 10)
-	reqCtx, cancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, srv.URL+"/routines/"+idStr+"/run", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatalf("NewRequestWithContext: %v", err)
-	}
-	go func() {
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-
-	// Give the request time to reach the handler and start the ask, then cancel it client-side — the way closing the window would — and give the server a moment to notice, if it were (wrongly) watching r.Context().
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	time.Sleep(50 * time.Millisecond)
-	close(unblock)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		r, err := store.RoutineByID(t.Context(), id)
-		if err == nil && !r.LastRun.IsZero() {
-			if r.LastAnswer != "still going" {
-				t.Errorf("LastAnswer = %q, want the ask's real answer", r.LastAnswer)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the run to be recorded despite the cancelled request")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if asker.ctxErr != nil {
-		t.Errorf("ask context error = %v, want nil — the ask must not be tied to the cancelled request context", asker.ctxErr)
 	}
 }

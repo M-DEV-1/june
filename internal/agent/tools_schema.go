@@ -53,27 +53,6 @@ func toolDefinitions() []*genai.Tool {
 	return []*genai.Tool{{
 		FunctionDeclarations: []*genai.FunctionDeclaration{
 			{
-				Behavior: genai.BehaviorNonBlocking,
-				// TODO: need an approve/suggest feature for these tools
-				Name:        "shell_exec",
-				Description: "Execute a shell command on the user's system. Use powershell syntax on windows, sh on linux/mac. ALWAYS ask for confirmation before running destructive commands (rm, del, format, etc).",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-					Properties: map[string]*genai.Schema{
-						"command": {Type: genai.TypeString, Description: "The shell command to execute"},
-					},
-					Required: []string{"command"},
-				},
-			},
-			{
-				Behavior:    genai.BehaviorNonBlocking,
-				Name:        "read_clipboard",
-				Description: "Read the current contents of the user's clipboard",
-				Parameters: &genai.Schema{
-					Type: genai.TypeObject,
-				},
-			},
-			{
 				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "read_file",
 				Description: "Read the contents of a file on the user's filesystem. Use this to inspect code, configs, or any text file.",
@@ -96,7 +75,7 @@ func toolDefinitions() []*genai.Tool {
 					},
 				},
 			},
-			// The declarations from here to open_url ride on every round of every screen task (see screenRoundTools in ask.go), so each states its rule once and stops; the guidance a screen round also carries is in screenTaskGuidance, and TestScreenRoundDeclarations_StayShort holds the whole set to its byte budget.
+			// The declarations from here to open_url ride on every round of every screen task (see screenRoundTools in ask.go), so each states its rule once and stops; the guidance a screen round also carries is in screenTaskGuidance.
 			{
 				Behavior:    genai.BehaviorNonBlocking,
 				Name:        "observe_screen",
@@ -440,7 +419,7 @@ func toolDefinitions() []*genai.Tool {
 	}}
 }
 
-// liveTools returns every tool exposed to the Live API session: June's own FunctionDeclarations (shell_exec, query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so June can look something up instead of guessing from memory.
+// liveTools returns every tool exposed to the Live API session: June's own FunctionDeclarations (query_memory, save_note, etc.) plus Gemini's native GoogleSearch grounding tool, so June can look something up instead of guessing from memory.
 // Verified live (2026-07-25) that both tool types work together on config.VoiceModel() (gemini-2.5-flash-native-audio-preview-12-2025) — not guaranteed on every Gemini model/endpoint.
 // GoogleSearch calls are grounded server-side by Gemini and never surface as a ToolCall, so they don't show up in ToolActivityChan the way the FunctionDeclarations tools do.
 func liveTools() []*genai.Tool {
@@ -449,10 +428,7 @@ func liveTools() []*genai.Tool {
 
 // liveToolsFor is liveTools for a named Live model. Google Search grounding rides beside the function tools on the 2.5 model; on the 3.x Live models the same pairing closes the session with "You exceeded your current quota" before the first word (probed on 2026-09-02, every other part of the handshake passes), so there it is left out and the model has no web search.
 func liveToolsFor(model string) []*genai.Tool {
-	tools := toolDefinitions()
-	if !HasApprover() {
-		tools = dropApprovalGated(tools)
-	}
+	tools := dropApprovalGated(toolDefinitions())
 	// Flip point for gemini-3.8-live: its docs list Google Search grounding as supported (read 2026-09-17), so once someone dials a real session with grounding sent beside the function tools and it survives past the first word, exempt config.Live38Model from this branch the way thinkingConfigFor already does. Until that probe it stays off, because a 429 closes the whole voice session a quarter second after connect while a missing web search only degrades it.
 	if strings.HasPrefix(model, "gemini-3") {
 		return tools
@@ -460,7 +436,7 @@ func liveToolsFor(model string) []*genai.Tool {
 	return append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 }
 
-// dropApprovalGated returns the tools with every approvalGatedTools declaration taken out, the same shape askTools builds through askAllowedTools. A tool the session cannot actually run must not be declared: the model spends a round finding out, and for these three the finding out is a call that never comes back. Input: the declared tools; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
+// dropApprovalGated returns the tools with every approvalGatedTools declaration taken out, the same shape askTools builds through askAllowedTools. A tool the session cannot actually run must not be declared: the model spends a round finding out. Input: the declared tools; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
 func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
 	out := make([]*genai.Tool, 0, len(tools))
 	for _, tool := range tools {
@@ -480,13 +456,4 @@ func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
 		}
 	}
 	return out
-}
-
-// ToolDeclarations returns the function declarations the live session exposes, the same list liveTools builds. Gemini's native search tool is not included because it has no declaration to hand a non-live model. The trajectory eval in evals/ uses it to give a text-mode model the identical tool surface the voice session has. Input: none. Output: the declarations, in the order the live session sends them.
-func ToolDeclarations() []*genai.FunctionDeclaration {
-	tools := liveTools()
-	if len(tools) == 0 {
-		return nil
-	}
-	return tools[0].FunctionDeclarations
 }

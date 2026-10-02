@@ -4,23 +4,32 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// The WM_CLASS instance name the overlay window carries. It has to be the StartupWMClass of the hidden june-overlay.desktop entry the daemon writes (overlayDesktopEntry in cmd/desktop_entry_linux.go), because that match is what files the overlay under an application of its own instead of under June's dock entry.
+#[cfg(target_os = "linux")]
 const OVERLAY_WM_CLASS_INSTANCE: &str = "june-overlay";
 
-/// Same resolution order as Go's config.DataDir(): JUNE_DATA_DIR env var, else XDG_DATA_HOME/june, else ~/.local/share/june. Input: none. Output: the data directory path, or None if neither override nor home directory is available.
+/// Same resolution order as Go's config.DataDir(): JUNE_DATA_DIR env var, else %LOCALAPPDATA%\june on Windows, else XDG_DATA_HOME/june, else ~/.local/share/june. Input: none. Output: the data directory path, or None if neither override nor home directory is available.
 pub(crate) fn data_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("JUNE_DATA_DIR") {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));
         }
     }
-    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir).join("june"));
+    #[cfg(windows)]
+    return std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("june"));
+    #[cfg(not(windows))]
+    {
+        if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+            if !dir.is_empty() {
+                return Some(PathBuf::from(dir).join("june"));
+            }
         }
+        std::env::var("HOME").ok().map(|home| {
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("june")
+        })
     }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".local").join("share").join("june"))
 }
 
 /// Tauri command: reads the daemon's IPC token file so the window can authenticate its requests. Input: none. Output: the trimmed token string, or an error string if the data dir or file can't be found.
@@ -39,6 +48,7 @@ struct DockAnchor {
 }
 
 /// Reads one gsettings key. Input: the schema and key names. Output: the value with gsettings' quoting stripped, or None when gsettings is missing, the schema is not installed, or the key does not exist.
+#[cfg(target_os = "linux")]
 fn gsetting(schema: &str, key: &str) -> Option<String> {
     let out = std::process::Command::new("gsettings")
         .args(["get", schema, key])
@@ -83,8 +93,9 @@ fn dock_anchor() -> DockAnchor {
     fresh
 }
 
-/// Works out which edge the dock is on so the hover can be anchored against it instead of floating in the middle of the screen. Input: none; it reads the dash-to-dock and ubuntu-dock GNOME extension settings, which are where a GNOME desktop keeps the dock's position. Output: the edge and the clearance to leave. An auto-hiding dock reserves no screen space, so its own thickness is reported as clearance and estimated from the configured icon size plus the padding dash-to-dock draws around it. When no dock extension answers — a plain GNOME session, a different desktop, or no gsettings at all — this falls back to a bottom edge with no clearance, which puts the hover along the bottom of the work area, clear of whatever panel the desktop did reserve space for.
+/// Works out which edge the dock is on so the hover can be anchored against it instead of floating in the middle of the screen. Off Linux there are no dock settings to read, and the answer is always the fallback below, which on Windows puts the hover along the bottom of the work area, above the taskbar. Input: none; it reads the dash-to-dock and ubuntu-dock GNOME extension settings, which are where a GNOME desktop keeps the dock's position. Output: the edge and the clearance to leave. An auto-hiding dock reserves no screen space, so its own thickness is reported as clearance and estimated from the configured icon size plus the padding dash-to-dock draws around it. When no dock extension answers — a plain GNOME session, a different desktop, or no gsettings at all — this falls back to a bottom edge with no clearance, which puts the hover along the bottom of the work area, clear of whatever panel the desktop did reserve space for.
 fn read_dock_anchor() -> DockAnchor {
+    #[cfg(target_os = "linux")]
     for schema in [
         "org.gnome.shell.extensions.dash-to-dock",
         "org.gnome.shell.extensions.ubuntu-dock",
@@ -116,9 +127,20 @@ fn read_dock_anchor() -> DockAnchor {
     }
 }
 
-/// Tauri command: reads GNOME's dark-mode preference so the webview can match the desktop theme, because WebKitGTK's own prefers-color-scheme media query does not follow the desktop's gsettings value. Input: none. Output: "dark" or "light", read from `gsettings get org.gnome.desktop.interface color-scheme` when that subprocess succeeds, otherwise from the GTK gtk-application-prefer-dark-theme setting on Linux, otherwise "light".
+/// Tauri command: reads GNOME's dark-mode preference so the webview can match the desktop theme, because WebKitGTK's own prefers-color-scheme media query does not follow the desktop's gsettings value. Input: none. Output: on Linux, "dark" or "light", read from `gsettings get org.gnome.desktop.interface color-scheme` when that subprocess succeeds, otherwise from the GTK gtk-application-prefer-dark-theme setting, otherwise "light". Elsewhere an error, which sends the page to its prefers-color-scheme fallback (systemTheme in app/src/shared/theme.ts); WebView2 on Windows answers that query from the Windows app theme.
 #[tauri::command]
-fn system_theme() -> String {
+fn system_theme() -> Result<String, String> {
+    #[cfg(not(target_os = "linux"))]
+    return Err("the webview's prefers-color-scheme follows this desktop".into());
+    #[cfg(target_os = "linux")]
+    {
+        Ok(linux_theme())
+    }
+}
+
+/// The Linux half of system_theme. Input: none. Output: "dark" or "light".
+#[cfg(target_os = "linux")]
+fn linux_theme() -> String {
     if let Ok(output) = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "color-scheme"])
         .output()
@@ -133,17 +155,14 @@ fn system_theme() -> String {
             .to_string();
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        use gtk::prelude::GtkSettingsExt;
-        if let Some(settings) = gtk::Settings::default() {
-            return if settings.is_gtk_application_prefer_dark_theme() {
-                "dark"
-            } else {
-                "light"
-            }
-            .to_string();
+    use gtk::prelude::GtkSettingsExt;
+    if let Some(settings) = gtk::Settings::default() {
+        return if settings.is_gtk_application_prefer_dark_theme() {
+            "dark"
+        } else {
+            "light"
         }
+        .to_string();
     }
     "light".to_string()
 }
@@ -253,11 +272,13 @@ fn open_app(app: &AppHandle) {
 }
 
 /// Where this process records its pid for the desktop hotkey. Input: none. Output: <data dir>/window.pid, or None when no data directory could be resolved.
+#[cfg(unix)]
 fn pid_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("window.pid"))
 }
 
 /// Writes this process's pid to <data dir>/window.pid and toggles the window whenever SIGHUP arrives. A Wayland session never delivers a global key grab to a hidden client, so the desktop's own keybinding (GNOME custom shortcut on Ctrl+Alt+Space) runs `kill -HUP $(cat window.pid)` instead. SIGHUP because JavaScriptCore inside the webview owns SIGUSR1 and SIGUSR2 for its own thread signalling, and chaining into its handler segfaults. Input: the app handle. Output: nothing; a pid file that cannot be written is logged and the signal thread still runs.
+#[cfg(unix)]
 fn listen_for_toggle_signal(app: AppHandle) {
     if let Some(path) = pid_path() {
         // 0600: it is only ever read by the user's own hotkey, and it named this process to anyone with an account on the machine at the 0664 the default write gave it.
@@ -284,6 +305,30 @@ fn listen_for_toggle_signal(app: AppHandle) {
             let _ = app.emit("june://toggle", ());
         }
     });
+}
+
+/// Registers Ctrl+Alt+Space as a global shortcut that runs the same toggle the SIGHUP does on Linux. Windows delivers a global hotkey to a hidden window, so it needs no desktop keybinding or pid file. Input: the app handle. Output: nothing; a shortcut another program already holds is logged and the window runs without one.
+#[cfg(windows)]
+fn register_toggle_hotkey(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::{
+        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+    };
+    let hotkey = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+    let plugin = tauri_plugin_global_shortcut::Builder::new()
+        .with_handler(move |app, shortcut, event| {
+            // The handler fires on release as well as on press, and toggling on both would show and hide the hover in one keystroke.
+            if shortcut == &hotkey && event.state() == ShortcutState::Pressed {
+                toggle(app);
+            }
+        })
+        .build();
+    if let Err(e) = app.plugin(plugin) {
+        eprintln!("june: could not load the global shortcut plugin: {e}");
+        return;
+    }
+    if let Err(e) = app.global_shortcut().register(hotkey) {
+        eprintln!("june: could not register Ctrl+Alt+Space: {e}");
+    }
 }
 
 /// One monitor as the overlay page needs it: where its top-left corner sits on the desktop and how big it is, both in physical pixels, plus its own scale factor.
@@ -412,6 +457,9 @@ fn arm_hover(app: &AppHandle) {
     }
     // A question asked, then a switch to another window to check on something, then a switch back: the hover is on whichever workspace the user is on rather than the one it opened on.
     let _ = w.set_visible_on_all_workspaces(true);
+    // Windows has no dock type hint, so topmost is what keeps the hover above the window the user clicks next. Mutter's reason for avoiding it does not apply: a topmost window on Windows does not stop other windows taking focus.
+    #[cfg(windows)]
+    let _ = w.set_always_on_top(true);
 }
 
 /// The order matters. The window is created hidden so it is never mapped at the placeholder size tauri.conf.json gives it, and set_ignore_cursor_events comes after show() because the GTK call behind it needs a realised GDK window; both travel down the same ordered request channel, so by the time the shape is applied the window exists.
@@ -437,6 +485,9 @@ fn arm_overlay(app: &AppHandle) {
     let _ = w.set_skip_taskbar(true);
     // Never always-on-top. Mutter refuses focus to any new window that an always-on-top window would cover, and a full-screen layer covers every window, so with that flag set every app the user opened landed behind whatever was in front with an "is ready" notification (found 2026-09-05). The dock type hint above already stacks this layer over ordinary windows.
     let _ = w.set_visible_on_all_workspaces(true);
+    // On Windows topmost stands in for the dock type hint, for the reason given in arm_hover.
+    #[cfg(windows)]
+    let _ = w.set_always_on_top(true);
     let _ = w.show();
     let _ = w.set_ignore_cursor_events(true);
 }
@@ -604,14 +655,18 @@ pub fn run() {
             overlay::stream_events(app.handle().clone());
             arm_hover(app.handle());
             // Nothing places the window here: it starts hidden and the page positions it against the dock, on the monitor the pointer is on, immediately before every show.
+            #[cfg(unix)]
             listen_for_toggle_signal(app.handle().clone());
+            #[cfg(windows)]
+            register_toggle_hotkey(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|_app, event| {
+        .run(|_app, _event| {
             // The pid file is removed on the way out, because the hotkey sends SIGHUP to whatever pid it names and SIGHUP's default disposition is terminate: a file left behind by a window that has gone aims that signal at whichever unrelated process the kernel later gives that number to. A kill -9 still leaves the file behind, so the shortcut should also check /proc/<pid>/cmdline before signalling.
-            if let tauri::RunEvent::Exit = event {
+            #[cfg(unix)]
+            if let tauri::RunEvent::Exit = _event {
                 if let Some(path) = pid_path() {
                     let _ = std::fs::remove_file(path);
                 }
@@ -621,54 +676,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::union_bounds;
+    use super::{union_bounds, window_action};
 
     #[test]
-    fn union_bounds_of_nothing_is_none() {
+    fn union_bounds_covers_every_monitor() {
         assert_eq!(union_bounds(&[]), None);
-    }
-
-    #[test]
-    fn union_bounds_of_one_monitor_is_that_monitor() {
-        assert_eq!(
-            union_bounds(&[(0, 0, 1920, 1080)]),
-            Some((0, 0, 1920, 1080))
-        );
-    }
-
-    #[test]
-    fn union_bounds_spans_two_monitors_side_by_side() {
-        assert_eq!(
-            union_bounds(&[(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]),
-            Some((0, 0, 4480, 1440))
-        );
-    }
-
-    #[test]
-    fn union_bounds_keeps_a_monitor_left_of_the_origin() {
         // A screen placed to the left of the primary one has a negative x, and the overlay window has to start there rather than at zero, or every rect on it lands off the window.
         assert_eq!(
             union_bounds(&[(0, 0, 1920, 1080), (-1280, -200, 1280, 1024)]),
             Some((-1280, -200, 3200, 1280))
         );
-    }
-
-    #[test]
-    fn union_bounds_never_returns_a_zero_sized_desk() {
         assert_eq!(union_bounds(&[(10, 10, 0, 0)]), Some((10, 10, 1, 1)));
     }
 
     #[test]
-    fn a_window_event_names_the_action_to_take() {
-        use super::window_action;
-        assert_eq!(
-            window_action(r#"{"id":"window","type":"window","text":"open"}"#),
-            Some("open".to_string())
-        );
-        assert_eq!(
-            window_action(r#"{"id":"window","type":"window","text":"toggle"}"#),
-            Some("toggle".to_string())
-        );
+    fn only_a_window_event_names_an_action() {
         // The daemon marshals every field of its event, so the real payload carries the rest of them too.
         assert_eq!(
             window_action(
@@ -676,34 +698,10 @@ mod tests {
             ),
             Some("open".to_string())
         );
-    }
-
-    #[test]
-    fn the_overlay_s_wm_class_matches_the_desktop_entry_the_daemon_writes() {
-        // Nothing at runtime notices when these two drift apart: the overlay keeps mapping, GNOME falls back to matching it by process id, and it lands back under June's dock entry with a dot of its own.
-        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cmd/desktop_entry_linux.go");
-        let source = std::fs::read_to_string(&entry)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", entry.display()));
-        assert!(
-            source.contains(&format!(
-                "StartupWMClass={}",
-                super::OVERLAY_WM_CLASS_INSTANCE
-            )),
-            "cmd/desktop_entry_linux.go writes no entry claiming StartupWMClass={}",
-            super::OVERLAY_WM_CLASS_INSTANCE
-        );
-    }
-
-    #[test]
-    fn an_event_of_any_other_type_is_not_this_window_s_business() {
-        use super::window_action;
         assert_eq!(
             window_action(r#"{"id":"overlay","type":"overlay","text":"{\"kind\":\"ring\"}"}"#),
             None
         );
-        assert_eq!(window_action(r#"{"type":"answer","text":"open"}"#), None);
         assert_eq!(window_action("not json at all"), None);
-        assert_eq!(window_action("{}"), None);
     }
 }

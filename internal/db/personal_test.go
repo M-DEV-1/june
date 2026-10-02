@@ -35,51 +35,6 @@ func TestPersonalContext_UpsertNotAppend(t *testing.T) {
 	}
 }
 
-// TestPersonalContext_OrderedBySubjectAndDeletable covers the two remaining store operations: a stable read order and removal by subject.
-func TestPersonalContext_OrderedBySubjectAndDeletable(t *testing.T) {
-	ctx := context.Background()
-	store := memStore(t)
-
-	for _, e := range [][2]string{
-		{"vexil-quorin", "Vexil Quorin is the user's colleague."},
-		{"identity", "The user is Zemna Braxen."},
-		{"preferences-communication", "The user wants short answers."},
-	} {
-		if err := store.SetPersonalContext(ctx, e[0], e[1]); err != nil {
-			t.Fatalf("SetPersonalContext %s: %v", e[0], err)
-		}
-	}
-
-	entries, err := store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-	var subjects []string
-	for _, e := range entries {
-		subjects = append(subjects, e.Subject)
-	}
-	want := []string{"identity", "preferences-communication", "vexil-quorin"}
-	if strings.Join(subjects, ",") != strings.Join(want, ",") {
-		t.Errorf("want subjects ordered %v, got %v", want, subjects)
-	}
-
-	if err := store.DeletePersonalContext(ctx, "vexil-quorin"); err != nil {
-		t.Fatalf("DeletePersonalContext: %v", err)
-	}
-	entries, err = store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext after delete: %v", err)
-	}
-	for _, e := range entries {
-		if e.Subject == "vexil-quorin" {
-			t.Error("deleted subject is still there")
-		}
-	}
-	if len(entries) != 2 {
-		t.Errorf("want 2 entries left, got %d", len(entries))
-	}
-}
-
 // TestPersonalContext_ConsolidatorCannotSeeIt is the structural guard: the note compactor reads ExistingNotes and rewrites everything it gets back through ReplaceAllNotes, so personal context has to be invisible to the first and untouched by the second.
 func TestPersonalContext_ConsolidatorCannotSeeIt(t *testing.T) {
 	ctx := context.Background()

@@ -181,7 +181,7 @@ func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, mod
 	instruction := a.LeanPrompt(start)
 	var handshake []string
 
-	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancelRecall()
 	if err != nil {

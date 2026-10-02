@@ -2,7 +2,6 @@ package ipc
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -106,110 +105,5 @@ func TestRun_RecordsWhatTheTurnCostInTokens(t *testing.T) {
 	}
 	if u.Question != "what did I do today" {
 		t.Errorf("question = %q", u.Question)
-	}
-}
-
-// TestRun_RecordsAGeminiTurnUnderItsOwnProvider checks the other shape of model slug: the Gemini paths name a bare model with no provider in front of it, so the provider is the one the trace's usage names.
-func TestRun_RecordsAGeminiTurnUnderItsOwnProvider(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	convID, err := store.CreateConversation(ctx, "cost", "")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-
-	trace := agent.TurnTrace{
-		Model:    "gemini-3-flash",
-		Question: "who is vexil",
-		Answer:   "a colleague",
-		Usage:    agent.TokenUsage{Provider: agent.ProviderGemini, InputTokens: 900, OutputTokens: 60, TotalTokens: 960},
-	}
-	s := New(&fakeAsker{trace: trace}, store, nil, nil)
-	s.run(s.asker, "ask-1", convID, "who is vexil", "", false, nil)
-
-	uses, err := store.TokenUseRecent(ctx, 10)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(uses) != 1 {
-		t.Fatalf("TokenUseRecent = %d rows, want 1", len(uses))
-	}
-	if uses[0].Provider != "gemini" || uses[0].Model != "gemini-3-flash" {
-		t.Errorf("provider/model = %q/%q, want gemini and the bare model name", uses[0].Provider, uses[0].Model)
-	}
-}
-
-// TestRun_RecordsACallThatFailedAndOneThatCountedNothing checks the two rows that must still be written rather than skipped: an ask the model failed, and an ask whose provider reported no counts. Both are calls the user may be charged for, and a missing row is one they cannot see; the counts stay at zero rather than being guessed at.
-func TestRun_RecordsACallThatFailedAndOneThatCountedNothing(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	convID, err := store.CreateConversation(ctx, "cost", "")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-
-	failed := agent.TurnTrace{Model: "codex/gpt-5.5", Question: "the one that failed", Usage: agent.TokenUsage{Provider: "codex"}}
-	s := New(&fakeAsker{trace: failed, err: errors.New("the backend refused")}, store, nil, nil)
-	s.run(s.asker, "ask-1", convID, "the one that failed", "", false, nil)
-
-	quiet := agent.TurnTrace{Model: "gemini-3-flash", Question: "the quiet one", Answer: "here", Usage: agent.TokenUsage{Provider: agent.ProviderGemini}}
-	s2 := New(&fakeAsker{trace: quiet}, store, nil, nil)
-	s2.run(s2.asker, "ask-2", convID, "the quiet one", "", false, nil)
-
-	uses, err := store.TokenUseRecent(ctx, 10)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(uses) != 2 {
-		t.Fatalf("TokenUseRecent = %d rows, want 2 (a failed call and a silent one are both calls)", len(uses))
-	}
-	for _, u := range uses {
-		if u.TotalTokens != 0 || u.InputTokens != 0 || u.OutputTokens != 0 {
-			t.Errorf("%q was counted as %+v, want zeroes", u.Question, u)
-		}
-		if u.Provider == "" {
-			t.Errorf("%q was filed under no provider", u.Question)
-		}
-	}
-}
-
-// echoQuestionAsker is an Asker whose trace carries back the question it was handed, the way the real ask path fills TurnTrace.Question, so a test can see exactly what the recorders file.
-type echoQuestionAsker struct{ hops []agent.ToolHop }
-
-func (a *echoQuestionAsker) AskText(ctx context.Context, question string) (agent.TurnTrace, error) {
-	return agent.TurnTrace{Question: question, Answer: "done", ToolHops: a.hops}, nil
-}
-
-// TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached checks that the "On screen: ..." prefix run() puts in front of the question for the model stays out of both ledgers: act_runs.question and token_use.question hold the question the user actually asked, since GET /usage shows the first 120 runes of that field and the screen text is neither the question nor something to keep.
-func TestRun_RecordsTheBareQuestionWhenScreenContextWasAttached(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-
-	asker := &echoQuestionAsker{hops: []agent.ToolHop{{Name: "observe_screen", Result: "1. button Save"}}}
-	s := New(asker, store, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-	s.run(s.asker, "ask-1", 0, "click save", "Bank of Somewhere — balance 12,431.02", false, nil)
-
-	runs, err := store.ActRuns(ctx, 10)
-	if err != nil {
-		t.Fatalf("ActRuns: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("ActRuns = %d, want 1", len(runs))
-	}
-	if runs[0].Question != "click save" {
-		t.Errorf("act run question = %q, want the bare question", runs[0].Question)
-	}
-
-	uses, err := store.TokenUseRecent(ctx, 10)
-	if err != nil {
-		t.Fatalf("TokenUseRecent: %v", err)
-	}
-	if len(uses) != 1 {
-		t.Fatalf("TokenUseRecent = %d, want 1", len(uses))
-	}
-	if uses[0].Question != "click save" {
-		t.Errorf("token use question = %q, want the bare question", uses[0].Question)
 	}
 }

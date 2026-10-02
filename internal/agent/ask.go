@@ -272,7 +272,7 @@ const screenTaskGuidance = `Doing something on the screen, going somewhere, star
 
 Some of the screen is drawn, not laid out, video, a photo, a canvas, a map, a game, and none of it appears in the observe_screen list. To read it, or to point at or draw on it, call look first and take coordinates from the picture it returns. press_key is for keys no listing offers (Enter, Escape, Tab, Space) and lands wherever focus is, so click the field or player first. click_at and scroll_at are for elements the list has no entry or working action for, and only after a look, in that picture's coordinates.`
 
-// stopLineText is the one safety rule that must survive every prompt this package trims: the sentence telling the model not to press anything irreversible without being told to. It is written out here rather than pulled from systemInstructionText because that prompt is a single long format string in connect.go with no seam to take one sentence out of, and TestStopLineText_IsTheSentenceTheHandshakeCarries fails the moment the two copies drift apart.
+// stopLineText is the one safety rule that must survive every prompt this package trims: the sentence telling the model not to press anything irreversible without being told to. The full handshake (systemInstructionStable) and the trimmed screen prompt both take it from here, so the two can never say different things.
 const stopLineText = `Never click anything that sends, pays, deletes or submits unless they have just said "go".`
 
 // screenTaskInstruction is the system prompt a turn sends from the round after its first screen tool onwards. It is the screen-task guidance, the stop line, and one sentence saying who is talking — nothing else. The handshake an ask opens with teaches how to talk, what memory is for, and who the people in the user's life are; a round spent deciding which numbered button to press needs none of it, and on the 2026-09-05 runs it was about 7,800 of the roughly 9,800 input tokens every such round paid for. It takes no arguments on purpose: the same bytes on every screen round of every ask are what a prompt cache can match.
@@ -503,7 +503,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	instruction := a.LeanPrompt(now)
 	var handshake []string
 
-	recallCtx, cancel := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancel := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancel()
 	if err != nil {
@@ -974,7 +974,7 @@ func (a *Agent) textAskTools() []*genai.Tool {
 // AllowEvalWrites lets AskText and AskVoice run every tool, not only the read-only memory set. For runs against a snapshot of the store, where a write cannot reach live data.
 func (a *Agent) AllowEvalWrites() { a.evalWrites = true }
 
-// askAllowedTools gates a text ask when AllowEvalWrites has not been called — which production /ask never does, so this is also the full list of tools a live user's turn may run. It is the subtask's read-only memory set, the screen tools (look, draw, click, scroll, type — none of them write to the store), and the store-writing tools that need no HITL approval: save_note, personal_context, revise, action_items, query_store, open_url. shell_exec, read_file and list_files stay out — they go through ToolApprovalChan, and nothing in the daemon reads that channel to answer the prompt, so a call would hang.
+// askAllowedTools gates a text ask when AllowEvalWrites has not been called — which production /ask never does, so this is also the full list of tools a live user's turn may run. It is the subtask's read-only memory set, the screen tools (look, draw, click, scroll, type — none of them write to the store), and the store-writing tools: save_note, personal_context, revise, action_items, query_store, open_url. read_file and list_files stay out.
 // screenToolNames are the tools whose results describe what is on the user's screen: a window title and the head of its accessibility list. That text can be a password manager, an inbox or a private chat, so it never goes into the log file even though the log is the user's own.
 var screenToolNames = map[string]bool{"look": true, "observe_screen": true, "point_at": true, "show_marks": true, "click": true, "scroll_to": true, "type_text": true, "wait_for": true, "press_key": true, "click_at": true, "scroll_at": true, "switch_window": true}
 

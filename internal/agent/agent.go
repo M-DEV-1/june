@@ -79,19 +79,6 @@ const (
 	SenderSystem = "system"
 )
 
-// ToolRequest is a generic HITL approval request — not shell-specific, so tools beyond shell_exec (read_file on a sensitive path, read_clipboard) can gate through the same approve/reject/edit flow instead of shipping their result to the model with zero user involvement.
-type ToolRequest struct {
-	// Description is shown in the approval prompt, e.g. "shell: ls -la" or "read file: ~/.ssh/id_rsa".
-	Description string
-	// Execute runs the approved action and returns its result — called by the approver on "Allow once"/"Allow for session", never on reject.
-	Execute    func() string
-	ResultChan chan<- string
-	// AllowKey, if non-empty, is what "Allow for session" stores into AllowedCmds so a repeat request for the same resource skips approval for the rest of the session. Callers check AllowedCmds themselves before sending a request; this only tells the approver what to store on approval.
-	AllowKey string
-	// EditableCommand, if non-empty, is the raw command text "Suggest changes" pre-fills into the textarea for editing — only shell-backed requests support this; other tools have no command text to edit.
-	EditableCommand string
-}
-
 // ToolPhase is where a tool call is in its started->finished lifecycle.
 type ToolPhase int
 
@@ -100,7 +87,7 @@ const (
 	ToolFinished
 )
 
-// ToolActivity is one event in a tool call's lifecycle (Started or Finished), correlated by ID (the model's fc.ID). Emitted for every tool call, not just HITL shell_exec — unlike ToolApprovalChan, which only fires for shell_exec approvals.
+// ToolActivity is one event in a tool call's lifecycle (Started or Finished), correlated by ID (the model's fc.ID). Emitted for every tool call.
 type ToolActivity struct {
 	ID          string // fc.ID — correlates the Started/Finished pair
 	Name        string // raw tool name, e.g. "query_memory"
@@ -169,17 +156,10 @@ type Agent struct {
 	apiKey           string
 	model            atomic.Value
 	voice            atomic.Value
-	isMuted          atomic.Bool
 	writeMu          sync.Mutex         // protects websocket writes
-	TextChan         chan string        // typed text input into the live session
 	TextResponseChan chan ResponseChunk // text responses from the live session — tagged with IsThought so the UI never infers it from content
-	ErrorChan        chan error         // websocket connection crashes
-	ToolApprovalChan chan ToolRequest
 	// ToolActivityChan carries a Started/Finished pair for every tool call, so a UI can show live "tool running" status. Buffered 20 to absorb a burst of concurrent tool calls in one turn; sends are non-blocking like every other Agent channel — a missed event is cosmetic, never a correctness issue.
 	ToolActivityChan chan ToolActivity
-	AllowedCmds      sync.Map // session allowlist for shell commands
-	// ReconnectChan lets callers (e.g. /voice) force the live session to drop and re-dial, so a config change fixed at handshake (like TTS voice) applies immediately. Buffered 1, non-blocking send — a redundant trigger is a no-op.
-	ReconnectChan chan struct{}
 	// resumeHandle stores the latest Gemini Live session-resumption handle (from LiveServerSessionResumptionUpdate), so a reconnect can resume via SessionResumptionConfig instead of cold-starting. atomic.Value, same pattern as model/voice above.
 	resumeHandle atomic.Value
 	// voiceUsage holds the Live API token usage of this session's most recently completed voice turn. receiveLoop writes it once per finished turn while whatever goroutine is draining TextResponseChan reads it, so it is an atomic.Value, the same pattern as resumeHandle above; unset means no turn has finished yet. See VoiceUsage in connect.go.
@@ -189,8 +169,6 @@ type Agent struct {
 	webSearch func(ctx context.Context, task string) (string, error)
 	// webAsk answers a branch task when webSearch cannot (no search API key configured, or both search providers failed): a routed ask that needs a provider with its own web search (askRouted with Need{Web: true} in production, a fake in tests).
 	webAsk func(ctx context.Context, task string) (string, error)
-	// typedTurnActive is true while the model is answering a message the user TYPED: set by textSendLoop on send, cleared at the next turn boundary. receiveLoop reads it to tell an ambient-room interruption of a typed answer apart from a real spoken barge-in, which are the same server event but mean opposite things to the user.
-	typedTurnActive atomic.Bool
 	// toolResponseAt is the wall-clock time (unix nanoseconds) of the most recent INTERRUPT-scheduled FunctionResponse send, or 0 when none is outstanding. The Live server interrupts its own generation to fold such a result in and reports that with the same ServerContent.Interrupted flag a user barge-in uses; receiveLoop consumes this to tell the two apart. See toolInterruptWindow in connect.go.
 	toolResponseAt atomic.Int64
 
@@ -215,11 +193,6 @@ func (a *Agent) consumeToolDeliveryInterrupt(now time.Time) bool {
 	return true
 }
 
-// markTypedTurn records that the turn now starting was initiated by typed text rather than speech.
-func (a *Agent) markTypedTurn() {
-	a.typedTurnActive.Store(true)
-}
-
 // setResumeHandle stores the latest session-resumption handle reported by the server.
 // Empty string is a valid value to store (e.g. before any handle has been received yet), and getResumeHandle treats an unset/empty handle the same way: "no resumption available, cold-start on next connect."
 func (a *Agent) setResumeHandle(handle string) {
@@ -233,10 +206,6 @@ func (a *Agent) getResumeHandle() string {
 		return ""
 	}
 	return val.(string)
-}
-
-func (a *Agent) SetMute(muted bool) {
-	a.isMuted.Store(muted)
 }
 
 func (a *Agent) SetModel(name string) {
@@ -298,12 +267,8 @@ func NewAgent(mic audio.Microphone, speaker audio.Speaker, brain ContextReader, 
 		focused:          tracker.Focused,
 		extents:          tracker.Extents,
 		apiKey:           apiKey,
-		TextChan:         make(chan string, 100),
 		TextResponseChan: make(chan ResponseChunk, 100),
-		ErrorChan:        make(chan error, 10),
-		ToolApprovalChan: make(chan ToolRequest, 1),
 		ToolActivityChan: make(chan ToolActivity, 20),
-		ReconnectChan:    make(chan struct{}, 1),
 	}
 	if compiler != nil {
 		a.bufferProvider = compiler.GetCurrentBuffer

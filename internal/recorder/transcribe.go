@@ -175,6 +175,7 @@ func transcribeThreads() int {
 func run(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
 	var out, errOut strings.Builder
 	cmd := exec.CommandContext(ctx, name, args...)
+	util.HideConsole(cmd)
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 	err = cmd.Run()
@@ -184,13 +185,19 @@ func run(ctx context.Context, name string, args []string) (stdout, stderr string
 // runWithLibPath is run with libDir added to the shared-library search path, for a tool whose libraries sit beside it rather than on the system path. The sherpa-onnx build ships its own ONNX Runtime that way.
 // libDir is prepended to whatever LD_LIBRARY_PATH the daemon inherited rather than replacing it: a machine running under Nix, Conda or a wrapped snap sets that variable for its own system libraries, and dropping it would leave the tool unable to link anything it does not ship itself.
 func runWithLibPath(ctx context.Context, name string, args []string, libDir string) (stdout, stderr string, err error) {
+	// Windows looks for a program's DLLs on PATH, not LD_LIBRARY_PATH.
+	pathVar := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "windows" {
+		pathVar = "PATH"
+	}
 	path := libDir
-	if inherited := os.Getenv("LD_LIBRARY_PATH"); inherited != "" {
+	if inherited := os.Getenv(pathVar); inherited != "" {
 		path = libDir + string(os.PathListSeparator) + inherited
 	}
 	var out, errOut strings.Builder
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+path)
+	util.HideConsole(cmd)
+	cmd.Env = append(os.Environ(), pathVar+"="+path)
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
 	err = cmd.Run()

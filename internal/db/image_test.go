@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -40,12 +41,15 @@ func TestWriteEpisode_StoresSecondMonitorFrames(t *testing.T) {
 		if string(body) != want {
 			t.Fatalf("%s = %q, want %q", name, body, want)
 		}
-		info, err := os.Stat(filepath.Join(dir, "frames", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0600 {
-			t.Fatalf("%s perms = %v, want 0600", name, info.Mode().Perm())
+		// Windows reports every writable file as 0666, so the owner-only check only means something elsewhere.
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(filepath.Join(dir, "frames", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0600 {
+				t.Fatalf("%s perms = %v, want 0600", name, info.Mode().Perm())
+			}
 		}
 	}
 

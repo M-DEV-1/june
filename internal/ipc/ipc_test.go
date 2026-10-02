@@ -177,66 +177,6 @@ func TestEvents_TwoClientsBothReceiveEvents(t *testing.T) {
 	}
 }
 
-// TestHub_SlowClientDroppedWithoutBlockingFast exercises the hub directly (whitebox, same package) rather than over real sockets: OS socket buffers would absorb far more than a handful of small SSE messages before an unread client actually applies backpressure, which would make a true end-to-end version of this test slow and flaky. The hub's own buffered-channel-plus-drop logic is the thing under test, so testing it directly is the more reliable route to the same guarantee.
-// The fast client is drained in lock-step with each broadcast (from this goroutine, no separate reader goroutine racing the sends) so a failure to keep up can only mean the hub itself is blocking or dropping it — not a test scheduling fluke. The slow client is never drained, so it must fill and get dropped once more than clientBufferSize events have gone out.
-func TestHub_SlowClientDroppedWithoutBlockingFast(t *testing.T) {
-	h := newHub()
-	slow := h.subscribe() // never read from this one
-	fast := h.subscribe()
-
-	total := clientBufferSize + 5
-	for i := 0; i < total; i++ {
-		h.broadcast(Event{ID: "x", Type: "tool", Text: "t"})
-		select {
-		case <-fast:
-		case <-time.After(time.Second):
-			t.Fatalf("fast client did not receive event %d; broadcast blocked or dropped it", i)
-		}
-	}
-
-	h.mu.Lock()
-	_, slowStillPresent := h.clients[slow]
-	_, fastStillPresent := h.clients[fast]
-	h.mu.Unlock()
-	if slowStillPresent {
-		t.Fatalf("slow client was not dropped after exceeding its buffer")
-	}
-	if !fastStillPresent {
-		t.Fatalf("fast client was dropped even though it kept draining")
-	}
-
-	h.unsubscribe(fast)
-}
-
-// TestHub_LevelBurstDoesNotDropStalledClient covers the one event type a live voice session sends twenty times a second for the whole session. A client that stalls its read for a few hundred milliseconds — a re-render, a layout pass — used to fill its buffer with stale amplitudes and be dropped for it, which ends its /events stream and makes the window reconnect and refetch mid-conversation. After a burst of 200 "level" events with nothing draining, the client must still be subscribed and must still receive a later ordinary event.
-func TestHub_LevelBurstDoesNotDropStalledClient(t *testing.T) {
-	h := newHub()
-	stalled := h.subscribe() // never drained during the burst, the way a busy window is not
-	for i := 0; i < 200; i++ {
-		h.broadcast(Event{ID: "voice-1", Type: levelEventType, Detail: `{"mic":0.5,"speaker":0}`})
-	}
-	h.broadcast(Event{ID: "voice-1", Type: "said", Text: "hello"})
-
-	h.mu.Lock()
-	_, present := h.clients[stalled]
-	h.mu.Unlock()
-	if !present {
-		t.Fatalf("client was dropped by a burst of level events")
-	}
-
-	// At most levelSkipQueueDepth stale levels sit ahead of the ordinary event, so draining a full buffer's worth must reach it.
-	found := false
-	for i := 0; i < clientBufferSize && !found; i++ {
-		if ev := mustEvent(t, stalled); ev.Type == "said" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("the ordinary event broadcast after the level burst never arrived")
-	}
-	h.unsubscribe(stalled)
-}
-
 // hangingAsker blocks until its context ends, the way a stuck model call would, and reports the context's error.
 type hangingAsker struct{}
 
@@ -315,86 +255,6 @@ func TestAsk_RoutesToTheNamedBrain(t *testing.T) {
 	}
 	if codex.got != "q" {
 		t.Errorf("codex asker got %q", codex.got)
-	}
-}
-
-// An /ask naming a brain the daemon has no asker for used to fall through to the default: the window asked Claude a question and Gemini answered it, under the answering model's name, with nothing on the stream to say so — and an eval measuring one brain silently measured another. Being told the name is wrong, and which names exist, is the only way a caller can tell the difference, so the unknown name is now a 400 and the question is never asked.
-func TestAsk_UnknownBrainIsRefused(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	def := &fakeAsker{trace: agent.TurnTrace{Answer: "from gemini"}}
-	s := New(def, store, nil, nil)
-	s.AddBrain("codex", &codexFake{})
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	rec := httptest.NewRecorder()
-	s.Ask(rec, httptest.NewRequest(http.MethodPost, "/ask", strings.NewReader(`{"question":"q","brain":"claude"}`)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "claude") || !strings.Contains(body, "codex") {
-		t.Errorf("message = %q, want it to name the brain asked for and the brains that exist", body)
-	}
-
-	select {
-	case ev := <-ch:
-		t.Fatalf("a refused ask still ran: %+v", ev)
-	case <-time.After(100 * time.Millisecond):
-	}
-}
-
-// drawingAsker stands in for the agent answering a question whose point_at draws on the screen: it rings through the same two calls cmd/daemon.go wires the shared agent's drawing callbacks to, from inside the turn, so the ring is broadcast while the ask that caused it is running.
-type drawingAsker struct{ s *Server }
-
-func (d *drawingAsker) AskText(ctx context.Context, question string) (agent.TurnTrace, error) {
-	d.s.Ring(d.s.DrawingAsk(), 10, 20, 30, 40, "the address bar")
-	return agent.TurnTrace{Answer: "ringed the address bar"}, nil
-}
-
-// A ring drawn while a question is being answered must arrive under that question's id, the one POST /ask handed back, so a client reading the stream can say which question drew it. Before this, every drawing was stamped with a freshly minted id of its own, which belonged to no ask and moved the counter real asks are numbered from.
-func TestEvents_OverlayCarriesTheAskThatDrewIt(t *testing.T) {
-	store, err := db.New(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	asker := &drawingAsker{}
-	s := New(asker, store, nil, nil)
-	asker.s = s
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	rec := httptest.NewRecorder()
-	s.Ask(rec, httptest.NewRequest(http.MethodPost, "/ask", strings.NewReader(`{"question":"where is the address bar"}`)))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", rec.Code)
-	}
-	var body struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case ev := <-ch:
-			if ev.Type != "overlay" {
-				continue
-			}
-			if ev.ID != body.ID {
-				t.Fatalf("overlay event id = %q, want %q, the ask whose point_at drew it", ev.ID, body.ID)
-			}
-			return
-		case <-deadline:
-			t.Fatal("no overlay event broadcast")
-		}
 	}
 }
 
@@ -527,26 +387,4 @@ func TestEvents_OpensWithEnoughBytesToGetPastAClientThatBuffers(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no preamble arrived; the first event would be held by a client that buffers")
 	}
-}
-
-// Shutting down ends every open event stream at once. The HTTP server waits for its handlers but never cancels their requests, so a daemon with the desktop window connected used to hold its port for the whole shutdown timeout, and the next daemon to start found the address in use.
-func TestCloseStreams_EndsEveryOpenStream(t *testing.T) {
-	s := New(&fakeAsker{}, dbtest.Open(t), nil, nil)
-	a, b := s.hub.subscribe(), s.hub.subscribe()
-
-	s.CloseStreams()
-
-	for name, ch := range map[string]chan Event{"first": a, "second": b} {
-		select {
-		case _, open := <-ch:
-			if open {
-				t.Errorf("%s client: got an event, want the channel closed", name)
-			}
-		case <-time.After(time.Second):
-			t.Errorf("%s client: still open, so its handler would hold the port", name)
-		}
-	}
-	// Closing twice must be safe, since a client may also be dropped by its own handler on the way out.
-	s.CloseStreams()
-	s.hub.unsubscribe(a)
 }

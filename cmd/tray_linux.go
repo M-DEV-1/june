@@ -179,14 +179,6 @@ const (
 	menuQuit    int32 = 5
 )
 
-// meetingLabel is the recording menu item's text — a toggle, so the label always names the action the click performs.
-func meetingLabel(recording bool) string {
-	if recording {
-		return "Stop meeting recording"
-	}
-	return "Start meeting recording"
-}
-
 // recording reports whether a meeting is being recorded. Nil-safe: the recorder is only wired in once the daemon's store exists, and the tray must still render before then.
 func (m *dbusMenu) recording() bool {
 	return m.rec != nil && m.rec.Active()
@@ -284,7 +276,7 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		// signal from root so both the status label (id 1) and pause label (id 3) refresh
 		m.refresh()
 	case menuMeeting:
-		m.toggleMeeting()
+		toggleMeeting(m.ctx, m.rec)
 		m.refresh()
 	case menuQuit:
 		select {
@@ -293,23 +285,6 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 		}
 	}
 	return nil
-}
-
-// toggleMeeting starts or stops the meeting recording. Stopping hands off to background transcription and summarising, so neither branch blocks the D-Bus method call.
-func (m *dbusMenu) toggleMeeting() {
-	if m.rec == nil {
-		slog.Warn("meeting recorder is not wired up, ignoring tray click")
-		return
-	}
-	if m.rec.Active() {
-		if _, err := m.rec.StopAndProcess(m.ctx); err != nil {
-			slog.Error("failed to stop meeting recording", "error", err)
-		}
-		return
-	}
-	if err := m.rec.Start(); err != nil {
-		slog.Error("failed to start meeting recording", "error", err)
-	}
 }
 
 func (m *dbusMenu) AboutToShow(id int32) (bool, *dbus.Error) {

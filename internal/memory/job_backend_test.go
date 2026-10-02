@@ -21,23 +21,32 @@ func newSummarizer(t *testing.T) *memory.GeminiSummarizer {
 }
 
 // A backend installed for one duty answers that duty and no other. This is the whole point of the per-job seam: the working state can run on the local llama-server while note consolidation still goes to Gemini, and later either can be pointed at a CLI login instead.
+// The backend spends no metered quota, so it answers even when the daily request gate refuses, and every pending summary goes to it in one call.
 func TestSetJobBackend_AnswersOnlyItsOwnJob(t *testing.T) {
 	s := newSummarizer(t)
+	s.SetRequestGate(&fakeGate{err: errors.New("daily quota reached")})
+	calls := 0
 	var asked string
 	s.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
+		calls++
 		asked = prompt
-		return "the state, from the backend", nil
+		return "  the state, from the backend  ", nil
 	})
 
-	state, err := s.DeriveState(context.Background(), []string{"wrote the asker"}, []string{"prefers Linux"})
+	state, err := s.DeriveState(context.Background(), []string{"wrote the asker", "fixed the build"}, []string{"prefers Linux"})
 	if err != nil {
 		t.Fatalf("DeriveState: %v", err)
 	}
 	if state != "the state, from the backend" {
-		t.Errorf("DeriveState returned %q, want the backend's answer", state)
+		t.Errorf("DeriveState returned %q, want the backend's answer trimmed", state)
 	}
-	if !strings.Contains(asked, "wrote the asker") {
-		t.Errorf("the backend was handed a prompt without the material in it: %q", asked)
+	if calls != 1 {
+		t.Errorf("backend called %d times, want exactly 1 for the whole batch", calls)
+	}
+	for _, want := range []string{"wrote the asker", "fixed the build", "prefers Linux"} {
+		if !strings.Contains(asked, want) {
+			t.Errorf("the backend was handed a prompt without %q in it: %q", want, asked)
+		}
 	}
 
 	// Nothing was installed for note consolidation, so it still takes the Gemini path — which with this key cannot succeed, and that failure is the proof it was not routed to the working-state backend.

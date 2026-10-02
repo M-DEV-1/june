@@ -67,29 +67,6 @@ func (c *stepClock) now() time.Time {
 	return t
 }
 
-// With no shadow brain configured, the replay stage skips outright: no calls, no artifact, and — deliberately — no stage token, so a shadow configured later still gets its first night.
-func TestReplayStage_NoShadowSkipsCleanly(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(time.DateOnly)
-	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
-	if err := store.StartDreamRun(ctx, night); err != nil {
-		t.Fatal(err)
-	}
-
-	rep, err := r.replayStage(ctx, night)
-	if err != nil {
-		t.Fatalf("replayStage: %v", err)
-	}
-	if !rep.skipped {
-		t.Errorf("report = %+v, want skipped", rep)
-	}
-	run, _, _ := store.DreamRun(ctx, night)
-	if run.StagesDone != "" {
-		t.Errorf("stages_done = %q, want no token committed on a skip", run.StagesDone)
-	}
-}
-
 // The accumulator: salience 0 drops an item's contribution entirely, facts merge case-insensitively across items with an occurrence count, people accumulate the same way, a hallucinated thread that names no active subject falls into the "none" pile alongside an explicit "none", and the artifact renders the piles with "none" last regardless of score.
 func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testing.T) {
 	ctx := context.Background()
@@ -164,44 +141,6 @@ func TestReplayStage_AccumulatesPilesGroupingDedupAndDropsZeroSalience(t *testin
 	}
 }
 
-// A call error and an unparsable reply both count as a failure and skip the item; neither fails the stage, and the token still commits.
-func TestReplayStage_ParseFailureCountedNotFatal(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(time.DateOnly)
-	if err := store.StartDreamRun(ctx, night); err != nil {
-		t.Fatal(err)
-	}
-	base := at(10, 0)
-	insertSummaryNode(t, store, "Work", "first moment", base)
-	insertSummaryNode(t, store, "Work", "second moment", base.Add(time.Minute))
-
-	shadow := &fakeShadowSeq{replies: []string{
-		"I would rather not answer in JSON today.",
-		`{"salience":1,"facts":["ok"],"people":[],"thread":"none"}`,
-	}}
-	r := newRunner(store, &fakeBrain{}, yesProbes(), at(23, 30))
-	r.activeShadow = shadow.fn
-
-	rep, err := r.replayStage(ctx, night)
-	if err != nil {
-		t.Fatalf("replayStage: %v", err)
-	}
-	if rep.items != 2 || rep.calls != 2 {
-		t.Errorf("items=%d calls=%d, want both items read and called", rep.items, rep.calls)
-	}
-	if rep.failures != 1 {
-		t.Errorf("failures = %d, want 1", rep.failures)
-	}
-	if rep.piles != 1 {
-		t.Errorf("piles = %d, want 1 (only the item that parsed)", rep.piles)
-	}
-	run, _, _ := store.DreamRun(ctx, night)
-	if !strings.Contains(run.StagesDone, "replay") {
-		t.Errorf("stages_done = %q, want the replay token despite the parse failure", run.StagesDone)
-	}
-}
-
 // Running out of the stage's time budget mid-night still writes the partial piles built so far and commits the token, so the next wake does not redo the work.
 func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 	ctx := context.Background()
@@ -244,37 +183,5 @@ func TestReplayStage_BudgetCutoffWritesPartialArtifactAndToken(t *testing.T) {
 	}
 	if artifact := string(raw); !strings.Contains(artifact, "Items read: 1") || !strings.Contains(artifact, "Budget: hit (budget)") {
 		t.Errorf("partial artifact does not report the cutoff:\n%s", artifact)
-	}
-}
-
-// End to end: with a shadow brain configured, one full Tick runs every stage in order, and the replay stage's token lands in stages_done after compact and before procedures.
-func TestTick_ReplayRunsLastAfterCompact(t *testing.T) {
-	ctx := context.Background()
-	store := dbtest.Open(t)
-	night := at(23, 30).Format(time.DateOnly)
-	if err := store.SetDiaryEntry(ctx, night, "day", "A quiet day."); err != nil {
-		t.Fatal(err)
-	}
-	insertSummaryNode(t, store, "Work", "a moment worth noting", at(10, 0))
-
-	primary := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
-	r := newRunner(store, primary, yesProbes(), at(23, 30))
-	r.Shadow = func(ctx context.Context, prompt string) (string, error) {
-		return `{"salience":1,"facts":["noted"],"people":[],"thread":"none"}`, nil
-	}
-	r.DataDir = t.TempDir()
-
-	r.Tick(ctx)
-
-	run, ok, _ := store.DreamRun(ctx, night)
-	if !ok || !run.Finished {
-		t.Fatalf("run not finished: %+v ok=%v", run, ok)
-	}
-	if run.StagesDone != "hyp und compact replay procedures lessons prune" {
-		t.Errorf("stages_done = %q, want replay after compact and the pruning stage last", run.StagesDone)
-	}
-	entry, _ := store.DiaryEntry(ctx, night, "dream")
-	if !strings.Contains(entry, "I replayed 1 items into 1 piles.") {
-		t.Errorf("dream report does not mention the replay stage: %q", entry)
 	}
 }

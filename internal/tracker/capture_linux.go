@@ -106,13 +106,6 @@ func (s *focusState) get() (aref, string, bool) {
 	return s.ref, s.app, s.ref.Name != ""
 }
 
-// previous returns the last window that took focus and was not June's own, together with its application name. Unlike get it still answers after that window has been deactivated with nothing else taking focus, which is what happens whenever focus moves to an application that publishes no accessibility tree. ok is false when no such window has been seen, or when the one remembered has left the bus. Callers that must know what holds focus right now use get; this one answers "what was the user last in".
-func (s *focusState) previous() (aref, string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.prev, s.prevAp, s.prev.Name != ""
-}
-
 // clear forgets a window that has left the bus and can no longer answer, whether it was the focused one, the previous one, or both.
 func (s *focusState) clear(ref aref) {
 	s.mu.Lock()

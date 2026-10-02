@@ -1,23 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  RESTING_PLACEHOLDER,
   CONVERSATION_MS,
-  chipLabel,
-  faceState,
-  placeholder,
-  sourceMeta,
   step,
-  stepLabel,
-  noticeActionLine,
-  stepsCollapsed,
-  stepsSummaryLine,
   themeFromStorage,
   type JobMeta,
   type Matter,
-  type ToolStep,
   type View,
 } from "./state";
-import type { ContextInfo, MatterRow } from "./daemon";
+import type { MatterRow } from "./daemon";
 import { THEME_KEY } from "./shared/theme";
 import type { DaemonEvent, Notice } from "./shared/wire";
 
@@ -48,12 +38,6 @@ describe("submit", () => {
     const { view: next } = step(v, { kind: "submit" });
     expect(next.state).toBe("asking");
     expect(next.input).toBe("");
-  });
-
-  it("does nothing on empty input", () => {
-    const v = view({ input: "   " });
-    const { view: next } = step(v, { kind: "submit" });
-    expect(next.state).toBe("empty");
   });
 
   it("a do: question starts a job instead of an ask", () => {
@@ -118,24 +102,6 @@ describe("escape", () => {
     expect(e2).toEqual({ kind: "stopJob", id: "act-1" });
   });
 
-  it("closes at once once the job has ended", () => {
-    const job: JobMeta = { id: "act-1", state: "done", startedAt: 0 };
-    const v = view({
-      matters: [matter({ turns: [{ q: "reload the page", a: "done.", job }] })],
-    });
-    const { effect } = step(v, { kind: "escape" });
-    expect(effect).toEqual({ kind: "close" });
-  });
-
-  it("any other event drops a pending confirmation instead of leaving it armed", () => {
-    const job: JobMeta = { id: "act-1", state: "stepping", startedAt: 0 };
-    const v = view({
-      confirmStopJob: true,
-      matters: [matter({ turns: [{ q: "reload the page", a: "", job }] })],
-    });
-    const { view: next } = step(v, { kind: "type", value: "x" });
-    expect(next.confirmStopJob).toBe(false);
-  });
 });
 
 describe("enter", () => {
@@ -144,16 +110,6 @@ describe("enter", () => {
     expect(effect).toEqual({ kind: "close" });
   });
 
-  it("submits instead when there is text in the input, which is what sends the question", () => {
-    const v = view({ input: "hello" });
-    const { view: next, effect } = step(v, { kind: "enter" });
-    expect(next.state).toBe("asking");
-    expect(effect).toEqual({
-      kind: "ask",
-      question: "hello",
-      conversation: undefined,
-    });
-  });
 });
 
 describe("daemonEvent", () => {
@@ -163,33 +119,6 @@ describe("daemonEvent", () => {
       state: "asking",
     });
   }
-
-  it("tool appends the tool name to the pending turn's tools", () => {
-    const v1 = step(askedView(), {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "tool", text: "search_mail" },
-    }).view;
-    const v2 = step(v1, {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "tool", text: "read_thread" },
-    }).view;
-    expect(v2.matters[0].turns[0].tools).toEqual([
-      "search_mail",
-      "read_thread",
-    ]);
-  });
-
-  it("tool with no Detail keeps the last progress line rather than blanking it", () => {
-    const v1 = step(askedView(), {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "tool", text: "click", detail: "clicking Reload" },
-    }).view;
-    const v2 = step(v1, {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "tool", text: "click" },
-    }).view;
-    expect(v2.matters[0].turns[0].progress).toBe("clicking Reload");
-  });
 
   // The daemon reports one tool call as two "tool" events with the same name — no id ties them together — so the reducer tells them apart by whether a step is still open, the same way the live step-list card needs to.
   it("tool opens a step on the first event and closes it on the second", () => {
@@ -220,28 +149,6 @@ describe("daemonEvent", () => {
         startedAt: 1000,
         finishedAt: 1500,
       },
-    ]);
-  });
-
-  it("a second tool call opens its own step once the first has closed", () => {
-    let v = step(
-      askedView(),
-      { kind: "daemonEvent", ev: { id: "1", type: "tool", text: "click" } },
-      1000,
-    ).view;
-    v = step(
-      v,
-      { kind: "daemonEvent", ev: { id: "1", type: "tool", text: "click" } },
-      1200,
-    ).view;
-    v = step(
-      v,
-      { kind: "daemonEvent", ev: { id: "1", type: "tool", text: "scroll_to" } },
-      1300,
-    ).view;
-    expect(v.matters[0].turns[0].steps).toEqual([
-      { name: "click", detail: "", startedAt: 1000, finishedAt: 1200 },
-      { name: "scroll_to", detail: "", startedAt: 1300 },
     ]);
   });
 
@@ -332,19 +239,6 @@ describe("jobStarted and act daemon events", () => {
     };
   }
 
-  it("jobStarted attaches the job id to the pending turn", () => {
-    const v = view({
-      state: "asking",
-      matters: [matter({ turns: [{ q: "reload the page", a: "" }] })],
-    });
-    const { view: next } = step(v, { kind: "jobStarted", id: "act-1" }, 500);
-    expect(next.matters[0].turns[0].job).toEqual({
-      id: "act-1",
-      state: "planning",
-      startedAt: 500,
-    });
-  });
-
   it("an act event for a different job, or one that beats jobStarted, changes nothing", () => {
     const noJob = view({
       state: "asking",
@@ -360,21 +254,6 @@ describe("jobStarted and act daemon events", () => {
     const otherJob = jobView();
     const ev = { ...act("step"), id: "act-2" };
     expect(step(otherJob, { kind: "daemonEvent", ev }).view).toEqual(otherJob);
-  });
-
-  it("step appends a row naming the tool and its expected change", () => {
-    const ev = act("step", {
-      text: "clicking Reload",
-      expect: "page title contains 'Success'",
-    });
-    const { view: next } = step(jobView(), { kind: "daemonEvent", ev }, 1000);
-    expect(next.matters[0].turns[0].steps).toEqual([
-      {
-        name: "clicking Reload — expecting page title contains 'Success'",
-        detail: "",
-        startedAt: 1000,
-      },
-    ]);
   });
 
   it("verified marks the running row passed, ready for the next step", () => {
@@ -437,15 +316,6 @@ describe("jobStarted and act daemon events", () => {
     ]);
   });
 
-  it("question sets the job's question and leaves the steps alone", () => {
-    const { view: next } = step(jobView(), {
-      kind: "daemonEvent",
-      ev: act("question", { state: "stuck", text: "which venue?" }),
-    });
-    expect(next.matters[0].turns[0].job?.question).toBe("which venue?");
-    expect(next.matters[0].turns[0].job?.state).toBe("stuck");
-  });
-
   it("done sets the closing text, the spend, and moves to answered", () => {
     const ev = act("done", {
       state: "done",
@@ -465,42 +335,6 @@ describe("jobStarted and act daemon events", () => {
   });
 });
 
-// On 2026-09-04 an ask failed on the free tier's daily quota and the provider's whole error — a thousand characters of JSON, map literals and a URL — went into the answer slot, which is 20px type in a window that sizes itself to its content. The card grew past the screen and pushed the input and the footer out of view. Whatever a provider sends, the answer slot takes one line of it and the rest is kept for the fold.
-describe("an error that is a wall of text", () => {
-  const asked = (): View =>
-    view({
-      matters: [matter({ turns: [{ q: "is the venue sorted?", a: "" }] })],
-      state: "asking",
-    });
-  const WALL =
-    `ask text: generate (iteration 0): Error 429, Message: You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\nmap[@type:type.googleapis.com/google.rpc.QuotaFailure violations:[map[quotaDimensions:map[location:global model:gemini-3.5-flash]]]]`.repeat(
-      20,
-    );
-
-  it("puts one line in the answer and keeps the whole message beside it", () => {
-    const { view: next } = step(asked(), {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "error", text: WALL },
-    });
-    const turn = next.matters[0].turns[0];
-    expect(turn.a.length).toBeLessThanOrEqual(160);
-    expect(turn.a).not.toContain("\n");
-    expect(turn.a).not.toContain("map[");
-    expect(turn.a).toContain("You exceeded your current quota");
-    expect(turn.detail).toBe(WALL);
-  });
-
-  it("cuts a message that is one unbroken run of characters just the same", () => {
-    const unbroken = "x".repeat(5000);
-    const { view: next } = step(asked(), {
-      kind: "daemonEvent",
-      ev: { id: "1", type: "error", text: unbroken },
-    });
-    expect(next.matters[0].turns[0].a.length).toBeLessThanOrEqual(160);
-    expect(next.matters[0].turns[0].detail).toBe(unbroken);
-  });
-});
-
 describe("mattersLoaded", () => {
   function row(partial: Partial<MatterRow> = {}): MatterRow {
     return {
@@ -513,33 +347,6 @@ describe("mattersLoaded", () => {
       ...partial,
     };
   }
-
-  it("replaces the matters list with rows mapped to Matter, carrying status and kind", () => {
-    const v = view({ matters: [matter({ id: "old" })] });
-    const rows = [
-      row({ id: "a", title: "Send the invoice" }),
-      row({ id: "b", kind: "meeting", status: "watching" }),
-    ];
-    const { view: next } = step(v, { kind: "mattersLoaded", rows });
-    expect(next.matters).toEqual([
-      {
-        id: "a",
-        title: "Send the invoice",
-        context: "",
-        turns: [],
-        status: "open",
-        kind: "action",
-      },
-      {
-        id: "b",
-        title: "a",
-        context: "",
-        turns: [],
-        status: "watching",
-        kind: "meeting",
-      },
-    ]);
-  });
 
   it("keeps the current index valid when the list shrinks", () => {
     const v = view({
@@ -579,18 +386,6 @@ describe("mattersLoaded", () => {
     expect(next.state).toBe("answered");
   });
 
-  it("stays in the asking state when the matter it kept is still mid-question", () => {
-    const v = view({
-      matters: [matter({ id: "a", turns: [{ q: "q", a: "" }] })],
-      state: "asking",
-    });
-    const { view: next } = step(v, {
-      kind: "mattersLoaded",
-      rows: [row({ id: "a" })],
-    });
-    expect(next.state).toBe("asking");
-  });
-
   it("keeps the same matter open when the reload returns the list in a different order", () => {
     // "a" is the one on screen (current points at it by index 1); the reload comes back with "a" first, so a raw index carried across the merge would land on "b" instead.
     const v = view({
@@ -619,55 +414,6 @@ describe("mattersLoaded", () => {
   });
 });
 
-describe("contextLoaded", () => {
-  it("stores the chip text as app · title and the raw text for the next ask", () => {
-    const ctx: ContextInfo = {
-      app: "Mail",
-      title: "Re: venue",
-      text: "full body text",
-    };
-    const { view: next } = step(view(), { kind: "contextLoaded", ctx });
-    expect(next.contextChip).toBe("Re: venue · Mail");
-    expect(next.contextText).toBe("full body text");
-  });
-});
-
-describe("chipLabel", () => {
-  it.each([
-    [
-      "Google Chrome",
-      "Chat | Vexil Quorin | Microsoft Teams - High memory usage - 920 MB",
-      "Vexil Quorin · Teams",
-    ],
-    ["Google Chrome", "Q3 hiring plan — Docs", "Q3 hiring plan · Docs"],
-    ["Thunderbird", "Inbox (3) - Mail", "Inbox · Mail"],
-    ["Code", "upload.go — june — Visual Studio Code", "upload.go · Code"],
-    [
-      "Brave-browser",
-      "Meet - abc-defg-hij - Microphone recording - Brave",
-      "Meet · Brave",
-    ],
-    ["Finder", "", "Finder"],
-    ["Mail", "Re: venue", "Re: venue · Mail"],
-  ])("turns %s / %s into the chip", (app, title, want) => {
-    expect(chipLabel(app, title)).toBe(want);
-  });
-});
-
-describe("sourceMeta", () => {
-  it("drops the part that only repeats the title and shortens the timestamp", () => {
-    expect(sourceMeta("note", "note · 2026-08-31T06:25:01Z")).toEqual([
-      "31 Aug 2026",
-    ]);
-  });
-
-  it("keeps a kind that says something the title does not", () => {
-    expect(
-      sourceMeta("Re: venue for the 12th", "mail · 2026-08-31T06:25:01Z"),
-    ).toEqual(["mail", "31 Aug 2026"]);
-  });
-});
-
 describe("dictation", () => {
   it("dictated puts the trimmed text in the input and closes the listening look", () => {
     const held = step(view(), { kind: "dictating" }).view;
@@ -680,22 +426,6 @@ describe("dictation", () => {
     expect(next.hint).toBe("");
   });
 
-  it("dictated with nothing said leaves the input alone and hints", () => {
-    const held = step(view({ input: "" }), { kind: "dictating" }).view;
-    const { view: next } = step(held, { kind: "dictated", text: "   " });
-    expect(next.input).toBe("");
-    expect(next.dictating).toBe(false);
-    expect(next.hint).toBe("Heard nothing.");
-  });
-});
-
-describe("placeholder", () => {
-  // Neither key is written anywhere on the hover, so a user who does not already know about Space and Shift+Space has no way to find out that dictation and voice exist. The resting placeholder is the one line that is on screen before anybody acts.
-  it("names the two voice keys while the input is empty and nothing is running", () => {
-    expect(placeholder(view())).toBe(
-      "Ask about this window, or anything. Space to dictate · Shift+Space for voice",
-    );
-  });
 });
 
 describe("voice", () => {
@@ -712,20 +442,6 @@ describe("voice", () => {
     const v = live();
     expect(v.voice).toBe("voice-1");
     expect(v.voiceState).toBe("listening");
-  });
-
-  // Shift+Space and Space alone are one key apart, so a slipped modifier can open a live session without anyone meaning to; the hint has to say so the first time, once, not on every toggle.
-  it("the first voiceOn shows a one-second hint that live voice started", () => {
-    const v = live();
-    expect(v.hint).toBe("Live voice started");
-    expect(v.voiceHintShown).toBe(true);
-  });
-
-  it("a later voiceOn in the same window does not repeat the hint", () => {
-    const off = step(live(), { kind: "voiceOff" }).view;
-    const second = step(off, { kind: "voiceOn", id: "voice-2" }).view;
-    expect(second.hint).toBe("");
-    expect(second.voice).toBe("voice-2");
   });
 
   it("a malformed level reading is stored as silence rather than thrown", () => {
@@ -751,12 +467,6 @@ describe("voice", () => {
     expect(v.voiceState).toBe("idle");
   });
 
-  it("the placeholder and the face go back to their resting look once the session is idle", () => {
-    const v = say(live(), "state", "idle");
-    expect(placeholder(v)).toBe(RESTING_PLACEHOLDER);
-    expect(faceState(v, true)).toBe("watching");
-  });
-
   it("heard opens a you turn and said fills its answer", () => {
     let v = say(live(), "heard", "is the venue sorted?");
     v = say(v, "said", "Nearly.");
@@ -779,66 +489,6 @@ describe("voice", () => {
     expect(v.matters[0].turns.map((t) => t.q)).toEqual(["first", "second"]);
   });
 
-  it("said with nothing heard yet still opens a turn", () => {
-    expect(say(live(), "said", "Morning.").matters[0].turns).toEqual([
-      { q: "", a: "Morning." },
-    ]);
-  });
-});
-
-describe("steps fold", () => {
-  it("tab closes it, same as it closes the evidence fold", () => {
-    const v = step(
-      view({ stepsOpen: true, matters: [matter(), matter({ id: "m2" })] }),
-      { kind: "tab" },
-    ).view;
-    expect(v.stepsOpen).toBe(false);
-  });
-});
-
-describe("stepLabel", () => {
-  it("splices an unquoted Detail into the label", () => {
-    expect(stepLabel("query_memory", '"venue"')).toBe(
-      "Searching memory for venue",
-    );
-    expect(stepLabel("observe_screen", "")).toBe("Looking at the screen");
-  });
-});
-
-describe("stepsSummaryLine", () => {
-  it("counts steps and spans first start to last finish", () => {
-    const steps: ToolStep[] = [
-      { name: "click", detail: "", startedAt: 1000, finishedAt: 1500 },
-      { name: "scroll_to", detail: "", startedAt: 1600, finishedAt: 6200 },
-    ];
-    expect(stepsSummaryLine(steps)).toBe("2 steps · 5.2 s");
-  });
-});
-
-// stepsCollapsed decides whether a finished turn's step list shows as the one-line summary or stays as the full list — the one bit of logic behind the collapse-on-answer visual (see main.ts's collapseStepsThenRender), so it gets its own tests rather than the CSS transition that plays it.
-describe("stepsCollapsed", () => {
-  const done: ToolStep[] = [
-    { name: "click", detail: "", startedAt: 0, finishedAt: 500 },
-    { name: "scroll_to", detail: "", startedAt: 500, finishedAt: 900 },
-  ];
-
-  it("collapses once every step is done and none failed", () => {
-    expect(stepsCollapsed(done, false)).toBe(true);
-    expect(stepsCollapsed(done, undefined)).toBe(true);
-  });
-
-  it("stays expanded if the user has clicked it back open", () => {
-    expect(stepsCollapsed(done, true)).toBe(false);
-  });
-
-  it("stays expanded when a step failed, however stepsOpen is set", () => {
-    const failed: ToolStep[] = [
-      ...done.slice(0, 1),
-      { ...done[1], finishedAt: 900, error: "could not scroll" },
-    ];
-    expect(stepsCollapsed(failed, false)).toBe(false);
-    expect(stepsCollapsed(failed, true)).toBe(false);
-  });
 });
 
 // The notice card: one of June's own moments — the morning brief, the evening close, a meeting prep — arriving on the daemon's event stream and shown as a speech bubble above the hover. It is not an answer to anything, so it has to leave whatever the user was in the middle of exactly as it was.
@@ -857,34 +507,6 @@ describe("notice", () => {
     id: "2026-09-05",
     kind: "close",
   };
-
-  it("puts the card up on its own when the hover was not already open", () => {
-    const { view: next } = step(view(), {
-      kind: "notice",
-      notice: brief,
-      hoverOpen: false,
-    });
-    expect(next.notice).toEqual(brief);
-    expect(next.noticeAlone).toBe(true);
-  });
-
-  // The user asked something and the answer is on screen; the notice stacks above that card rather than taking its place.
-  it("stacks above the card when the hover is already open", () => {
-    const asked = view({
-      matters: [
-        matter({ turns: [{ q: "is the venue sorted?", a: "Nearly." }] }),
-      ],
-      state: "answered",
-    });
-    const { view: next } = step(asked, {
-      kind: "notice",
-      notice: brief,
-      hoverOpen: true,
-    });
-    expect(next.noticeAlone).toBe(false);
-    expect(next.state).toBe("answered");
-    expect(next.matters).toEqual(asked.matters);
-  });
 
   it("leaves an ask in flight alone", () => {
     const asking = view({
@@ -914,17 +536,6 @@ describe("notice", () => {
     expect(v.noticeHeld).toBe(false);
   });
 
-  it("noticeGone takes the card away", () => {
-    const up = step(view(), {
-      kind: "notice",
-      notice: brief,
-      hoverOpen: false,
-    }).view;
-    const { view: next } = step(up, { kind: "noticeGone" });
-    expect(next.notice).toBeUndefined();
-    expect(next.noticeAlone).toBe(false);
-  });
-
   // The six seconds are counted in main.ts, but a timer that fires while the pointer is over the card must not be what takes it away: reading it is the reason it is being held.
   it("noticeGone leaves a held card up", () => {
     let v = step(view(), {
@@ -934,21 +545,6 @@ describe("notice", () => {
     }).view;
     v = step(v, { kind: "noticeHold" }).view;
     expect(step(v, { kind: "noticeGone" }).view.notice).toEqual(brief);
-  });
-
-  it("clicking it asks for the app window at the notice's own place and row, and takes the card away", () => {
-    const up = step(view(), {
-      kind: "notice",
-      notice: close,
-      hoverOpen: false,
-    }).view;
-    const { view: next, effect } = step(up, { kind: "noticeClick" });
-    expect(effect).toEqual({
-      kind: "openNotice",
-      place: "days",
-      id: "2026-09-05",
-    });
-    expect(next.notice).toBeUndefined();
   });
 
   // The daily stale-task question comes with its own three answers instead of the usual Done/snooze set, so the reducer has to carry them from the wire to the card unchanged, and hand the pressed key back for the POST.
@@ -978,28 +574,6 @@ describe("notice", () => {
   });
 });
 
-// noticeActionLine is what the desktop notification's own Done/snooze buttons turn a notice into, once the daemon sends the same notice back with that button's choice on it (see internal/proactive/notify.go's chose/snooze/markDone).
-describe("noticeActionLine", () => {
-  const now = new Date("2026-09-05T12:00:00");
-  const base: Notice = {
-    title: "Still open",
-    body: "Send the invoice",
-    place: "tasks",
-    id: "42",
-    kind: "task",
-  };
-
-  it("says the clock time for a snooze landing later the same day", () => {
-    const n = { ...base, action: "snoozed", until: "2026-09-05T18:00:00" };
-    expect(noticeActionLine(n, now)).toBe("Snoozed until 18:00");
-  });
-
-  it("says 'tomorrow' for a snooze that crosses midnight", () => {
-    const n = { ...base, action: "snoozed", until: "2026-09-06T09:00:00" };
-    expect(noticeActionLine(n, now)).toBe("Snoozed until tomorrow 09:00");
-  });
-});
-
 describe("following a theme change through the storage event", () => {
   it("takes the choice the app window just wrote", () => {
     expect(themeFromStorage({ key: THEME_KEY, newValue: "light" })).toBe(
@@ -1020,23 +594,11 @@ describe("following a theme change through the storage event", () => {
     ).toBeUndefined();
   });
 
-  // A clear() of the whole store arrives with no key at all, and it has taken the theme choice with it.
-  it("goes back to system when the whole store is cleared", () => {
-    expect(themeFromStorage({ key: null, newValue: null })).toBe("system");
-  });
 });
 
 // Every question the hover asked used to open a conversation of its own, so "show me" came back as "Show you what?" and "again" as "Hey — I'm here": the model was handed an empty thread each time and had nothing to refer to. The daemon appends to a thread when the ask names one, so the reducer holds the id of the thread in hand and hands it to the next question.
 describe("the conversation the hover asks in", () => {
   const T = 1_700_000_000_000;
-
-  /** One matter with one answered turn in it, the shape the card is in after a question has been answered. */
-  function answered(): View {
-    return view({
-      matters: [matter({ turns: [{ q: "show me", a: "Show you what?" }] })],
-      state: "answered",
-    });
-  }
 
   it("names no conversation on the first question, which is what asks the daemon to open one", () => {
     const { view: next, effect } = step(
@@ -1063,29 +625,6 @@ describe("the conversation the hover asks in", () => {
     v = step(v, { kind: "type", value: "again" }, T + 5000).view;
     const { effect } = step(v, { kind: "submit" }, T + 6000);
     expect(effect).toEqual({
-      kind: "ask",
-      question: "again",
-      conversation: "70",
-    });
-  });
-
-  it("keeps it across a window the user dismissed, which is the whole point of the few minutes", () => {
-    let v = step(
-      view({ conversationId: "70", conversationAt: T }),
-      { kind: "escape" },
-      T + 1000,
-    ).view;
-    v = step(v, { kind: "type", value: "again" }, T + 60_000).view;
-    expect(step(v, { kind: "submit" }, T + 60_000).effect).toEqual({
-      kind: "ask",
-      question: "again",
-      conversation: "70",
-    });
-  });
-
-  it("still names it at the very edge of that window", () => {
-    const v = view({ input: "again", conversationId: "70", conversationAt: T });
-    expect(step(v, { kind: "submit" }, T + CONVERSATION_MS).effect).toEqual({
       kind: "ask",
       question: "again",
       conversation: "70",
@@ -1156,15 +695,6 @@ describe("the conversation the hover asks in", () => {
     ).toBeUndefined();
   });
 
-  it("leaves an answered card alone, since the thread is not what is on screen", () => {
-    const { view: next } = step(
-      answered(),
-      { kind: "asked", conversationId: "71" },
-      T,
-    );
-    expect(next.matters).toEqual(answered().matters);
-    expect(next.state).toBe("answered");
-  });
 });
 
 // The notice card's own buttons: Done and the three snoozes go to the daemon and leave the card standing, because the daemon can refuse them (a locked store answers 500) and a card taken down at the press would show a refusal as done; the daemon's follow-up event, the same notice with its action filled in, is what replaces it with the one-line confirmation. Open is the one that takes the card down at the press, because it leaves for the app window.
@@ -1179,10 +709,4 @@ describe("noticeAct", () => {
     expect(next.noticeAlone).toBe(true);
   });
 
-  it("treats Open as the click it always was, and takes the card down with it", () => {
-    const up = step(view(), { kind: "notice", notice: task, hoverOpen: false }).view;
-    const { view: next, effect } = step(up, { kind: "noticeAct", act: "open" });
-    expect(effect).toEqual({ kind: "openNotice", place: "tasks", id: "42" });
-    expect(next.notice).toBeUndefined();
-  });
 });

@@ -133,11 +133,6 @@ func (d *Daemon) Resume() { d.paused.Store(false) }
 // IsPaused reports whether tracking is currently paused.
 func (d *Daemon) IsPaused() bool { return d.paused.Load() }
 
-// SetCapturer replaces the screen capture function. Used in tests to avoid real capture.
-func (d *Daemon) SetCapturer(fn func() string) {
-	d.capturer = fn
-}
-
 // SetVisionFn injects the vision describer (image -> structured sight). When set, the tiered capturer falls back to a screenshot + this function whenever accessibility text is too thin to be useful. nil disables the vision tier (text-only).
 func (d *Daemon) SetVisionFn(fn func(ctx context.Context, png []byte) Sight) {
 	d.visionFn = fn

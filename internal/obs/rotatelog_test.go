@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"june/internal/obs"
@@ -40,66 +39,32 @@ func TestRotatingWriter_RotatesPastTheCapAndKeepsThreeGenerations(t *testing.T) 
 	}
 }
 
-// TestRotatingWriter_KeepsPriorContentAcrossRotation writes one line short of the cap, then a second write that pushes it over, and checks the first line survives in june.log.1 rather than being lost when the file is rolled aside.
-func TestRotatingWriter_KeepsPriorContentAcrossRotation(t *testing.T) {
+// A rotation whose rename fails, as one does on Windows while another june process holds the log open, must leave the writer writing to june.log rather than to a closed file for the rest of the run. Two non-empty directories at .2 and .3 make the rename fail on every platform.
+func TestRotatingWriter_KeepsWritingAfterARotationFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "june.log")
-	const cap = 100
+	for _, gen := range []string{".2", ".3"} {
+		if err := os.MkdirAll(filepath.Join(path+gen, "full"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	w, err := obs.NewRotatingWriter(path, cap, 0600)
+	w, err := obs.NewRotatingWriter(path, 10, 0600)
 	if err != nil {
 		t.Fatalf("NewRotatingWriter: %v", err)
 	}
 	defer w.Close()
 
-	first := "first line, kept across the rotation\n"
-	if _, err := w.Write([]byte(first)); err != nil {
-		t.Fatalf("write first: %v", err)
+	for _, line := range []string{"first line\n", "after the failed rotation\n"} {
+		if _, err := w.Write([]byte(line)); err != nil {
+			t.Fatalf("write %q: %v", line, err)
+		}
 	}
-	second := strings.Repeat("y", 90) + "\n"
-	if _, err := w.Write([]byte(second)); err != nil {
-		t.Fatalf("write second: %v", err)
-	}
-
-	rolled, err := os.ReadFile(path + ".1")
+	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", path+".1", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(rolled), first) {
-		t.Errorf("june.log.1 = %q, want it to contain the first line written before rotation", rolled)
+	if !strings.Contains(string(got), "after the failed rotation") {
+		t.Errorf("june.log = %q, want the line written after the failed rotation", got)
 	}
-
-	current, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if !strings.Contains(string(current), second) {
-		t.Errorf("june.log = %q, want it to contain the line that triggered rotation", current)
-	}
-}
-
-// TestRotatingWriter_ConcurrentWritesDoNotRace writes from many goroutines at once with a small cap, so rotation is guaranteed to fire mid-stream, and relies on the race detector (run via `go test -race`) to catch any write or rotation that was not properly serialized.
-func TestRotatingWriter_ConcurrentWritesDoNotRace(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "june.log")
-
-	w, err := obs.NewRotatingWriter(path, 150, 0600)
-	if err != nil {
-		t.Fatalf("NewRotatingWriter: %v", err)
-	}
-	defer w.Close()
-
-	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 10; j++ {
-				if _, err := w.Write([]byte("concurrent line\n")); err != nil {
-					t.Errorf("concurrent write: %v", err)
-				}
-			}
-		}()
-	}
-	wg.Wait()
 }

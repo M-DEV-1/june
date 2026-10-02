@@ -63,11 +63,20 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 }
 
 // rotate closes the current file, shifts path.2->path.3, path.1->path.2, path->path.1 (dropping whatever was already at path.3), and reopens path fresh. Called with mu already held.
+// The file is reopened even when a rename fails, so a failed rotation costs the cap and not the log: on Windows a rename fails whenever another june process has the log open.
 func (w *RotatingWriter) rotate() error {
 	if err := w.file.Close(); err != nil {
 		return fmt.Errorf("close %s before rotating: %w", w.path, err)
 	}
-	// Oldest first, so a failure partway through never leaves two names pointing at the same generation.
+	err := w.shift()
+	if oerr := w.open(); oerr != nil {
+		return oerr
+	}
+	return err
+}
+
+// shift moves each generation one name down, oldest first, so a failure partway through never leaves two names pointing at the same generation.
+func (w *RotatingWriter) shift() error {
 	os.Remove(w.path + ".3")
 	if err := renameIfExists(w.path+".2", w.path+".3"); err != nil {
 		return err
@@ -75,10 +84,7 @@ func (w *RotatingWriter) rotate() error {
 	if err := renameIfExists(w.path+".1", w.path+".2"); err != nil {
 		return err
 	}
-	if err := renameIfExists(w.path, w.path+".1"); err != nil {
-		return err
-	}
-	return w.open()
+	return renameIfExists(w.path, w.path+".1")
 }
 
 // renameIfExists renames old to new, and does nothing when old does not exist — every step of rotate is optional the first few times a file has not grown enough generations to reach it yet.

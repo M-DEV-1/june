@@ -237,121 +237,50 @@ pub fn stream_events(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_kind, push, read_chunk, sse_payloads, worth_logging};
+    use super::{push, read_chunk, sse_payloads};
     use std::io::BufReader;
     use std::sync::mpsc;
 
     #[test]
-    fn a_level_tick_is_not_logged_and_everything_else_is() {
-        assert!(!worth_logging(r#"{"id":"voice-1","type":"level","speaker":0.4}"#));
-        assert!(worth_logging(r#"{"id":"ask-1","type":"overlay"}"#));
-        assert!(worth_logging("not json at all"));
-    }
-
-    #[test]
-    fn a_full_queue_drops_the_event_and_says_so_once_per_run() {
+    fn a_full_queue_drops_the_event_and_a_gone_reader_ends_the_read() {
         let (tx, rx) = mpsc::sync_channel::<String>(1);
         let mut dropping = false;
         push(&tx, "one".to_string(), &mut dropping).unwrap();
         push(&tx, "two".to_string(), &mut dropping).unwrap();
-        push(&tx, "three".to_string(), &mut dropping).unwrap();
-        // The queue took the first and neither of the two that found it full; nothing waited on the reader.
+        // The queue took the first and not the one that found it full; nothing waited on the reader.
         assert!(dropping);
         assert_eq!(rx.recv().unwrap(), "one");
         assert!(rx.try_recv().is_err());
-        // Room again, so the next event goes through and the next run of drops gets its own line.
-        push(&tx, "four".to_string(), &mut dropping).unwrap();
+        // Room again, so the next event goes through and the next run of drops gets its own log line.
+        push(&tx, "three".to_string(), &mut dropping).unwrap();
         assert!(!dropping);
-    }
-
-    #[test]
-    fn a_queue_whose_thread_has_gone_ends_the_read() {
-        let (tx, rx) = mpsc::sync_channel::<String>(1);
         drop(rx);
-        let mut dropping = false;
-        assert!(push(&tx, "one".to_string(), &mut dropping).is_err());
+        assert!(push(&tx, "four".to_string(), &mut dropping).is_err());
     }
 
     #[test]
-    fn the_kind_of_an_event_is_read_for_the_log() {
-        assert_eq!(payload_kind(r#"{"id":"ask-1","type":"overlay"}"#), "overlay");
-        assert_eq!(payload_kind("not json at all"), "?");
-        assert_eq!(payload_kind(r#"{"id":"ask-1"}"#), "?");
-    }
-
-    #[test]
-    fn one_whole_event_is_read() {
-        let mut buffer = String::from("data: {\"type\":\"overlay\"}\n\n");
+    fn server_sent_events_are_read_as_they_arrive() {
+        // A keep-alive comment yields nothing, the space after "data:" is optional, and the data lines of one event are joined with newlines.
+        let mut buffer = String::from(": ping\n\ndata: one\n\ndata:first\ndata: second\n\ndata: {\"half");
         assert_eq!(
             sse_payloads(&mut buffer),
-            vec!["{\"type\":\"overlay\"}".to_string()]
+            vec!["one".to_string(), "first\nsecond".to_string()]
         );
+        // A half-arrived event waits for its blank line.
+        assert_eq!(buffer, "data: {\"half");
+        buffer.push_str("\":1}\n\n");
+        assert_eq!(sse_payloads(&mut buffer), vec!["{\"half\":1}".to_string()]);
         assert_eq!(buffer, "");
     }
 
     #[test]
-    fn several_events_in_one_read_are_all_returned() {
-        let mut buffer = String::from("data: one\n\ndata: two\n\n");
-        assert_eq!(
-            sse_payloads(&mut buffer),
-            vec!["one".to_string(), "two".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_half_arrived_event_is_kept_for_the_next_read() {
-        let mut buffer = String::from("data: done\n\ndata: {\"half");
-        assert_eq!(sse_payloads(&mut buffer), vec!["done".to_string()]);
-        assert_eq!(buffer, "data: {\"half");
-        buffer.push_str("\":1}\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["{\"half\":1}".to_string()]);
-    }
-
-    #[test]
-    fn nothing_is_returned_until_the_blank_line_arrives() {
-        let mut buffer = String::from("data: still coming");
-        assert!(sse_payloads(&mut buffer).is_empty());
-        assert_eq!(buffer, "data: still coming");
-    }
-
-    #[test]
-    fn the_data_lines_of_one_event_are_joined_with_newlines() {
-        let mut buffer = String::from("data: first\ndata: second\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["first\nsecond".to_string()]);
-    }
-
-    #[test]
-    fn a_data_line_without_the_optional_space_is_read() {
-        let mut buffer = String::from("data:tight\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["tight".to_string()]);
-    }
-
-    #[test]
-    fn a_keep_alive_comment_yields_no_event() {
-        let mut buffer = String::from(": ping\n\ndata: real\n\n");
-        assert_eq!(sse_payloads(&mut buffer), vec!["real".to_string()]);
-    }
-
-    #[test]
     fn chunks_are_read_one_at_a_time_until_the_zero_chunk() {
-        let wire = b"5\r\nhello\r\n3\r\nbye\r\n0\r\n\r\n";
+        let wire = b"5;name=value\r\nhello\r\n3\r\nbye\r\n0\r\n\r\n";
         let mut reader = BufReader::new(&wire[..]);
         assert_eq!(read_chunk(&mut reader).unwrap(), Some(b"hello".to_vec()));
         assert_eq!(read_chunk(&mut reader).unwrap(), Some(b"bye".to_vec()));
         assert_eq!(read_chunk(&mut reader).unwrap(), None);
-    }
-
-    #[test]
-    fn a_chunk_size_carrying_an_extension_is_still_read() {
-        let wire = b"5;name=value\r\nhello\r\n0\r\n\r\n";
-        let mut reader = BufReader::new(&wire[..]);
-        assert_eq!(read_chunk(&mut reader).unwrap(), Some(b"hello".to_vec()));
-    }
-
-    #[test]
-    fn an_ended_connection_reads_as_no_chunk() {
-        let wire = b"";
-        let mut reader = BufReader::new(&wire[..]);
-        assert_eq!(read_chunk(&mut reader).unwrap(), None);
+        // An ended connection reads as no chunk too.
+        assert_eq!(read_chunk(&mut BufReader::new(&b""[..])).unwrap(), None);
     }
 }

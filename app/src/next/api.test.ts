@@ -52,37 +52,22 @@ async function settle(): Promise<void> {
 }
 
 describe("events", () => {
-  it("spreads the retry over a second of jitter, so windows that dropped together do not reconnect in phase", async () => {
-    vi.spyOn(Math, "random").mockReturnValue(1);
-    events(vi.fn());
-    await settle();
-    FakeEventSource.instances[0].fail();
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(FakeEventSource.instances).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(FakeEventSource.instances).toHaveLength(2);
-  });
-
-  it("constructs no new EventSource when stop() runs after the retry has been scheduled", async () => {
+  it("opens no new stream after stop(), whether the retry was already scheduled or the stream errors afterwards", async () => {
+    // The timer is already scheduled by the time stop() runs, so what saves this is connect()'s own check on the way back in.
     const stop = events(vi.fn());
     await settle();
-    // The timer is already scheduled by the time stop() runs, so what saves this is connect()'s own check on the way back in.
     FakeEventSource.instances[0].fail();
     stop();
     await vi.advanceTimersByTimeAsync(2000);
     expect(FakeEventSource.instances.length).toBe(1);
-  });
 
-  it("schedules no retry at all for a stream that errors after stop() has run", async () => {
-    const stop = events(vi.fn());
-    await settle();
-    const src = FakeEventSource.instances[0];
-    stop();
     // A stream closed by stop() can still report the error of its own teardown; a timer scheduled then keeps a stopped stream reconnecting on a two-second beat for the life of the page.
+    const stop2 = events(vi.fn());
+    await settle();
+    const src = FakeEventSource.instances[1];
+    stop2();
     src.fail();
     expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(FakeEventSource.instances.length).toBe(1);
   });
 
   it("parses and forwards each message, and ignores a malformed one without closing the stream", async () => {

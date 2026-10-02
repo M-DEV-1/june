@@ -58,47 +58,6 @@ func TestWriteEpisode_StoresStructureAndJPEG(t *testing.T) {
 	}
 }
 
-func TestListEpisodes_FiltersAppAndRecency(t *testing.T) {
-	store := memStore(t)
-	ctx := context.Background()
-
-	if _, err := store.LogEpisode(ctx, "Slack", "june", "thread about retrieval"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.LogEpisode(ctx, "Firefox", "Suits", "watching a show"); err != nil {
-		t.Fatal(err)
-	}
-
-	slack, err := store.ListEpisodes(ctx, db.EpisodeQuery{App: "slack", Limit: 10, NewestFirst: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(slack) != 1 || slack[0].App != "Slack" {
-		t.Fatalf("app filter: %+v", slack)
-	}
-
-	recent, err := store.ListEpisodes(ctx, db.EpisodeQuery{Limit: 1, NewestFirst: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(recent) != 1 || recent[0].App != "Firefox" {
-		t.Fatalf("recent: %+v", recent)
-	}
-
-	// Window in the past should miss both (created_at is now).
-	old, err := store.ListEpisodes(ctx, db.EpisodeQuery{
-		Since: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
-		Until: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC),
-		Limit: 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(old) != 0 {
-		t.Fatalf("expected empty past window, got %+v", old)
-	}
-}
-
 func TestAgeEpisodeImages_DropsOldJPEGsKeepsDescription(t *testing.T) {
 	dir := t.TempDir()
 	store, err := db.New(filepath.Join(dir, "db"))

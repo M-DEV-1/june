@@ -9,22 +9,26 @@ import (
 	"june/internal/ipctoken"
 )
 
-func TestGenerate_RestrictsFilePermissions(t *testing.T) {
+// The token file is 0600 inside a 0700 directory, so no other user on the machine can read the token or list the directory it sits in.
+func TestGenerate_KeepsTheTokenAndItsDirectoryPrivate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits don't apply on Windows")
 	}
-	path := filepath.Join(t.TempDir(), "ipc-token")
+	dir := filepath.Join(t.TempDir(), "june")
+	path := filepath.Join(dir, "ipc-token")
 
 	if _, err := ipctoken.Generate(path); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0600 {
-		t.Errorf("token file permissions = %o, want 0600", got)
+	for p, want := range map[string]os.FileMode{path: 0600, dir: 0700} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s permissions = %o, want %o", p, got, want)
+		}
 	}
 }
 
@@ -49,21 +53,5 @@ func TestGenerate_EachCallProducesADifferentToken(t *testing.T) {
 	}
 	if got != second {
 		t.Errorf("expected Read to return the most recently generated token %q, got %q", second, got)
-	}
-}
-
-// The token file is 0600, but the directory it sits in was created 0755 here, so whoever created the data directory first decided whether anyone else on the machine could list it. It is the user's own directory and is created as such.
-func TestGenerate_CreatesTheTokenDirectoryPrivateToTheUser(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "june")
-	if _, err := ipctoken.Generate(filepath.Join(dir, "ipc-token")); err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat the token directory: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0700 {
-		t.Errorf("expected the token directory to be 0700, got %o", got)
 	}
 }

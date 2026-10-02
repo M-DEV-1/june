@@ -65,7 +65,7 @@ func authedDaemonGet(url string) {
 	if err != nil {
 		return
 	}
-	ipctoken.Attach(req, ipctoken.DefaultPath)
+	ipctoken.Attach(req, ipctoken.DefaultPath())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return

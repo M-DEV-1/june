@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"june/internal/act"
@@ -128,15 +127,16 @@ func optionalWindow(args map[string]any, now time.Time) (time.Time, time.Time, b
 // queryMemoryHits is how many hits query_memory shows the model. The since/until window is enforced inside HybridSearchWindow (SQL-side, before top-k), so a windowed call asks for the same limit as a plain one.
 const queryMemoryHits = 10
 
-// sensitivePathSubstrings/sensitivePathSuffixes gate read_file behind HITL approval — credentials, SSH/GPG/cloud keys, and june's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
+// sensitivePathSubstrings/sensitivePathSuffixes are the paths read_file refuses — credentials, SSH/GPG/cloud keys, and june's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
 var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "june-db/ipc-token"}
 var sensitivePathSuffixes = []string{".pem", ".key"}
 
 // isSensitivePath reports whether path matches one of the patterns above.
 func isSensitivePath(path string) bool {
-	candidates := []string{path}
+	// Both forms are compared with forward slashes, so a Windows path such as C:\Users\me\.aws\config meets the same patterns.
+	candidates := []string{filepath.ToSlash(path)}
 	if abs, err := filepath.Abs(path); err == nil {
-		candidates = append(candidates, filepath.Clean(abs))
+		candidates = append(candidates, filepath.ToSlash(abs))
 	}
 	for _, c := range candidates {
 		for _, sub := range sensitivePathSubstrings {
@@ -153,38 +153,6 @@ func isSensitivePath(path string) bool {
 	return false
 }
 
-// readClipboard reads the system clipboard. Extracted so it can be passed as a ToolRequest.Execute closure — read_clipboard always requires HITL approval (see executeTool), since a password manager routinely puts secrets there.
-func readClipboard() string {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", "Get-Clipboard")
-	} else {
-		cmd = exec.Command("xclip", "-selection", "clipboard", "-o")
-	}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		slog.Warn("clipboard read failed", "error", err)
-		return toolError("I couldn't read the clipboard")
-	}
-	return string(output)
-}
-
-func RunShellCommand(command string) string {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", command)
-	} else {
-		cmd = exec.Command("sh", "-c", command)
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// The command's own output is the answer to why it failed and the model needs it; only Go's exit-status wrapper is dropped.
-		return toolError("that command didn't run cleanly") + "\noutput: " + string(output)
-	}
-	return util.RunesNote(string(output), 2000, "... (truncated)")
-}
-
 // openURLCommand builds the command that hands a url to the desktop's browser, per platform. A var so a test can swap it and never launch a real browser. Input: the url, already checked to be http or https. Output: the command, not yet started.
 var openURLCommand = func(url string) *exec.Cmd {
 	switch runtime.GOOS {
@@ -197,44 +165,8 @@ var openURLCommand = func(url string) *exec.Cmd {
 	}
 }
 
-// approvalGatedTools are the tools whose handler waits on ToolApprovalChan for a human to approve the call. No production code reads that channel, so a call parked until the session ended, the model never got a result for it, and every later call was told another approval was already pending. Where nothing has called SetToolApprovals they are kept out of the tool list the live session declares (liveToolsFor) and refused if a model names one anyway; where an approver is registered they behave as they always did. They are out of the ask's list (askAllowedTools) either way.
-var approvalGatedTools = map[string]bool{"shell_exec": true, "read_clipboard": true, "read_file": true}
-
-// approverRegistered is true while something in this process is reading ToolApprovalChan and will answer what it finds there. Only tests set it; the daemon reads that channel nowhere, so its asks, voice sessions, routines and act jobs must refuse an approval-gated tool rather than park on it forever.
-// ponytail: one flag for the whole process, not one per Agent, because the tool list is built by package functions (liveToolsFor) that have no Agent in hand; move it onto Agent if a single process ever has to run both an approving and a non-approving session.
-var approverRegistered atomic.Bool
-
-// SetToolApprovals records whether this process has something answering ToolApprovalChan. Input: true when an approver is now reading the channel, false when it stops. Output: none. Called by an approver before it connects; a test that turns it on must turn it back off.
-func SetToolApprovals(on bool) { approverRegistered.Store(on) }
-
-// HasApprover reports whether an approval request would reach a human. Output: true only after SetToolApprovals(true).
-func HasApprover() bool { return approverRegistered.Load() }
-
-// requestApproval sends a generic HITL approval request through ToolApprovalChan and blocks for the approver's result — or until ctx is cancelled (the live session ended before the user responded; Connect's sessCancel via receiveLoop -> runToolCall). Callers check HasApprover and AllowedCmds themselves before calling this — allowKey/editableCommand are only carried through for the approver to act on ("Allow for session" storage, "Suggest changes" pre-fill), not re-checked here.
-func (a *Agent) requestApproval(ctx context.Context, allowKey, description string, execute func() string, editableCommand string) string {
-	resChan := make(chan string, 1)
-	req := ToolRequest{
-		Description:     description,
-		Execute:         execute,
-		ResultChan:      resChan,
-		AllowKey:        allowKey,
-		EditableCommand: editableCommand,
-	}
-	select {
-	case a.ToolApprovalChan <- req:
-	default:
-		// Approval queue full — another tool is pending. Reject to unblock.
-		return toolError("I'm already waiting on another approval, ask again in a moment")
-	}
-
-	select {
-	case res := <-resChan:
-		return res
-	case <-ctx.Done():
-		slog.Warn("HITL approval abandoned: session ended before user responded", "description", description)
-		return toolError("that ended before it was approved")
-	}
-}
+// approvalGatedTools are the tools that would need a person to approve a call before it runs. Nothing in June can ask for that approval, so they are kept out of the tool list the live session declares (liveToolsFor) and out of the ask's list (askAllowedTools), and read_file refuses a sensitive path rather than reading it.
+var approvalGatedTools = map[string]bool{"read_file": true}
 
 // refuseApproval is what a tool returns instead of asking for an approval nobody is listening for. Input: what the tool wanted to do, for the log. Output: one refusal sentence for the model.
 func refuseApproval(what string) string {
@@ -290,60 +222,20 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		return toolError(storeUnavailable)
 	}
 	switch name {
-	case "shell_exec":
-		command, ok := args["command"].(string)
-		if !ok {
-			return toolError("shell_exec needs a command to run")
-		}
-
-		// Check session allowlist
-		if _, allowed := a.AllowedCmds.Load(command); allowed {
-			slog.Info("executing auto-allowed shell command", "command", command)
-			return RunShellCommand(command)
-		}
-
-		if !HasApprover() {
-			return refuseApproval("shell: " + command)
-		}
-		slog.Warn("intercepting shell command for HITL", "command", command)
-		return a.requestApproval(ctx, command, "shell: "+command, func() string { return RunShellCommand(command) }, command)
-
-	case "read_clipboard":
-		// Always gated — a password manager routinely leaves a secret sitting in the clipboard, and there's no way to distinguish that from a benign copy ahead of time.
-		if _, allowed := a.AllowedCmds.Load("read_clipboard"); allowed {
-			return readClipboard()
-		}
-		if !HasApprover() {
-			return refuseApproval("read the clipboard")
-		}
-		slog.Warn("intercepting clipboard read for HITL")
-		return a.requestApproval(ctx, "read_clipboard", "read the clipboard", readClipboard, "")
-
 	case "read_file":
 		path, ok := args["path"].(string)
 		if !ok {
 			return toolError("read_file needs a path")
 		}
-		execute := func() string {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				slog.Warn("read_file failed", "path", path, "error", err)
-				return toolError("I couldn't read that file, check the path")
-			}
-			return util.RunesNote(string(data), 4000, "... (truncated, file too large)")
-		}
-		if !isSensitivePath(path) {
-			return execute()
-		}
-		allowKey := "read_file:" + path
-		if _, allowed := a.AllowedCmds.Load(allowKey); allowed {
-			return execute()
-		}
-		if !HasApprover() {
+		if isSensitivePath(path) {
 			return refuseApproval("read file: " + path)
 		}
-		slog.Warn("intercepting sensitive file read for HITL", "path", path)
-		return a.requestApproval(ctx, allowKey, "read file: "+path, execute, "")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("read_file failed", "path", path, "error", err)
+			return toolError("I couldn't read that file, check the path")
+		}
+		return util.RunesNote(string(data), 4000, "... (truncated, file too large)")
 
 	case "list_files":
 		path, _ := args["path"].(string)
@@ -1122,7 +1014,7 @@ func quoteArg(s string) string {
 }
 
 // toolActivitySummary pre-formats a tool call's primary argument into a short display literal for the UI (e.g. `"Riddler puzzles"` for query_memory), so the UI never needs to know each tool's arg-shape — that knowledge already lives here, next to executeTool/toolDefinitions.
-// Unknown tools and no-arg tools (read_clipboard) summarize to "".
+// Unknown tools and no-arg tools summarize to "".
 func toolActivitySummary(name string, args map[string]any) string {
 	switch name {
 	case "query_memory":
@@ -1142,10 +1034,6 @@ func toolActivitySummary(name string, args map[string]any) string {
 			return fmt.Sprintf("since %s", since)
 		case until != "":
 			return fmt.Sprintf("until %s", until)
-		}
-	case "shell_exec":
-		if cmd, ok := args["command"].(string); ok {
-			return quoteArg(cmd)
 		}
 	case "read_file":
 		if path, ok := args["path"].(string); ok {

@@ -102,12 +102,6 @@ func actionHops(hops []ToolHop) int {
 	return n
 }
 
-// GeminiCannotAnswer reports whether err is a failure no Gemini model can fix — 503 because every model is overloaded, or 429 because the day's free-tier request allowance is spent — and so is worth handing to a different provider. Input: the error from a Gemini call, possibly wrapped. Output: true only for those two.
-// It is the exported form of geminiCannotAnswer, for the background jobs in internal/brain that need the same rule the asks already use.
-func GeminiCannotAnswer(err error) bool {
-	return geminiCannotAnswer(err)
-}
-
 // geminiCannotAnswer reports whether an ask failed in a way no Gemini model can fix: 503 because every model is overloaded, or 429 because the day's free-tier quota is spent. Input: the error from askText, possibly wrapped. Output: true only for those two, since any other failure would fail the same way on any provider.
 func geminiCannotAnswer(err error) bool {
 	return apiErrorCode(err, 503) || apiErrorCode(err, 429)
@@ -293,7 +287,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 		slog.Warn("askCodex: personal context fetch failed, continuing without it on screen rounds", "error", err)
 	}
 
-	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancelRecall()
 	if err != nil {

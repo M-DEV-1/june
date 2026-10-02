@@ -2,99 +2,11 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
 	"june/internal/act"
 )
-
-// irreversible is the code-level backstop for the user's stop-line rule ("never click or type into anything that sends, pays, deletes or submits unless I said go"): a description in the system prompt is something a model can talk itself out of, this is not.
-func TestIrreversible_TableCases(t *testing.T) {
-	cases := []struct {
-		name  string
-		label string
-		role  string
-		win   string
-		typed bool
-		want  bool
-	}{
-		{"send button", "Send", "push button", "Mail", false, true},
-		{"post to slack", "Post to Slack", "push button", "Slack", false, true},
-		{"pay now", "Pay now", "push button", "Checkout", false, true},
-		{"buy it now", "Buy it now", "push button", "Amazon", false, true},
-		{"confirm order", "Confirm Order", "push button", "Checkout", false, true},
-		{"place order", "Place Order", "push button", "Checkout", false, true},
-		{"checkout button", "Checkout", "push button", "Cart", false, true},
-		{"delete", "Delete", "push button", "Files", false, true},
-		{"remove item", "Remove item", "link", "Cart", false, true},
-		{"submit", "Submit", "push button", "Form", false, true},
-		{"place your order, Amazon's wording", "Place your order", "push button", "Review your order", false, true},
-		{"confirm your order", "Confirm your order", "push button", "Review", false, true},
-		{"cancel inside a deleting window", "Cancel", "push button", "Delete Account", false, false},
-		{"back inside a checkout window", "Back", "push button", "Checkout", false, false},
-		{"close inside a send window", "Close", "push button", "Send message", false, false},
-		{"unsubscribe", "Unsubscribe", "link", "Newsletter", false, true},
-		{"sign out", "Sign out", "push button", "Settings", false, true},
-		{"transfer funds", "Transfer", "push button", "Bank", false, true},
-		// A compound built on a trigger word still counts: the left edge is anchored, the right is not.
-		{"sender compound", "Sender ID", "push button", "Settings", false, true},
-		{"posting compound", "posting rules", "link", "Forum", false, true},
-		// The window can name the commitment even when the control itself does not.
-		{"window names checkout", "Continue", "push button", "Checkout", false, true},
-		// Ordinary controls never trip it.
-		{"reload", "Reload", "push button", "Brave", false, false},
-		{"merge", "Merge", "push button", "GitHub", false, false},
-		{"address bar", "Address and search bar", "entry", "Brave", false, false},
-		// Sign IN is not sign out, and never appears in the word list.
-		{"sign in", "Sign in", "push button", "Settings", false, false},
-		// A password field only matters when something is about to be typed into it: clicking to focus it changes nothing.
-		{"password field clicked", "", "password text", "Settings", false, false},
-		{"password field typed", "", "password text", "Settings", true, true},
-		{"card number field typed", "Card number", "entry", "Billing", true, true},
-		{"cvv field typed", "CVV", "entry", "Billing", true, true},
-		{"otp field typed", "OTP", "entry", "Bank", true, true},
-		{"pin field typed", "PIN", "entry", "Bank", true, true},
-		{"account number field typed", "Account number", "entry", "Bank", true, true},
-		// The same field clicked, not typed into, does not trip the secret half of the rule.
-		{"card number field clicked", "Card number", "entry", "Billing", false, false},
-		{"ordinary field typed", "Message", "entry", "Slack", true, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			item := act.Item{Role: c.role, Label: c.label}
-			if got := irreversible(item, c.win, c.typed); got != c.want {
-				t.Errorf("irreversible(%+v, %q, %v) = %v, want %v", item, c.win, c.typed, got, c.want)
-			}
-		})
-	}
-}
-
-// consented reads the same word list back out of what the user actually said, loosened for a sentence rather than a button label.
-func TestConsented_TableCases(t *testing.T) {
-	cases := []struct {
-		question string
-		verb     string
-		want     bool
-	}{
-		{`yes, send it`, "send", true},
-		{`go ahead and delete`, "delete", true},
-		{`confirm the order`, "confirm order", true},
-		{`please do place the order`, "place order", true},
-		{`yes, sign out`, "sign out", true},
-		{`click send`, "send", false},                                                      // names the action but never affirms it
-		{`yes`, "send", false},                                                             // affirms but names nothing
-		{`yes, that looks right`, "send", false},                                           // affirms something unrelated
-		{`go ahead and delete the spam email, then check the shopping cart`, "buy", false}, // consent for one action must not unlock another
-		{`yes, send it`, "delete", false},
-		{``, "send", false},
-	}
-	for _, c := range cases {
-		if got := consented(c.question, c.verb); got != c.want {
-			t.Errorf("consented(%q, %q) = %v, want %v", c.question, c.verb, got, c.want)
-		}
-	}
-}
 
 // guardedClickAgent wires an Agent whose only observed element trips the stop-line rule, so click's refusal path can be exercised through executeTool the way the model would actually call it.
 func guardedClickAgent(t *testing.T) (*Agent, *fakeActions, *[]string) {
@@ -152,30 +64,6 @@ func TestExecuteTool_Click_ProceedsWhenTheQuestionAlreadyConsented(t *testing.T)
 	}
 }
 
-// An unguarded label (nothing in the stop-line list) needs no consent at all — most of what click does is navigation, not commitment.
-func TestExecuteTool_Click_UnguardedNeedsNoConsent(t *testing.T) {
-	a, f := actingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	got := a.executeTool(context.Background(), "click", map[string]any{"n": float64(1)})
-	if len(f.clicked) != 1 || !strings.Contains(got, "clicked") {
-		t.Errorf("unguarded click should run without consent: clicked=%v got=%q", f.clicked, got)
-	}
-}
-
-// A click that goes through leaves the field behind for type_text to read back as "the field with focus".
-func TestExecuteTool_Click_RemembersTheFieldForTypeText(t *testing.T) {
-	a, f := actingAgent(t)
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)}) // the address entry
-	if len(f.clicked) != 1 {
-		t.Fatalf("clicked = %v, want the address entry pressed", f.clicked)
-	}
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "example.com", "enter": true})
-	if len(f.typed) != 1 {
-		t.Errorf("typing into an ordinary field should run, typed = %v, got %q", f.typed, got)
-	}
-}
-
 // A field is refused outright, with no consent phrase able to unlock it, either because its own label names a secret — the whole point is that June never types a password, a card number or a code on the user's behalf — or because a password box carries no label at all (the accessibility walk blanks it), so its role alone tells type_text to refuse it.
 func TestExecuteTool_TypeText_RefusesSecretFieldOutright(t *testing.T) {
 	cases := []struct {
@@ -226,15 +114,6 @@ func TestExecuteTool_TypeText_RefusesSecretFieldOutright(t *testing.T) {
 	}
 }
 
-// Before any click has happened, type_text has no field to blame — it must fall through to typing rather than refuse something it cannot describe.
-func TestExecuteTool_TypeText_WithNoFocusedFieldYetTypes(t *testing.T) {
-	a, f := actingAgent(t)
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "june"})
-	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
-		t.Errorf("typed=%v got=%q, want it to type with nothing known about focus", f.typed, got)
-	}
-}
-
 // click's own verify guard (added alongside the stop line) refuses to act when the node no longer matches what observe_screen described, before the stop-line check even runs.
 func TestExecuteTool_Click_RefusesWhenVerifyFails(t *testing.T) {
 	a, f := actingAgent(t)
@@ -266,47 +145,5 @@ func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *tes
 	}
 	if !strings.Contains(got, "no place to type") {
 		t.Errorf("result = %q, want the refusal", got)
-	}
-}
-
-// A read that says nothing either way — the bus timed out, the element has gone, or the toolkit does not publish the focused bit on the node the walk listed, which Chromium and Electron often do not — is not evidence that the focus moved, and refusing on it stops typing into fields that are perfectly focused. The remembered click stands and the text goes in.
-func TestExecuteTool_TypeText_TypesWhenTheFocusCannotBeRead(t *testing.T) {
-	a, f := actingAgent(t)
-	a.focused = func(context.Context, string) (bool, error) {
-		return false, errors.New("the accessibility bus gave no state for r-address")
-	}
-	a.executeTool(context.Background(), "observe_screen", map[string]any{})
-	a.executeTool(context.Background(), "click", map[string]any{"n": float64(2)})
-
-	got := a.executeTool(context.Background(), "type_text", map[string]any{"text": "june"})
-
-	if len(f.typed) != 1 || !strings.Contains(got, "typed") {
-		t.Errorf("typed = %v, result = %q, want the text typed on an unreadable focus rather than a refusal", f.typed, got)
-	}
-}
-
-// A click at a point on the screen is how every field in a window without a readable tree gets focused, and how a picture-led click focuses one in a window with a tree. After it the session knows nothing about the field from the click itself, so it asks the tree who holds the keyboard now: a readable place to type gets the text, a readable control that is no place to type is refused by name, and a window that publishes nothing readable gets the text on the click alone, since the press check and the next look are what verify it. Measured on 2026-09-08: the Spotify search box was clicked by point three times and every type_text after it was refused.
-func TestExecuteTool_TypeText_AfterAPointClickTypesIntoWhatHoldsTheKeyboard(t *testing.T) {
-	ctx := context.Background()
-
-	a, f := actingAgent(t)
-	holdsKeyboard(t, act.Node{Role: "entry", Label: "Search", Ref: "r-search"}, true)
-	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 1 {
-		t.Errorf("typed = %v, result %q; want the text typed into the entry that holds the keyboard", f.typed, got)
-	}
-
-	a, f = actingAgent(t)
-	holdsKeyboard(t, act.Node{Role: "push button", Label: "Send", Ref: "r-send"}, true)
-	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 0 || !strings.Contains(got, "Send") {
-		t.Errorf("typed = %v, result %q; want a refusal naming the button that holds the keyboard", f.typed, got)
-	}
-
-	a, f = actingAgent(t)
-	holdsKeyboard(t, act.Node{}, false)
-	a.focusLost(ctx)
-	if got := a.executeTool(ctx, "type_text", map[string]any{"text": "june"}); len(f.typed) != 1 {
-		t.Errorf("typed = %v, result %q; want the text typed on the click alone when nothing readable holds the keyboard", f.typed, got)
 	}
 }

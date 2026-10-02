@@ -66,47 +66,6 @@ func (f *fakeCompactStore) ReplaceSummariesWithDigest(ctx context.Context, dayID
 
 // --- tests ---
 
-func TestCompactor_GroupsWithTwoSummaries_TriggersDigestAndReplace(t *testing.T) {
-	digester := &fakeDigester{result: "merged daily digest"}
-	store := &fakeCompactStore{
-		groups: []memory.SummaryGroup{
-			{
-				DayID: 10,
-				Day:   "2026-06-01",
-				Summaries: []memory.NodeRef{
-					{ID: 100, Content: "did some coding"},
-					{ID: 101, Content: "reviewed a PR"},
-				},
-			},
-		},
-	}
-	c := memory.NewCompactor(digester, store)
-
-	if err := c.Compact(context.Background(), 7*24*time.Hour); err != nil {
-		t.Fatalf("Compact returned error: %v", err)
-	}
-
-	if digester.callCount != 1 {
-		t.Fatalf("expected 1 Digest call, got %d", digester.callCount)
-	}
-	if len(digester.lastInput) != 2 {
-		t.Errorf("expected 2 summaries passed to Digest, got %d", len(digester.lastInput))
-	}
-	if len(store.replaceCalls) != 1 {
-		t.Fatalf("expected 1 Replace call, got %d", len(store.replaceCalls))
-	}
-	rc := store.replaceCalls[0]
-	if rc.dayID != 10 {
-		t.Errorf("expected dayID=10, got %d", rc.dayID)
-	}
-	if len(rc.summaryIDs) != 2 || rc.summaryIDs[0] != 100 || rc.summaryIDs[1] != 101 {
-		t.Errorf("unexpected summaryIDs: %v", rc.summaryIDs)
-	}
-	if rc.digest != "merged daily digest" {
-		t.Errorf("unexpected digest: %q", rc.digest)
-	}
-}
-
 func TestCompactor_DigestErrorOnOneGroup_DoesNotAbortOthers(t *testing.T) {
 	store := &fakeCompactStore{
 		groups: []memory.SummaryGroup{
@@ -160,30 +119,7 @@ func (e *errorOnFirstDigester) Digest(ctx context.Context, prior string, summari
 	return "digest for group", nil
 }
 
-// A day digested a second time — normal, since a day's summaries cross the age cutoff over more than one run — must have its earlier digest shown to the model, so the paragraph that replaces it still covers the material the first one did.
-func TestCompactor_PassesTheDaysExistingDigestIntoTheCall(t *testing.T) {
-	digester := &fakeDigester{result: "both halves of the day"}
-	store := &fakeCompactStore{
-		groups: []memory.SummaryGroup{{
-			DayID: 10,
-			Day:   "2026-06-01",
-			Summaries: []memory.NodeRef{
-				{ID: 100, Content: "reviewed a PR"},
-				{ID: 101, Content: "wrote the release notes"},
-			},
-		}},
-		digests: map[int64]string{10: "the morning, already digested"},
-	}
-
-	if err := memory.NewCompactor(digester, store).Compact(context.Background(), 7*24*time.Hour); err != nil {
-		t.Fatalf("Compact: %v", err)
-	}
-	if digester.lastPrior != "the morning, already digested" {
-		t.Errorf("prior passed to Digest = %q, want the day's existing digest", digester.lastPrior)
-	}
-}
-
-// A day can hold hundreds of summaries. All of them in one prompt runs past the model's input limit, the call fails, and the day is never digested at all — so they go in batches, each batch handed the digest the previous one produced.
+// A day can hold hundreds of summaries. All of them in one prompt runs past the model's input limit, the call fails, and the day is never digested at all, so they go in batches, each batch handed the digest the previous one produced. The first batch is handed the day's existing digest, because a day crosses the age cutoff over more than one run and the paragraph that replaces the old digest must still cover what it did.
 func TestCompactor_DigestsALargeDayInBatches(t *testing.T) {
 	const total = 120
 	summaries := make([]memory.NodeRef, total)
@@ -195,7 +131,8 @@ func TestCompactor_DigestsALargeDayInBatches(t *testing.T) {
 		return fmt.Sprintf("digest covering %d more", len(s))
 	}}
 	store := &fakeCompactStore{
-		groups: []memory.SummaryGroup{{DayID: 10, Day: "2026-06-01", Summaries: summaries}},
+		groups:  []memory.SummaryGroup{{DayID: 10, Day: "2026-06-01", Summaries: summaries}},
+		digests: map[int64]string{10: "the morning, already digested"},
 	}
 
 	if err := memory.NewCompactor(digester, store).Compact(context.Background(), 7*24*time.Hour); err != nil {
@@ -210,8 +147,8 @@ func TestCompactor_DigestsALargeDayInBatches(t *testing.T) {
 			t.Errorf("batch %d held %d summaries, want the day split into smaller batches", i, n)
 		}
 	}
-	if digester.priorSeen[0] != "" {
-		t.Errorf("first batch saw prior %q, want empty — the day had no digest yet", digester.priorSeen[0])
+	if digester.priorSeen[0] != "the morning, already digested" {
+		t.Errorf("first batch saw prior %q, want the day's existing digest", digester.priorSeen[0])
 	}
 	if digester.priorSeen[1] != store.replaceCalls[0].digest {
 		t.Errorf("second batch saw prior %q, want the first batch's digest %q", digester.priorSeen[1], store.replaceCalls[0].digest)

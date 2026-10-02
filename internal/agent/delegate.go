@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -40,7 +39,7 @@ const claudeCodeBinary = "claude"
 // ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's project directory (the home directory when none is named), under auto permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator. Auto mode has Claude Code's own classifier approve routine commands and block risky ones; the old default mode denied every approval-gated command, since a headless run has nobody to answer a prompt, so a delegate could not even list ~/Downloads. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it), nor is --dangerously-skip-permissions. The classifier plus the "do not send, publish, pay for or delete" line BuildBrief writes into every brief are the guard.
 type ClaudeCodeRunner struct{}
 
-// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the home directory), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group (SysProcAttr.Setpgid) and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
+// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the home directory), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
 func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "auto")
 	// Claude Code only reads under its cwd, and the daemon's own cwd is wherever it was started, so a delegate given no directory runs in the home directory, where the user's files and clones are.
@@ -48,8 +47,8 @@ func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
 		cwd, _ = os.UserHomeDir()
 	}
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	util.OwnProcessGroup(cmd)
+	cmd.Cancel = func() error { return util.KillProcessGroup(cmd) }
 	cmd.WaitDelay = 2 * time.Second
 	return cmd
 }
@@ -171,7 +170,7 @@ func (a *Agent) Delegate(ctx context.Context, d Delegation, thread []db.Turn) (s
 	return a.delegate(ctx, ClaudeCodeRunner{}, d, thread)
 }
 
-// delegateResultBudget bounds what one delegate run puts into the next model prompt, in runes. A delegate writes as much as it likes and the whole of its stdout used to come back as the tool result; every other tool that reads outside data caps itself the same way (RunShellCommand at 2000 runes, read_file at 4000).
+// delegateResultBudget bounds what one delegate run puts into the next model prompt, in runes. A delegate writes as much as it likes and the whole of its stdout used to come back as the tool result; every other tool that reads outside data caps itself the same way (read_file at 4000 runes).
 const delegateResultBudget = 4000
 
 // delegate is Delegate against the given runner, so a test can drive a whole delegate call without starting the CLI.

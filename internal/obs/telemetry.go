@@ -50,11 +50,12 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	logger := slog.New(&TraceHandler{handler: jsonHandler})
 	slog.SetDefault(logger)
 
-	noop := func(ctx context.Context) error { return nil }
+	// Closing the log is part of every shutdown: Windows refuses to delete or rename a file that is still open.
+	closeLog := func(context.Context) error { return logFile.Close() }
 
 	if isTest {
 		slog.Debug("Running in test mode, bypassing OTLP exporter setup.")
-		return noop, nil
+		return closeLog, nil
 	}
 
 	// otlp trace exporter, defaults to localhost:4317 for any collector (jaeger etc).
@@ -62,7 +63,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		slog.Info("tracing disabled (set OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 to enable)")
-		return noop, nil
+		return closeLog, nil
 	}
 
 	exporter, err := otlptracegrpc.New(ctx,
@@ -71,7 +72,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	)
 	if err != nil {
 		slog.Warn("failed to create OTLP exporter, tracing disabled", "error", err)
-		return noop, nil
+		return closeLog, nil
 	}
 
 	res, _ := resource.New(ctx,
@@ -96,10 +97,11 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	// shutdown
 	shutdown := func(shutdownCtx context.Context) error {
 		slog.Info("Shutting down telemetry provider...")
-		if tp != nil {
-			return tp.Shutdown(shutdownCtx)
+		err := tp.Shutdown(shutdownCtx)
+		if cerr := closeLog(shutdownCtx); err == nil {
+			err = cerr
 		}
-		return nil
+		return err
 	}
 
 	return shutdown, nil

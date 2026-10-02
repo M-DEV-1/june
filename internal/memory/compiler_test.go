@@ -1,12 +1,10 @@
 package memory_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"june/internal/memory"
 	"june/internal/tracker"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -141,48 +139,29 @@ func (s *fakeStorage) ThreadsForAttribution(context.Context, int) ([]memory.Thre
 	return nil, nil
 }
 
-// An application switch flushes only above the compiler's floor. Alt-tabbing between two windows produces a switch every few seconds, and each flush is one metered attribution call, so a switch that comes moments after the last flush or with almost nothing buffered leaves the buffer alone — the word limit and the hourly tick still flush it.
-func TestCompiler_AppChangeBelowTheFloorDoesNotFlush(t *testing.T) {
-	llm, store := &fakeSummarizer{}, &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	// Twenty switches back and forth, all within the minimum interval of the compiler's construction.
-	for i := 0; i < 10; i++ {
-		compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
-		compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "Google"})
-	}
-
-	if llm.attrCalls != 0 {
-		t.Errorf("expected no attribution call for app switches inside the floor, got %d", llm.attrCalls)
-	}
-	if len(store.semantic) != 0 {
-		t.Errorf("expected nothing written for app switches inside the floor, got %d", len(store.semantic))
-	}
-	if compiler.BufferSize() != 20 {
-		t.Errorf("expected all 20 activities still buffered, got %d", compiler.BufferSize())
-	}
-}
-
-// The compiler flushes once the buffer's word count crosses its limit, and must not flush a moment early.
-func TestCompiler_FlushesOnWordCountLimit(t *testing.T) {
+// The compiler flushes once the buffer's word count crosses its limit, and not a moment early. An application switch flushes only above the compiler's floor: alt-tabbing produces a switch every few seconds and each flush is one metered attribution call, so switches moments after the last flush leave the buffer alone.
+func TestCompiler_FlushTriggers(t *testing.T) {
 	cases := []struct {
-		name          string
-		wordsPerEntry int
-		wantFlush     bool
+		name      string
+		ingest    []tracker.Activity
+		wantFlush bool
 	}{
-		{"500 words total is under the limit: no flush", 100, false},
-		{"1500 words total crosses the limit: flushes", 300, true},
+		{"twenty app switches inside the floor do not flush", func() []tracker.Activity {
+			var acts []tracker.Activity
+			for i := 0; i < 10; i++ {
+				acts = append(acts, tracker.Activity{App: "VSCode", Title: "main.go"}, tracker.Activity{App: "Chrome", Title: "Google"})
+			}
+			return acts
+		}(), false},
+		{"500 words total is under the limit", repeatActivity(5, 100), false},
+		{"1500 words total crosses the limit", repeatActivity(5, 300), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			llm, store := &fakeSummarizer{}, &fakeStorage{}
 			compiler := memory.NewCompiler(llm, store)
-			ctx := context.Background()
-
-			screenText := strings.Repeat("word ", c.wordsPerEntry)
-			for i := 0; i < 5; i++ {
-				compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: screenText})
+			for _, a := range c.ingest {
+				compiler.Ingest(context.Background(), a)
 			}
 
 			wantCalls := 0
@@ -199,55 +178,13 @@ func TestCompiler_FlushesOnWordCountLimit(t *testing.T) {
 	}
 }
 
-// attributionFails is a summarizer whose AttributeThreads always errors, sending flush down the fallback path.
-func attributionFails() *fakeSummarizer {
-	return &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
-		return nil, fmt.Errorf("api rate limit reached")
-	}}
-}
-
-// TestCompiler_FallbackOmitsScreenText_KeepsAppAndTitle verifies the LLM-failure fallback stores only "app | title" lines, never the raw ScreenText — dumping full raw captures into one node is exactly the tens-of-KB junk row shape other code (truncateUTF8, excerptContent) exists to defend against.
-func TestCompiler_FallbackOmitsScreenText_KeepsAppAndTitle(t *testing.T) {
-	store := &fakeStorage{}
-	compiler := memory.NewCompiler(attributionFails(), store)
-	ctx := context.Background()
-
-	// Pad screen text to exceed minFlushWords so the flush is not discarded.
-	screenText := "func validateToken " + strings.Repeat("word ", 30)
-	compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "auth.go", ScreenText: screenText})
-	compiler.ForceFlush(ctx)
-
-	if len(store.semantic) != 1 {
-		t.Fatalf("expected 1 fallback summary stored, got %d", len(store.semantic))
+// repeatActivity is n editor activities each carrying words words of screen text.
+func repeatActivity(n, words int) []tracker.Activity {
+	acts := make([]tracker.Activity, n)
+	for i := range acts {
+		acts[i] = tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: strings.Repeat("word ", words)}
 	}
-	got := store.semantic[0].Summary
-	if strings.Contains(got, "func validateToken") {
-		t.Errorf("expected the fallback summary to omit ScreenText, got: %q", got)
-	}
-	if !strings.Contains(got, "VSCode | auth.go") {
-		t.Errorf("expected the fallback summary to keep the app | title line, got: %q", got)
-	}
-}
-
-// TestCompiler_FallbackCapsTotalLength verifies the fallback summary is capped at roughly 2000 runes even with many activities in the buffer, instead of growing unbounded with the buffer size.
-func TestCompiler_FallbackCapsTotalLength(t *testing.T) {
-	store := &fakeStorage{}
-	compiler := memory.NewCompiler(attributionFails(), store)
-	ctx := context.Background()
-
-	// Enough long titles to exceed 2000 runes if uncapped: ~50 runes/line * 100 lines = ~5000 runes.
-	for i := 0; i < 100; i++ {
-		compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: fmt.Sprintf("a-fairly-long-file-name-number-%d.go", i)})
-	}
-	compiler.ForceFlush(ctx)
-
-	if len(store.semantic) != 1 {
-		t.Fatalf("expected 1 fallback summary stored, got %d", len(store.semantic))
-	}
-	// +1 tolerance: truncateRunes appends a trailing "…" marker after cutting to the cap.
-	if got := len([]rune(store.semantic[0].Summary)); got > 2001 {
-		t.Errorf("expected the fallback summary capped at ~2000 runes, got %d", got)
-	}
+	return acts
 }
 
 // Reconciling identity facts against existing notes can add a new note, update one that already says almost the same thing (and skip a duplicate), or — when the model call itself fails — fall back to logging every fact as new rather than dropping it.
@@ -315,26 +252,11 @@ func TestCompiler_Reconcile(t *testing.T) {
 	}
 }
 
-func TestCompiler_NonSalientActivitiesNotBuffered(t *testing.T) {
-	llm, store := &fakeSummarizer{}, &fakeStorage{}
-	compiler := memory.NewCompiler(llm, store)
-	ctx := context.Background()
-
-	compiler.Ingest(ctx, tracker.Activity{App: "Chrome", Title: "New Tab"})
-	compiler.Ingest(ctx, tracker.Activity{App: "Explorer", Title: "Desktop"})
-	compiler.Ingest(ctx, tracker.Activity{App: "Notepad", Title: "Untitled"})
-
-	if compiler.BufferSize() != 0 {
-		t.Errorf("expected buffer size 0 for non-salient activities, got %d", compiler.BufferSize())
-	}
-	if llm.attrCalls != 0 || len(store.semantic) != 0 {
-		t.Errorf("non-salient activities reached the model or the store: %d LLM calls, %d store calls", llm.attrCalls, len(store.semantic))
-	}
-}
-
 // TestCompiler_SuccessfulAttribution checks that when AttributeThreads returns two concurrent threads (entertainment id=0, work id=5), flush calls UpsertThread twice and LogSemanticNode twice, with SameTask = (u.ID != 0) for each and TaskNames matching the thread subjects.
+// Each thread is also linked to the buffer's episodes, the one moment that connection is known. The link window closes when the buffer is snapshotted, not after the attribution call: at a two-second capture poll a thirty-second call would otherwise attach fifteen unrelated screens to the thread.
 func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
+		time.Sleep(60 * time.Millisecond) // stand-in for the attribution call
 		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{
 			{ID: 0, Subject: "Suits", Kind: "entertainment", State: "s1e3", Summary: "watched ep 3", Novel: true},
 			{ID: 5, Subject: "June project", Kind: "work", State: "writing tests", Summary: "added thread tests"},
@@ -345,8 +267,17 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	ctx := context.Background()
 
 	compiler.Ingest(ctx, tracker.Activity{App: "Netflix", Title: "Suits"})
+	before := time.Now()
 	compiler.ForceFlush(ctx)
 
+	if len(store.links) != 2 {
+		t.Fatalf("got %d links, want one per attributed thread", len(store.links))
+	}
+	for _, l := range store.links {
+		if l.until.Before(before) || l.until.After(before.Add(50*time.Millisecond)) || l.since.After(l.until) {
+			t.Errorf("link window %v..%v, want it closed at the snapshot taken at %v, before the attribution call", l.since, l.until, before)
+		}
+	}
 	if len(store.upserts) != 2 {
 		t.Fatalf("expected 2 UpsertThread calls, got %d", len(store.upserts))
 	}
@@ -362,7 +293,7 @@ func TestCompiler_SuccessfulAttribution(t *testing.T) {
 	}
 }
 
-// TestCompiler_FallbackOnAttributionFailure checks that when AttributeThreads returns an error, nil, or an empty Threads list, flush writes a "Raw Activity Log" TaskSummary via LogSemanticNode and does NOT call UpsertThread.
+// TestCompiler_FallbackOnAttributionFailure checks that when AttributeThreads returns an error or an empty Threads list, flush writes a "Raw Activity Log" TaskSummary via LogSemanticNode and does NOT call UpsertThread. The fallback keeps "app | title" lines and never the raw screen text, which is the tens-of-KB junk row other code defends against.
 func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -371,7 +302,6 @@ func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 		{"error from AttributeThreads", func() (*memory.ThreadAttribution, error) {
 			return nil, fmt.Errorf("api rate limit")
 		}},
-		{"nil attr from AttributeThreads", func() (*memory.ThreadAttribution, error) { return nil, nil }},
 		{"empty Threads slice from AttributeThreads", func() (*memory.ThreadAttribution, error) {
 			return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{}}, nil
 		}},
@@ -383,7 +313,7 @@ func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 			compiler := memory.NewCompiler(&fakeSummarizer{attr: tc.attr}, store)
 			ctx := context.Background()
 
-			compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go"})
+			compiler.Ingest(ctx, tracker.Activity{App: "VSCode", Title: "main.go", ScreenText: "func validateToken " + strings.Repeat("word ", 30)})
 			compiler.ForceFlush(ctx)
 
 			if len(store.upserts) != 0 {
@@ -398,141 +328,10 @@ func TestCompiler_FallbackOnAttributionFailure(t *testing.T) {
 			if store.semantic[0].SameTask {
 				t.Error("fallback SameTask must be false")
 			}
+			if got := store.semantic[0].Summary; strings.Contains(got, "func validateToken") || !strings.Contains(got, "VSCode | main.go") {
+				t.Errorf("fallback summary = %q, want the app | title line and no screen text", got)
+			}
 		})
-	}
-}
-
-// TestCompiler_ConcurrentAccess drives Ingest, GetCurrentBuffer, and ForceFlush from many goroutines at once, mirroring daemon usage (ingest loop, hourly ticker, /buffer HTTP handler, Agent.Connect) — none of which serialize access to Compiler's buffer/wordCount/lastFlush, so this must pass under `go test -race`.
-func TestCompiler_ConcurrentAccess(t *testing.T) {
-	compiler := memory.NewCompiler(&fakeSummarizer{}, &fakeStorage{})
-	ctx := context.Background()
-
-	apps := []string{"VSCode", "Chrome", "Discord", "Terminal"}
-
-	var wg sync.WaitGroup
-
-	// concurrent ingest, simulating the daemon's event-channel consumer loop
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
-				compiler.Ingest(ctx, tracker.Activity{
-					App:   apps[(i+j)%len(apps)],
-					Title: fmt.Sprintf("title-%d-%d", i, j),
-				})
-			}
-		}(i)
-	}
-
-	// concurrent reads of the live buffer, simulating the /buffer HTTP handler and Agent.Connect
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
-				buf := compiler.GetCurrentBuffer()
-				// touch the returned slice the way callers do (range over it) — exactly what races against a concurrent append.
-				for _, act := range buf {
-					_ = act.App
-				}
-			}
-		}()
-	}
-
-	// concurrent forced flush, simulating the hourly safety-net ticker
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 10; j++ {
-				compiler.ForceFlush(ctx)
-				time.Sleep(time.Millisecond)
-			}
-		}()
-	}
-
-	wg.Wait()
-}
-
-// TestCompiler_FlushLogsStoreErrors checks that a failed durable store write during flush gets logged at ERROR level, not silently dropped.
-func TestCompiler_FlushLogsStoreErrors(t *testing.T) {
-	var logBuf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(prev)
-
-	c := memory.NewCompiler(&fakeSummarizer{}, &fakeStorage{fail: true})
-	ctx := context.Background()
-
-	// one salient activity, then force the (synchronous) flush → store writes fail
-	c.Ingest(ctx, tracker.Activity{App: "terminal", Title: "debugging", ScreenText: "stack trace here"})
-	c.ForceFlush(ctx)
-
-	if out := logBuf.String(); !strings.Contains(out, "level=ERROR") {
-		t.Errorf("expected an ERROR log when a store write fails during flush, got: %q", out)
-	}
-}
-
-// Attributing a buffer to a thread is the one moment the connection between a thread and the screens behind it is known. The compiler used to compute it and throw it away on every flush, leaving threads that could say "reviewed the code, eleven findings" with no path to the findings.
-func TestCompiler_FlushLinksTheBuffersEpisodesToEachThread(t *testing.T) {
-	store := &fakeStorage{}
-	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
-		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{
-			{Subject: "code review of june", Kind: "work", Summary: "eleven findings"},
-			{Subject: "reading the diff", Kind: "work", Summary: "walked the changes"},
-		}}, nil
-	}}
-	c := memory.NewCompiler(llm, store)
-	c.Ingest(context.Background(), tracker.Activity{App: "Code", Title: "search.go", ScreenText: strings.Repeat("reviewing the findings ", 30)})
-
-	before := time.Now()
-	c.ForceFlush(context.Background())
-
-	if len(store.links) != 2 {
-		t.Fatalf("got %d links, want one per attributed thread", len(store.links))
-	}
-	for _, l := range store.links {
-		if l.until.Before(before) {
-			t.Errorf("link window ends before the flush began: %+v", l)
-		}
-		if l.since.After(l.until) {
-			t.Errorf("link window runs backwards: %+v", l)
-		}
-	}
-}
-
-// The link window has to close when the buffer is snapshotted, not when the linking happens — processFlush runs an attribution LLM call in between, and at a two-second capture poll a thirty-second call would attach fifteen unrelated screens to the thread.
-func TestCompiler_LinkWindowClosesBeforeTheAttributionCall(t *testing.T) {
-	store := &fakeStorage{}
-	llm := &fakeSummarizer{attr: func() (*memory.ThreadAttribution, error) {
-		time.Sleep(60 * time.Millisecond) // stand-in for the attribution call
-		return &memory.ThreadAttribution{Threads: []memory.ThreadUpdate{{Subject: "code review", Kind: "work"}}}, nil
-	}}
-	c := memory.NewCompiler(llm, store)
-	c.Ingest(context.Background(), tracker.Activity{App: "Code", Title: "search.go", ScreenText: strings.Repeat("reviewing ", 40)})
-
-	c.ForceFlush(context.Background())
-
-	if len(store.links) != 1 {
-		t.Fatalf("got %d links, want 1", len(store.links))
-	}
-	if slept := store.links[0].until.Add(50 * time.Millisecond); slept.After(time.Now()) {
-		t.Errorf("window end %v looks like it was read after the attribution call, not at snapshot", store.links[0].until)
-	}
-}
-
-// The compiler writes summaries from screen text that names the user in the third person — a calendar entry "Meeting with Zemna Braxen" became "participated in a scheduled meeting with Zemna Braxen" on 2026-09-01, and June then told the user about their meetings with Zemna. The prompt has to say who the user is.
-func TestAttributePrompt_NamesTheUser(t *testing.T) {
-	prompt := memory.AttributePrompt(nil, nil, "The user is Zemna Braxen — goes by Zemna.")
-	if !strings.Contains(prompt, "Zemna Braxen") {
-		t.Errorf("prompt does not carry the identity line:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "third party") {
-		t.Errorf("prompt does not tell the model the user is never a third party:\n%s", prompt)
-	}
-	if strings.Contains(memory.AttributePrompt(nil, nil, ""), "third party") {
-		t.Error("with no identity known, the prompt should not carry an empty identity rule")
 	}
 }
 

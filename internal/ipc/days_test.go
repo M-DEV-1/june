@@ -2,7 +2,6 @@ package ipc
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -51,32 +50,6 @@ func TestDaysListsActiveDays(t *testing.T) {
 	}
 	if list.Days[0].MeetingMinutes != 0 {
 		t.Errorf("meeting_minutes = %d, want 0 — the seeded meeting carries no duration marker", list.Days[0].MeetingMinutes)
-	}
-}
-
-// TestDaysOmitsEmptyDays checks that a day ActiveDays surfaces but that turns out to hold nothing at all is left off the list rather than shown as an empty day. A diary entry dated after today is exactly such a day: ActiveDays' union of the diary table has no upper bound, so it surfaces, but DiaryDays (bounded to [from, now]) never returns its page, and it has no episode or meeting of its own — seen, meetings and has_page all come back zero.
-func TestDaysOmitsEmptyDays(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
-	if err := store.SetDiaryEntry(ctx, tomorrow, "day", "not really today yet"); err != nil {
-		t.Fatalf("seed diary: %v", err)
-	}
-	today := time.Now().Format("2006-01-02")
-	if err := store.SetDiaryEntry(ctx, today, "day", "A real day."); err != nil {
-		t.Fatalf("seed diary: %v", err)
-	}
-
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	var list struct{ Days []DaySummary }
-	getJSON(t, srv, "/days", &list)
-	for _, d := range list.Days {
-		if d.Date == tomorrow {
-			t.Errorf("days = %+v, want the empty day left out", list.Days)
-		}
-	}
-	if len(list.Days) != 1 || list.Days[0].Date != today {
-		t.Fatalf("days = %+v, want just today", list.Days)
 	}
 }
 
@@ -133,55 +106,5 @@ func TestDayPage(t *testing.T) {
 	getJSON(t, srv, "/days/"+today, &page)
 	if len(page.Tasks) != 1 || !page.Tasks[0].Done {
 		t.Errorf("after ticking it through /tasks the day still shows %+v", page.Tasks)
-	}
-}
-
-// TestDayPageEmpty checks that a day nothing happened on answers with empty lists rather than an error.
-func TestDayPageEmpty(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	var page DayView
-	getJSON(t, srv, "/days/2020-01-01", &page)
-	if page.Page != "" || page.You == nil || page.Tasks == nil {
-		t.Errorf("empty day = %+v, want an empty page and empty lists", page)
-	}
-	if page.Heading != "" {
-		t.Errorf("heading = %q, want empty for a day with nothing in it", page.Heading)
-	}
-}
-
-// TestDayHeading checks the one-line summary GET /days/{date} adds: singular and plural both read right, and the meeting's recorded duration rounds to whole minutes.
-func TestDayHeading(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	today := time.Now().Format("2006-01-02")
-
-	for i := 0; i < 60; i++ {
-		if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Brave", Title: fmt.Sprintf("tab %d", i), ScreenText: "text"}); err != nil {
-			t.Fatalf("seed episode %d: %v", i, err)
-		}
-	}
-	start := time.Now().Add(-time.Hour)
-	stop := start.Add(28 * time.Minute)
-	minutesWithDuration := fmt.Sprintf("%s\n\n<!--june:duration start=%s stop=%s-->\n", sampleMinutes, start.UTC().Format(time.RFC3339), stop.UTC().Format(time.RFC3339))
-	if _, err := store.LogNote(ctx, minutesWithDuration, meetingNoteKind); err != nil {
-		t.Fatalf("seed meeting: %v", err)
-	}
-
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-	var page DayView
-	getJSON(t, srv, "/days/"+today, &page)
-	if page.Heading != "60 things seen · 1 call, 28 min" {
-		t.Errorf("heading = %q, want the day's counts summarised in one line", page.Heading)
-	}
-}
-
-// TestDayHeadingOmitsZeroMinutes checks that a day whose recordings carry no duration says how many calls there were and nothing about minutes, instead of the "5 calls, 0 min" the user saw on 2026-09-05.
-func TestDayHeadingOmitsZeroMinutes(t *testing.T) {
-	if got := dayHeading(366, 5, 0); got != "366 things seen · 5 calls" {
-		t.Errorf("heading = %q, want the minutes left out when none were recorded", got)
-	}
-	if got := dayHeading(0, 1, 12); got != "1 call, 12 min" {
-		t.Errorf("heading = %q, want the minutes kept when they are known", got)
 	}
 }

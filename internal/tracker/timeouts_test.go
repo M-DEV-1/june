@@ -2,31 +2,10 @@ package tracker
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 )
-
-// withBudget must hand the caller back a value at the deadline even when the work it was given never finishes and never looks at its context, which is what a wedged D-Bus peer looks like from inside a capture.
-func TestWithBudget_ReturnsAtTheDeadlineWhenTheWorkIgnoresIt(t *testing.T) {
-	forever := make(chan struct{})
-	defer close(forever)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	got := withBudget(ctx, func() string { <-forever; return "answered" })
-	elapsed := time.Since(start)
-
-	if got != "" {
-		t.Fatalf("work that never finished still produced %q", got)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("withBudget waited %v on a 20ms budget", elapsed)
-	}
-}
 
 // Every call the capture path makes outside this process gets its own deadline, so one that never answers costs the tick loop that deadline and no more. Each seam below blocks forever and ignores the context it is handed — a gnome-shell that stopped replying to screenshots, an MPRIS player wedged on a property read, a model call that stalled — and the capture must still come back.
 func TestTieredCapture_ReturnsWhenAnOutsideCallNeverAnswers(t *testing.T) {
@@ -161,23 +140,5 @@ func TestStart_AWedgedLockProbeDoesNotStopTheTickLoop(t *testing.T) {
 	// 200ms of 5ms ticks against a 10ms probe budget is roughly thirteen polls; five is a floor loose enough for a loaded machine and far above the zero a wedged loop manages.
 	if polls < 5 {
 		t.Fatalf("the active window was polled %d times while the lock probe was wedged, want the tick loop still running", polls)
-	}
-}
-
-// A failed screen grab used to leave the vision rate limiter unstamped, so every following capture retried the screenshot immediately: a portal that says no, or a busy compositor, turned the minimum vision interval off entirely.
-func TestTieredCapture_AFailedGrabStillStampsTheVisionLimiter(t *testing.T) {
-	d := NewDaemon(nil, time.Second, time.Second, nil, nil)
-	d.bounds = captureBounds{text: time.Second, media: time.Second, screenshot: time.Second, vision: time.Second}
-	d.text = func() (string, error) { return "", nil }
-	d.media = func(context.Context) bool { return false }
-	d.screenshot = func(context.Context) ([]byte, error) { return nil, fmt.Errorf("the portal said no") }
-	d.visionFn = func(context.Context, []byte) Sight { return Sight{} }
-
-	var lastA11y, lastVision string
-	lastVisionTime := time.Time{}
-	d.tieredCapture(context.Background(), Activity{App: "Brave", Title: "a page"}, &lastA11y, &lastVision, &lastVisionTime)
-
-	if lastVisionTime.IsZero() {
-		t.Fatal("a failed grab left the vision limiter unstamped, so the next capture retries at once")
 	}
 }

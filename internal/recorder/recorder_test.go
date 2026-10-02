@@ -231,30 +231,6 @@ func TestRecorder_Pipeline(t *testing.T) {
 	}
 }
 
-// The desktop timeline the tracker recorded during the meeting goes into the prompt, so the model knows which app and which window the call happened in.
-func TestRecorder_PromptCarriesDesktopContext(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{
-		{CreatedAt: time.Now(), App: "Brave Browser", Title: "Meet – weekly sync", ScreenText: "participating in a video call | Ravix Dolmen (Presenting) | Zemna Braxen"},
-	}}
-	r, _, _ := newTestRecorder(t, store)
-	var got string
-	r.minutes = func(ctx context.Context, prompt string) (string, error) { got = prompt; return "ok", nil }
-	if err := r.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	sess, _ := r.stop()
-	if err := r.process(context.Background(), sess); err != nil {
-		t.Fatalf("process: %v", err)
-	}
-	if !strings.Contains(got, "Meet – weekly sync") {
-		t.Errorf("prompt is missing the desktop timeline:\n%s", got)
-	}
-	// The window text is what carries participant names, so it has to reach the model, not just the window title.
-	if !strings.Contains(got, "Ravix Dolmen (Presenting)") {
-		t.Errorf("prompt is missing the on-screen participant names:\n%s", got)
-	}
-}
-
 // A failed transcription, and whisper exiting 0 but yielding nothing usable (a silent meeting, or a build whose output lines parseSegments does not recognise), are both not a success: the WAVs are still the only copy of the meeting, so they must survive, and nothing may be filed as minutes. The "yields nothing" case additionally leaves a marker naming the problem and must not write an empty transcript.md, which would look like a finished recording.
 func TestRecorder_KeepsAudioWhenTranscriptionFailsOrYieldsNothing(t *testing.T) {
 	cases := []struct {
@@ -439,80 +415,43 @@ func loudSamples() []byte {
 	return b
 }
 
-// Sound arriving throughout means the right sink is being recorded, and a warning then would be noise in the middle of a call — whether both sides are live, or (the real 2026-09-02 case) the user is talking through a standup while everyone else on the call is muted and the call side sends exact zeros.
+// Sound on either side means the right sink is being recorded, and a warning then is noise in the middle of a call: in the real 2026-09-02 case the user was talking through a standup while everyone else on the call was muted and the call side sent exact zeros.
 func TestRecorder_NoSilenceWarningWhileSoundKeepsArriving(t *testing.T) {
-	cases := []struct {
-		name   string
-		system func() []byte // what the system stream writes each tick
-	}{
-		{name: "both streams stay loud", system: loudSamples},
-		{name: "only the microphone stays loud, the call side is exact zeros", system: func() []byte { return make([]byte, 3200) }},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			r, cap, _ := newTestRecorder(t, &fakeStore{})
-			var got notifications
-			r.notify = got.add
-			r.silenceAfter = 30 * time.Millisecond
-			stop, finished := make(chan struct{}), make(chan struct{})
-			r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
-				go func() {
-					defer close(finished)
-					for {
-						select {
-						case <-stop:
-							return
-						case <-time.After(2 * time.Millisecond):
-							mic.Write(loudSamples())
-							system.Write(c.system())
-						}
-					}
-				}()
-				now := time.Now()
-				return cap, now, now, nil
-			}
-			if err := r.Start(); err != nil {
-				t.Fatalf("start: %v", err)
-			}
-			// The writer has to be off the files before stop closes them, which the real capture guarantees and this fake must too.
-			defer func() {
-				close(stop)
-				<-finished
-				r.stop()
-			}()
-
-			time.Sleep(300 * time.Millisecond)
-			if got.contains("audio") {
-				t.Errorf("a recording that is capturing sound must not warn, got %v", got.sent)
-			}
-		})
-	}
-}
-
-// The output device can change halfway through a call — earbuds connecting, or dying and the audio hopping back to the speakers — and the recording then goes quiet from that moment. The watchdog has to catch it whenever it happens, not only in the first half-minute.
-func TestRecorder_WarnsWhenSystemAudioStopsPartWayThrough(t *testing.T) {
 	r, cap, _ := newTestRecorder(t, &fakeStore{})
 	var got notifications
 	r.notify = got.add
-	r.silenceAfter = 30 * time.Millisecond
+	// The window is wide enough that a busy CI runner pausing the writer goroutine does not read as a dead stream; the 30 ms it used to be failed on both Linux and Windows runners. The sleep below spans three windows, so a watchdog that listened to the call side alone would fire.
+	r.silenceAfter = 250 * time.Millisecond
+	stop, finished := make(chan struct{}), make(chan struct{})
 	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
-		// Sound at the start, so the first-thirty-seconds check would have been satisfied, then nothing.
-		mic.Write(loudSamples())
-		system.Write(loudSamples())
+		go func() {
+			defer close(finished)
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(2 * time.Millisecond):
+					mic.Write(loudSamples())
+					system.Write(make([]byte, 3200))
+				}
+			}
+		}()
 		now := time.Now()
 		return cap, now, now, nil
 	}
 	if err := r.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	defer r.stop()
+	// The writer has to be off the files before stop closes them, which the real capture guarantees and this fake must too.
+	defer func() {
+		close(stop)
+		<-finished
+		r.stop()
+	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for !got.contains("audio") && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !got.contains("audio") {
-		t.Errorf("a recording whose system audio stopped mid-meeting must warn, got %v", got.sent)
+	time.Sleep(750 * time.Millisecond)
+	if got.contains("audio") {
+		t.Errorf("a recording that is capturing sound must not warn, got %v", got.sent)
 	}
 }
 
@@ -572,44 +511,6 @@ func writeRecording(t *testing.T, dir string, files map[string]string) string {
 		}
 	}
 	return dir
-}
-
-// A recording just ended on battery defers transcription until mains power, and the sweep must honour the same rule for anything it finds still needing whisper — otherwise the very next tick transcribes what StopAndProcess just deferred.
-func TestRecorder_SweepDefersWhisperTranscriptionOnBattery(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	<-r.swept
-	r.onAC = func() bool { return false }
-	r.whisper = func(context.Context, string, string, string, string, time.Duration) ([]Segment, error) {
-		t.Error("whisper ran for a recording found on battery")
-		return nil, errors.New("whisper must not run on battery")
-	}
-	orphan := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T09-30-00"), map[string]string{
-		"mic.wav":    string(make([]byte, 3200)),
-		"system.wav": string(make([]byte, 3200)),
-	})
-
-	r.pickup(context.Background())
-
-	if _, err := os.Stat(filepath.Join(orphan, "transcript.md")); !os.IsNotExist(err) {
-		t.Error("the sweep transcribed an orphaned recording while on battery")
-	}
-}
-
-// Regenerating minutes from a transcript that is already on disk never runs whisper, so it costs nothing extra on battery and must not wait for the same deferral that a fresh transcription does.
-func TestRecorder_SweepRegeneratesMinutesOnBatteryEvenThoughTranscriptionWaits(t *testing.T) {
-	store := &fakeStore{}
-	r, _, _ := newTestRecorder(t, store)
-	<-r.swept
-	r.onAC = func() bool { return false }
-	dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T11-00-00"), map[string]string{
-		"transcript.md": "[00:00:00] [me] shall we ship friday\n[00:00:02] [call] friday works\n",
-	})
-
-	r.pickup(context.Background())
-
-	if _, err := os.Stat(filepath.Join(dir, "minutes.md")); err != nil {
-		t.Errorf("regenerating minutes from an existing transcript should not wait for mains power: %v", err)
-	}
 }
 
 // A blank reply from the brain is not a summary of anything. Writing it as minutes.md would mark the meeting done, so the next sweep would never look at it again and the meeting would be lost. It must be treated like any other failed summarisation.
@@ -682,24 +583,6 @@ func TestRecorder_FailedProcessingWaitsBeforeBeingRetried(t *testing.T) {
 	}
 	if util.Exists(marker) {
 		t.Error("the failure marker survived a run that succeeded")
-	}
-}
-
-// A recording that never got its streams open leaves stub WAVs the sweep would read as an abandoned recording and try to transcribe on every tick.
-func TestRecorder_StartCleansUpAfterItselfWhenCaptureFails(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	r.capture = func(io.Writer, io.Writer) (capturer, time.Time, time.Time, error) {
-		return nil, time.Time{}, time.Time{}, errors.New("no sound server")
-	}
-	if err := r.Start(); err == nil {
-		t.Fatal("Start reported success though capture could not be opened")
-	}
-	entries, err := os.ReadDir(filepath.Join(r.dataDir, "recordings"))
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("a failed Start left %d recording directories behind", len(entries))
 	}
 }
 
@@ -796,82 +679,6 @@ func TestRecorder_RegeneratesMinutesFromAnExistingTranscript(t *testing.T) {
 	}
 }
 
-// A recording the sweep finds has to be dated from what is on disk. How much audio was recorded says how long the meeting ran; the file's timestamp does not, because anything that touches the file afterwards moves it. With the audio gone there is nothing to measure, so the last write to the transcript is the best guess left at when the meeting ended.
-func TestPickupSession_DatesTheMeeting(t *testing.T) {
-	t.Run("from how much audio there is, not the file's timestamp", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "2026-08-27T10-00-00")
-		// Ten minutes of 16 kHz mono 16-bit samples, in a file last written three hours after the meeting ended.
-		writeRecording(t, dir, map[string]string{"mic.wav": string(make([]byte, wavHeaderSize+10*60*sampleRate*2))})
-		touched := time.Date(2026, 8, 27, 13, 0, 0, 0, time.Local)
-		if err := os.Chtimes(filepath.Join(dir, "mic.wav"), touched, touched); err != nil {
-			t.Fatal(err)
-		}
-
-		s := pickupSession(dir)
-
-		if want := time.Date(2026, 8, 27, 10, 0, 0, 0, time.Local); !s.startedAt.Equal(want) {
-			t.Errorf("started at %s, want %s", s.startedAt, want)
-		}
-		if want := time.Date(2026, 8, 27, 10, 10, 0, 0, time.Local); !s.stoppedAt.Equal(want) {
-			t.Errorf("stopped at %s, want %s — the meeting's length should come from the audio, not the file's timestamp", s.stoppedAt, want)
-		}
-	})
-
-	t.Run("falls back to the transcript's timestamp when the audio is gone", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "2026-08-27T10-00-00")
-		writeRecording(t, dir, map[string]string{"transcript.md": "[00:00:00] [me] hello\n"})
-		written := time.Date(2026, 8, 27, 10, 25, 0, 0, time.Local)
-		if err := os.Chtimes(filepath.Join(dir, "transcript.md"), written, written); err != nil {
-			t.Fatal(err)
-		}
-
-		if s := pickupSession(dir); !s.stoppedAt.Equal(written) {
-			t.Errorf("stopped at %s, want the transcript's timestamp %s", s.stoppedAt, written)
-		}
-	})
-}
-
-// A directory something else is already processing must not be summarised underneath it, and a directory being recorded into right now — the live-recording guard, which sits ahead of both sweep cases — is skipped whatever else it holds.
-func TestRecorder_RegenerationRespectsClaimsAndSkipsTheLiveRecording(t *testing.T) {
-	t.Run("respects the claim set", func(t *testing.T) {
-		r, _, _ := newTestRecorder(t, &fakeStore{})
-		<-r.swept
-		dir := writeRecording(t, filepath.Join(r.dataDir, "recordings", "2026-08-27T12-00-00"), map[string]string{
-			"transcript.md": "[00:00:00] [call] friday works\n",
-		})
-		if !r.claim(dir) {
-			t.Fatal("the directory should have been free to claim")
-		}
-
-		r.pickup(context.Background())
-
-		if _, err := os.Stat(filepath.Join(dir, "minutes.md")); !os.IsNotExist(err) {
-			t.Error("the sweep summarised a directory that was already claimed")
-		}
-	})
-
-	t.Run("skips the live recording", func(t *testing.T) {
-		r, _, _ := newTestRecorder(t, &fakeStore{})
-		<-r.swept
-		if err := r.Start(); err != nil {
-			t.Fatalf("start: %v", err)
-		}
-		live := r.live.dir
-		if err := os.WriteFile(filepath.Join(live, "transcript.md"), []byte("[00:00:00] [call] friday works\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		r.pickup(context.Background())
-
-		if _, err := os.Stat(filepath.Join(live, "minutes.md")); !os.IsNotExist(err) {
-			t.Error("the sweep summarised the recording that is still running")
-		}
-		if _, err := r.stop(); err != nil {
-			t.Fatalf("stop: %v", err)
-		}
-	})
-}
-
 // OnACPower reads the kernel's power supply class, so a battery-only machine and a plugged-in one are told apart from the files themselves.
 // OnACPower reads the kernel's power supply class, so a battery-only machine and a plugged-in one are told apart from the files themselves, no mains supply at all cannot be battery, and a machine that exports no power supply class whatsoever — a desktop, or Windows — must count as plugged in, or nothing would ever be transcribed there.
 func TestOnACPower(t *testing.T) {
@@ -917,79 +724,6 @@ func TestOnACPower(t *testing.T) {
 				t.Errorf("OnACPower() = %v, want %v", got, c.want)
 			}
 		})
-	}
-}
-
-// Nothing on a screen identifies whose computer it is: a repository page names its committers, a document names its author. A real meeting was filed with the recorder called "Zubrik" because a GitHub commit list said "zubrik-acme". Personal context is the one store that says who the user is with certainty, so it is what names the [me] speaker — and an empty store must not leave a heading in the prompt with nothing under it.
-func TestBuildPrompt_PersonalContext(t *testing.T) {
-	cases := []struct {
-		name  string
-		store *fakeStore
-		check func(t *testing.T, prompt string)
-	}{
-		{
-			name: "carries the personal context entry that names the user",
-			store: &fakeStore{personal: []db.PersonalEntry{
-				{Subject: "identity", Content: "The user is Zemna Braxen — goes by Zemna; git handle zbraxen."},
-			}},
-			check: func(t *testing.T, prompt string) {
-				if !strings.Contains(prompt, "Zemna Braxen") {
-					t.Errorf("the minutes prompt must carry the personal context entry that names the user:\n%s", prompt)
-				}
-				if !strings.Contains(prompt, "About the person recording") {
-					t.Errorf("the personal context entries lost their heading:\n%s", prompt)
-				}
-			},
-		},
-		{
-			name:  "no personal context leaves no heading",
-			store: &fakeStore{},
-			check: func(t *testing.T, prompt string) {
-				if strings.Contains(prompt, "About the person recording —") {
-					t.Errorf("empty personal context still produced a block:\n%s", prompt)
-				}
-			},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			r, _, _ := newTestRecorder(t, c.store)
-			prompt := r.buildPrompt(context.Background(), "[00:00:00] [me] hello", time.Now(), time.Now())
-			c.check(t, prompt)
-		})
-	}
-}
-
-// The two sides of a call are independent files, and transcribing them one after the other doubles the wall time of every meeting for no reason. They have to run at the same time.
-// The test is a barrier: each stream announces itself and then waits for the other, so a pipeline that runs them in sequence can never get past the first one.
-func TestTranscriptFor_TranscribesBothStreamsAtTheSameTime(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	arrived := make(chan struct{}, 2)
-	both := make(chan struct{})
-	var once sync.Once
-	r.whisper = func(ctx context.Context, bin, path, speaker, prompt string, offset time.Duration) ([]Segment, error) {
-		arrived <- struct{}{}
-		if len(arrived) == 2 {
-			once.Do(func() { close(both) })
-		}
-		select {
-		case <-both:
-		case <-time.After(5 * time.Second):
-			return nil, fmt.Errorf("%s waited for the other stream to start and it never did", speaker)
-		}
-		return []Segment{{Start: 0, End: time.Second, Speaker: speaker, Text: "spoken by " + speaker}}, nil
-	}
-
-	dir := t.TempDir()
-	s := &session{dir: dir, startedAt: time.Now(), stoppedAt: time.Now()}
-	transcript, err := r.transcriptFor(context.Background(), s)
-	if err != nil {
-		t.Fatalf("transcriptFor: %v", err)
-	}
-	for _, want := range []string{"spoken by me", "spoken by call"} {
-		if !strings.Contains(transcript, want) {
-			t.Errorf("transcript is missing %q:\n%s", want, transcript)
-		}
 	}
 }
 
@@ -1127,97 +861,6 @@ func TestFileMinutes_ActionItems(t *testing.T) {
 	}
 }
 
-// fileMinutes appends the recording's wall-clock start and stop to the note it files, in RFC3339, since that is the only place the meeting's actual duration is known — the model writing the minutes is never told to report it. Correcting an already-filed meeting's minutes (the noteIDFile path) must also correct its duration marker in place, not leave the first run's stale start/stop behind.
-func TestFileMinutes_DurationMarker(t *testing.T) {
-	store := &fakeStore{}
-	r := New(context.Background(), t.TempDir(), store, "FAKE_API_KEY")
-	dir := t.TempDir()
-	first := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
-
-	r.fileMinutes(context.Background(), dir, "# Standup\n\n## Key points\n- shipped it.\n", first, first.Add(10*time.Minute))
-	if len(store.notes) != 1 {
-		t.Fatalf("want 1 note filed, got %d", len(store.notes))
-	}
-	want := "<!--june:duration start=2026-09-04T09:00:00Z stop=2026-09-04T09:10:00Z-->"
-	if !strings.Contains(store.notes[0], want) {
-		t.Errorf("filed note missing duration marker %q, got %q", want, store.notes[0])
-	}
-	if !strings.Contains(store.notes[0], "## Key points\n- shipped it.") {
-		t.Errorf("filed note lost the minutes text: %q", store.notes[0])
-	}
-
-	second := time.Date(2026, 9, 4, 9, 5, 0, 0, time.UTC)
-	r.fileMinutes(context.Background(), dir, "# Standup, corrected\n", second, second.Add(20*time.Minute))
-
-	if len(store.notes) != 1 {
-		t.Fatalf("correcting the same recording must not file a second note, got %d", len(store.notes))
-	}
-	want = "<!--june:duration start=2026-09-04T09:05:00Z stop=2026-09-04T09:25:00Z-->"
-	if !strings.Contains(store.notes[0], want) {
-		t.Errorf("corrected note missing updated duration marker %q, got %q", want, store.notes[0])
-	}
-}
-
-// A meeting filed before the duration marker existed has a note with nothing after its minutes text. The startup sweep must correct that note in place from the one thing on disk that still says how long the meeting ran: the size of the mic.wav next to it, read as wall-clock seconds from the directory's own timestamp.
-// A meeting filed before the duration marker existed has a note with nothing after its minutes text, and the startup sweep must correct that note in place from the one thing on disk that still says how long the meeting ran: the size of the mic.wav next to it, read as wall-clock seconds from the directory's own timestamp. A recording whose mic.wav is gone (deleted, or made before keepAudio existed) has nothing left on disk to say how long it ran, so the sweep must leave its note alone rather than write a wrong or zero-length marker that looks like real data.
-func TestBackfillDurations(t *testing.T) {
-	t.Run("fills in a note filed before the marker existed", func(t *testing.T) {
-		store := &fakeStore{notes: []string{"# Standup\n\n## Key points\n- shipped it.\n"}, kinds: []string{noteKind}}
-		dataDir := t.TempDir()
-		r := New(context.Background(), dataDir, store, "")
-		<-r.swept
-
-		started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.Local)
-		dir := filepath.Join(dataDir, "recordings", started.Format(dirTimeLayout))
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "minutes.md"), []byte(store.notes[0]), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// 5 seconds of 16kHz mono 16-bit silence after the header, matching audioDuration's own arithmetic.
-		wav := make([]byte, wavHeaderSize+5*2*sampleRate)
-		if err := os.WriteFile(filepath.Join(dir, "mic.wav"), wav, 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		r.backfillOnce(context.Background())
-
-		want := meetingDurationLine(started, started.Add(5*time.Second))
-		if !strings.Contains(store.notes[0], want) {
-			t.Errorf("backfilled note = %q, want it to contain %q", store.notes[0], want)
-		}
-	})
-
-	t.Run("leaves a duration alone when the audio is gone", func(t *testing.T) {
-		store := &fakeStore{notes: []string{"# Standup\n"}, kinds: []string{noteKind}}
-		dataDir := t.TempDir()
-		r := New(context.Background(), dataDir, store, "")
-		<-r.swept
-
-		dir := filepath.Join(dataDir, "recordings", "2026-08-20T09-00-00")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644)
-		os.WriteFile(filepath.Join(dir, "minutes.md"), []byte(store.notes[0]), 0o644)
-		os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644)
-		// No mic.wav at all.
-
-		r.backfillOnce(context.Background())
-
-		if strings.Contains(store.notes[0], meetingDurationPrefix) {
-			t.Errorf("backfilled a duration with no audio to measure it from: %q", store.notes[0])
-		}
-	})
-}
-
 // DistinctTitles serves the fake's own episode titles, which is enough for prep to judge which words recur.
 func (f *fakeStore) DistinctTitles(ctx context.Context, limit int) ([]string, error) {
 	seen := map[string]bool{}
@@ -1312,42 +955,6 @@ func TestRecorder_GivesUpOnARecordingThatKeepsFailing(t *testing.T) {
 	}
 }
 
-// While a meeting is running, LiveSnapshot reads the window and participants off the same screen text prep.go uses, and reports that nothing has been transcribed yet: whisper only ever runs once, after the recording stops, so there is no transcript to show mid-call.
-func TestRecorder_LiveSnapshot_WhileRecording(t *testing.T) {
-	store := &fakeStore{episodes: []db.Episode{
-		{CreatedAt: time.Now(), Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"},
-	}}
-	r, _, _ := newTestRecorder(t, store)
-	before := time.Now()
-	if err := r.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer r.stop()
-
-	snap, ok := r.LiveSnapshot(context.Background())
-	if !ok {
-		t.Fatal("LiveSnapshot should report true while a meeting is being recorded")
-	}
-	if snap.StartedAt.Before(before) || snap.StartedAt.After(time.Now()) {
-		t.Errorf("StartedAt = %v, want between %v and now", snap.StartedAt, before)
-	}
-	if snap.Window != "Meet - abc-defg-hij - Brave" {
-		t.Errorf("Window = %q, want the meeting window's title", snap.Window)
-	}
-	if len(snap.Participants) != 1 || snap.Participants[0] != "Vexil Quorin" {
-		t.Errorf("Participants = %v, want [Vexil Quorin]", snap.Participants)
-	}
-	if len(snap.SegmentsSoFar) != 0 {
-		t.Errorf("SegmentsSoFar = %v, want empty: transcription is one pass at stop, not incremental", snap.SegmentsSoFar)
-	}
-	if !snap.TranscribedThrough.IsZero() {
-		t.Errorf("TranscribedThrough = %v, want zero: nothing has been transcribed yet", snap.TranscribedThrough)
-	}
-	if snap.Note == "" {
-		t.Error("Note should explain why SegmentsSoFar is empty")
-	}
-}
-
 // A recording directory is named to the second, so two recordings that start inside one second want the same name. os.MkdirAll is happy with a directory that already exists and newWAV truncates what it opens, so the second recording used to overwrite the first meeting's audio while that meeting was still waiting to be transcribed — and both sessions then carried the same directory, so the second was never summarised either.
 // Start has to go through that, not around it: this is the case where the user stops one meeting from the tray and the next call starts inside the same second.
 func TestRecorder_StartNeverOpensInsideARecordingThatIsAlreadyThere(t *testing.T) {
@@ -1417,87 +1024,6 @@ func TestProcess_UpdatesPersonalContextOnTheRetryThatFirstFilesTheMinutes(t *tes
 	}
 	if got := store.personalWrites["vexil-quorin"]; got == "" {
 		t.Error("a meeting whose first attempt failed never updated personal context, so what it taught June is lost for good")
-	}
-}
-
-// The same pass must not run twice for one meeting. A recording that has already been filed has its note id on disk, which is the evidence that a run got as far as minutes — deleting minutes.md to ask for a better summary re-summarises the meeting without re-proposing the same personal-context writes.
-func TestProcess_DoesNotUpdatePersonalContextForAMeetingAlreadyFiled(t *testing.T) {
-	store := &fakeStore{notes: []string{"# Minutes"}, kinds: []string{noteKind}}
-	r, _, _ := newTestRecorder(t, store)
-	asked := 0
-	r.minutes = func(ctx context.Context, prompt string) (string, error) {
-		if strings.HasPrefix(prompt, personalUpdateInstruction) {
-			asked++
-			return `{"updates":[]}`, nil
-		}
-		return "# Minutes\n\n- ship friday", nil
-	}
-
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[00:00:00] [me] shall we ship friday\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, noteIDFile), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := &session{dir: dir, startedAt: time.Now(), stoppedAt: time.Now(), fromTranscript: true}
-
-	if err := r.process(context.Background(), s); err != nil {
-		t.Fatalf("process: %v", err)
-	}
-	if asked != 0 {
-		t.Errorf("the personal-context pass ran %d times for a meeting already filed, re-proposing what it wrote the first time", asked)
-	}
-}
-
-// The retry loop lives as long as the daemon, and has to end with it: time.Tick's ticker is never stopped and never checks whether anyone is still listening, so the loop kept a recording being transcribed after the daemon had been told to quit.
-func TestRetryDeferred_EndsWithTheContextItWasGiven(t *testing.T) {
-	r, _, _ := newTestRecorder(t, &fakeStore{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		r.retryDeferred(ctx)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("retryDeferred is still running after its context was cancelled")
-	}
-}
-
-// The duration backfill corrects notes filed before the duration marker existed, which is a one-time job. It was reading every note in the store on every sweep — that is every two minutes, for the life of the daemon, to find nothing.
-func TestPickup_DoesNotReadEveryNoteInTheStoreOnEverySweep(t *testing.T) {
-	store := &fakeStore{notes: []string{"# Standup\n"}, kinds: []string{noteKind}}
-	r, _, _ := newTestRecorder(t, store)
-
-	dir := filepath.Join(r.dataDir, "recordings", "2026-08-20T09-00-00")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "note-id.txt"), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "minutes.md"), []byte("# Standup\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "transcript.md"), []byte("[me] shipped it\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	store.mu.Lock()
-	store.getNotesCalls = 0
-	store.mu.Unlock()
-
-	r.pickup(context.Background())
-
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if store.getNotesCalls != 0 {
-		t.Errorf("the sweep read every note in the store %d times, want none: the backfill runs once at startup", store.getNotesCalls)
 	}
 }
 

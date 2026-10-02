@@ -34,6 +34,9 @@ func autostartEnabled() bool {
 	return err == nil
 }
 
+// autostartCurrent reports whether an installed entry needs no rewrite. It always does not on Linux; see reconcileAutostart.
+func autostartCurrent() bool { return true }
+
 // setAutostart writes the autostart .desktop entry when on is true, and removes it when false.
 // Removing an entry that isn't there is not an error.
 // Exec= uses the absolute path from os.Executable and Path= pins the working directory to the binary's own directory, because June loads .env relative to the working directory and a session manager launches autostart entries from an arbitrary one. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)

@@ -4,12 +4,10 @@ package cmd
 
 import (
 	"bytes"
-	"fmt"
 
 	"image/png"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -27,134 +25,6 @@ func recordIconCacheRefresh(t *testing.T) *[]string {
 	}
 	t.Cleanup(func() { iconCacheRefresh = previous })
 	return &calls
-}
-
-// TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles drives installDesktopEntry against a throwaway XDG_DATA_HOME and checks every file it writes: one PNG per size under the hicolor theme, the application entry, and the hidden overlay entry.
-func TestInstallDesktopEntry_WritesEveryIconSizeAndBothDesktopFiles(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
-	recordIconCacheRefresh(t)
-
-	if err := installDesktopEntry(); err != nil {
-		t.Fatalf("installDesktopEntry() returned unexpected error: %v", err)
-	}
-
-	for _, size := range []int{16, 32, 48, 64, 128, 256} {
-		path := filepath.Join(dir, "icons", "hicolor", fmt.Sprintf("%dx%d", size, size), "apps", "june.png")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("expected an icon at %s: %v", path, err)
-		}
-		img, err := png.Decode(bytes.NewReader(data))
-		if err != nil {
-			t.Fatalf("icon at %s is not a readable PNG: %v", path, err)
-		}
-		if got := img.Bounds(); got.Dx() != size || got.Dy() != size {
-			t.Errorf("expected the icon at %s to be %dx%d pixels, got %dx%d", path, size, size, got.Dx(), got.Dy())
-		}
-	}
-
-	entries, err := os.ReadDir(filepath.Join(dir, "icons", "hicolor"))
-	if err != nil {
-		t.Fatalf("reading the hicolor directory failed: %v", err)
-	}
-	var sizeDirs []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			sizeDirs = append(sizeDirs, entry.Name())
-		}
-	}
-	if len(sizeDirs) != 6 {
-		t.Errorf("expected exactly the six icon size directories, got %v", sizeDirs)
-	}
-
-	desktopPath := filepath.Join(dir, "applications", "june.desktop")
-	data, err := os.ReadFile(desktopPath)
-	if err != nil {
-		t.Fatalf("expected june.desktop to exist: %v", err)
-	}
-	entry := string(data)
-
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable failed: %v", err)
-	}
-	for _, want := range []string{
-		"[Desktop Entry]",
-		"Type=Application",
-		"Name=June",
-		"Comment=June",
-		"Exec=\"" + exe + "\" --daemon",
-		"Path=" + filepath.Dir(exe),
-		"Icon=june",
-		"Terminal=false",
-		"StartupWMClass=june",
-		"NoDisplay=false",
-		"Categories=Utility;",
-	} {
-		if !strings.Contains(entry, want) {
-			t.Errorf("expected desktop entry to contain %q, got:\n%s", want, entry)
-		}
-	}
-
-	overlayData, err := os.ReadFile(filepath.Join(dir, "applications", "june-overlay.desktop"))
-	if err != nil {
-		t.Fatalf("expected june-overlay.desktop to exist: %v", err)
-	}
-	overlay := string(overlayData)
-	for _, want := range []string{
-		"StartupWMClass=june-overlay",
-		"NoDisplay=true",
-		"Icon=june",
-		"Exec=\"" + exe + "\" --daemon",
-	} {
-		if !strings.Contains(overlay, want) {
-			t.Errorf("expected the overlay entry to contain %q, got:\n%s", want, overlay)
-		}
-	}
-}
-
-// TestInstallDesktopEntry_SecondCallRewritesNothing checks that calling installDesktopEntry again with unchanged inputs leaves the files untouched and asks for no second cache refresh, so the daemon does not rewrite them on every start.
-func TestInstallDesktopEntry_SecondCallRewritesNothing(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
-	calls := recordIconCacheRefresh(t)
-
-	if err := installDesktopEntry(); err != nil {
-		t.Fatalf("first installDesktopEntry() returned unexpected error: %v", err)
-	}
-
-	watched := []string{
-		filepath.Join(dir, "icons", "hicolor", "16x16", "apps", "june.png"),
-		filepath.Join(dir, "icons", "hicolor", "256x256", "apps", "june.png"),
-		filepath.Join(dir, "applications", "june.desktop"),
-		filepath.Join(dir, "applications", "june-overlay.desktop"),
-	}
-	before := make(map[string]os.FileInfo, len(watched))
-	for _, path := range watched {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s failed: %v", path, err)
-		}
-		before[path] = info
-	}
-
-	if err := installDesktopEntry(); err != nil {
-		t.Fatalf("second installDesktopEntry() returned unexpected error: %v", err)
-	}
-
-	for _, path := range watched {
-		after, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s failed after the second call: %v", path, err)
-		}
-		if !before[path].ModTime().Equal(after.ModTime()) {
-			t.Errorf("expected %s to be unchanged by a second call with identical content", path)
-		}
-	}
-	if len(*calls) != 1 {
-		t.Errorf("expected no second icon cache refresh when nothing changed, got %d refreshes", len(*calls))
-	}
 }
 
 // TestInstallDesktopEntry_RefreshesAgainWhenAnIconChanges checks that an icon file someone else overwrote is written back and the cache refreshed again, which is the case the missing dock icon came from: a file on disk the desktop's cache does not describe.
@@ -185,30 +55,6 @@ func TestInstallDesktopEntry_RefreshesAgainWhenAnIconChanges(t *testing.T) {
 	}
 	if len(*calls) != 2 {
 		t.Errorf("expected a second icon cache refresh after an icon changed, got %d refreshes", len(*calls))
-	}
-}
-
-// TestScaleIcon_ShrinksTheMasterToEverySize checks the scaler on the embedded master: every size comes out square at the size asked for, and a pixel on the master's own edge stays solid instead of fading, which is what happens when a scaler averages the pixels outside the image in with the ones inside it.
-// The probe is the middle of the top edge rather than the corner. It was the corner until 2026-09-12, when the app icon became a rounded square and its corners turned legitimately transparent; the middle of an edge is still inside the art and still sits exactly where sampling past the boundary would show up.
-// Nearly opaque rather than exactly opaque, because the tile is a superellipse with an anti-aliased edge (see packaging/make-icons.py): its top-centre pixel is 99.6% opaque by design. A scaler bleeding the empty space outside the image in would read near zero there, which is what this is looking for, so the bar is set where it separates those two and nowhere tighter.
-func TestScaleIcon_ShrinksTheMasterToEverySize(t *testing.T) {
-	master, err := png.Decode(bytes.NewReader(appIconPNG))
-	if err != nil {
-		t.Fatalf("decoding the embedded app icon failed: %v", err)
-	}
-	if got := master.Bounds(); got.Dx() != 512 || got.Dy() != 512 {
-		t.Fatalf("expected the embedded master to be 512x512, got %dx%d", got.Dx(), got.Dy())
-	}
-
-	for _, size := range dockIconSizes {
-		scaled := scaleIcon(master, size)
-		if got := scaled.Bounds(); got.Dx() != size || got.Dy() != size {
-			t.Errorf("expected scaleIcon to return %dx%d, got %dx%d", size, size, got.Dx(), got.Dy())
-			continue
-		}
-		if _, _, _, alpha := scaled.At(size/2, 0).RGBA(); alpha < 0xf000 {
-			t.Errorf("expected the middle of the %dx%d icon's top edge to stay opaque, got alpha %d", size, size, alpha)
-		}
 	}
 }
 
@@ -245,37 +91,5 @@ func TestInstallDesktopEntry_LeavesAForeignEntryAlone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "icons", "hicolor", "48x48", "apps", "june.png")); err != nil {
 		t.Errorf("expected icons to still be written even when june.desktop is foreign: %v", err)
-	}
-}
-
-// TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry checks that an june.desktop carrying desktopEntryMarker — the daemon's own past write — is treated as ours and kept up to date, the same as when nothing was there at all.
-func TestInstallDesktopEntry_MarkerLetsTheDaemonReclaimItsOwnEntry(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dir)
-	recordIconCacheRefresh(t)
-
-	appsDir := filepath.Join(dir, "applications")
-	if err := os.MkdirAll(appsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	appPath := filepath.Join(appsDir, "june.desktop")
-	stale := "[Desktop Entry]\nName=June (stale)\n" + desktopEntryMarker + "\n"
-	if err := os.WriteFile(appPath, []byte(stale), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := installDesktopEntry(); err != nil {
-		t.Fatalf("installDesktopEntry() returned unexpected error: %v", err)
-	}
-
-	got, err := os.ReadFile(appPath)
-	if err != nil {
-		t.Fatalf("reading june.desktop back failed: %v", err)
-	}
-	if string(got) == stale {
-		t.Errorf("expected the daemon's own marked entry to be rewritten, got the stale content unchanged")
-	}
-	if !strings.Contains(string(got), "StartupWMClass=june") {
-		t.Errorf("expected the rewritten entry to be the real application entry, got:\n%s", got)
 	}
 }

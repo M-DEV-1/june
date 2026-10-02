@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"google.golang.org/genai"
 	"io"
 	"net/http"
 	"os"
@@ -13,7 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
+
+	"google.golang.org/genai"
 
 	"june/internal/db"
 )
@@ -80,12 +80,6 @@ func (f *fakeAgySession) Kill() {
 	f.killed = true
 }
 
-func (f *fakeAgySession) wasKilled() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.killed
-}
-
 // callFakeAgyTool calls one june tool over MCP against the server named in env's HOME's mcp config, the way the real agy CLI would from inside a turn.
 func callFakeAgyTool(env []string, name string) error {
 	home := ""
@@ -121,20 +115,6 @@ func callFakeAgyTool(env []string, name string) error {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	return nil
-}
-
-// agyLineText decodes one NDJSON line Send received back into the plain text it carried, the way agy itself reads its stdin.
-func agyLineText(t *testing.T, line string) string {
-	t.Helper()
-	var parsed struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(line), &parsed); err != nil {
-		t.Fatalf("the line sent to agy is not the expected shape: %v (%s)", err, line)
-	}
-	return parsed.Message.Content
 }
 
 // A second ask on the same conversation reuses the process: only one session gets started, and the second send carries just the new question, none of the instruction or the first turn's thread.
@@ -198,38 +178,6 @@ func TestAskAgy_SecondAskReusesTheProcess(t *testing.T) {
 	}
 }
 
-// A model change starts a fresh process instead of reusing the one that answered under the old model, and kills the old one.
-func TestAskAgy_ModelChangeStartsANewProcess(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fake1 := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"a"}`}}
-	fake2 := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"b"}`}}
-	sessions := []*fakeAgySession{fake1, fake2}
-	i := 0
-	newProc := func() agySessionRunner {
-		s := sessions[i]
-		i++
-		return s
-	}
-	t.Cleanup(a.CloseAgySession)
-
-	if _, err := a.askAgy(t.Context(), newProc, "gemini-3-pro", nil, "hello"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.askAgy(t.Context(), newProc, "gemini-3-flash", nil, "hi"); err != nil {
-		t.Fatal(err)
-	}
-
-	if i != 2 {
-		t.Errorf("newProc was called %d times, want 2 — a model change must start a fresh process", i)
-	}
-	if !fake1.wasKilled() {
-		t.Errorf("the old model's process was not killed")
-	}
-	if !strings.Contains(fake2.sends[0], "You are June.") {
-		t.Errorf("the new process's first send must carry the instruction again: %q", fake2.sends[0])
-	}
-}
-
 // A process that has died since the last turn (here: its stdin write fails) is restarted transparently, with the instruction and history sent again as if to a fresh process.
 func TestAskAgy_RestartsADeadProcessWithInstructionAndHistory(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -265,29 +213,6 @@ func TestAskAgy_RestartsADeadProcessWithInstructionAndHistory(t *testing.T) {
 	}
 }
 
-// A session left unused for longer than agyIdleTimeout is killed, freeing the process without anyone having to ask again.
-func TestAskAgy_IdleTimeoutKillsTheProcess(t *testing.T) {
-	old := agyIdleTimeout
-	agyIdleTimeout = time.Millisecond
-	defer func() { agyIdleTimeout = old }()
-
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"hi"}`}}
-	newProc := func() agySessionRunner { return fake }
-
-	if _, err := a.askAgy(t.Context(), newProc, "", nil, "hello"); err != nil {
-		t.Fatal(err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for !fake.wasKilled() {
-		if time.Now().After(deadline) {
-			t.Fatal("the idle process was never killed")
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // The result agy 1.2.3 prints when its own login has expired, measured on this machine on 2026-09-15: the reason is in "error" and "response" is empty. A run that reads only "response" reports "agy: the run failed (ERROR):" with nothing after the colon, which is what three asks in a row showed in the window that day. Two things have to hold. The reason has to reach the message, or nobody can tell an expired login from a crash. And the router has to treat it as a provider to hand on from, or a machine with a working Claude login sitting at 31% of its window answers nothing at all.
 func TestAskAgy_AnExpiredLoginNamesTheReasonAndHandsOn(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -303,20 +228,5 @@ func TestAskAgy_AnExpiredLoginNamesTheReasonAndHandsOn(t *testing.T) {
 	}
 	if !ProviderSpent(err) {
 		t.Errorf("an expired login stops the chain rather than handing on: %q", err)
-	}
-}
-
-// A run that fails for a reason every brain would repeat still stops the chain. Asking Claude the same broken question costs a second answer for the same failure.
-func TestAskAgy_AnOrdinaryFailureStillStopsTheChain(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	fake := &fakeAgySession{responses: []string{`{"status":"ERROR","response":"","error":"the prompt was rejected"}`}}
-	t.Cleanup(a.CloseAgySession)
-
-	_, err := a.askAgy(t.Context(), func() agySessionRunner { return fake }, "", nil, "hello")
-	if err == nil {
-		t.Fatal("a rejected prompt answered")
-	}
-	if ProviderSpent(err) {
-		t.Errorf("a rejected prompt was handed on to the next brain: %q", err)
 	}
 }

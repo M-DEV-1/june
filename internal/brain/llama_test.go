@@ -43,51 +43,28 @@ func TestLlamaServer_HappyPath(t *testing.T) {
 	}
 }
 
-// A non-2xx status is an error carrying what the server said, not an empty answer.
-func TestLlamaServer_NonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("context size exceeded"))
-	}))
-	defer srv.Close()
-
-	_, err := LlamaServer(srv.URL, 5)(context.Background(), "x")
-	if err == nil || !strings.Contains(err.Error(), "500") {
-		t.Fatalf("error = %v, want it to name the 500 status", err)
-	}
-}
-
-// A reply with no choices, or a choice with empty content, is an error rather than a silent empty string.
-func TestLlamaServer_EmptyReply(t *testing.T) {
+// A failed or empty reply is an error carrying the reason, never a silent empty answer.
+func TestLlamaServer_FailuresAreErrors(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
+		name    string
+		status  int
+		body    string
+		wantErr string
 	}{
-		{"no choices", `{"choices":[]}`},
-		{"blank content", `{"choices":[{"message":{"content":"   "}}]}`},
+		{"a non-2xx status names the status", http.StatusInternalServerError, "context size exceeded", "500"},
+		{"no choices", http.StatusOK, `{"choices":[]}`, "no choices"},
+		{"blank content", http.StatusOK, `{"choices":[{"message":{"content":"   "}}]}`, "no text"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
 				w.Write([]byte(tt.body))
 			}))
 			defer srv.Close()
-			if _, err := LlamaServer(srv.URL, 5)(context.Background(), "x"); err == nil {
-				t.Error("expected an error, got none")
+			if _, err := LlamaServer(srv.URL, 5)(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-// A slow server past the timeout fails instead of hanging the caller forever.
-func TestLlamaServer_Timeout(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer srv.Close()
-
-	_, err := LlamaServer(srv.URL, 0)(context.Background(), "x")
-	if err == nil {
-		t.Fatal("expected the near-zero timeout to fail the call")
 	}
 }

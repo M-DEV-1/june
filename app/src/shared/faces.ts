@@ -28,7 +28,3 @@ export function face(state: JuneState, tick = 0): string {
   const list = FACES[state];
   return list[tick % list.length];
 }
-
-/** The overlay's label pill mood, one of the four the pointer drawings use: "point" for ink showing where something is, "act" for a press about to happen, "done" for a thing finished, and "neutral" for anything else. */
-export type OverlayMood = "point" | "act" | "done" | "neutral";
-

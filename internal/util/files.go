@@ -3,6 +3,7 @@ package util
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Exists reports whether anything is at path.
@@ -11,8 +12,14 @@ func Exists(path string) bool {
 	return err == nil
 }
 
-// DataHome returns $XDG_DATA_HOME, or ~/.local/share when it is unset. Output: the directory, or "" when neither the variable nor a home directory can be found.
+// DataHome returns %LOCALAPPDATA% on Windows, and elsewhere $XDG_DATA_HOME, or ~/.local/share when it is unset. Output: the directory, or "" when none of these can be found.
+// The window resolves the same directory in data_dir (app/src-tauri/src/lib.rs), and the two must agree because they share the IPC token.
 func DataHome() string {
+	if runtime.GOOS == "windows" {
+		// os.UserCacheDir is %LOCALAPPDATA% on Windows.
+		dir, _ := os.UserCacheDir()
+		return dir
+	}
 	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
 		return dir
 	}
