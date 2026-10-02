@@ -470,6 +470,8 @@ func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
 		t.Fatalf("the seeded vector is %d bytes, want the 12 a three-number vector takes", got)
 	}
 
+	// The backfill SimilarActRuns starts re-embeds it on this model's scale. Registered before the lookup because the backfill runs in the background and can embed the question before this test gets another turn.
+	emb.register(stored, 20)
 	matches, err := store.SimilarActRuns(ctx, asked, 3)
 	if err != nil {
 		t.Fatalf("SimilarActRuns: %v", err)
@@ -477,8 +479,6 @@ func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("SimilarActRuns scored a vector of another length, want it skipped: %+v", matches)
 	}
-	// The backfill re-embeds it, and by then the embedder answers on this model's scale.
-	emb.register(stored, 20)
 	deadline := time.Now().Add(time.Second)
 	for len(actRunVector(t, store, ids[0])) != 8 {
 		if time.Now().After(deadline) {

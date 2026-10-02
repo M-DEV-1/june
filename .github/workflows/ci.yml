@@ -1,9 +1,9 @@
-# Builds and tests the Go daemon and the Tauri window on Linux and Windows on every push and pull request.
+# Builds and tests the Go daemon and the Tauri window on Linux and Windows on every push.
 name: ci
 
+# Push only: a pull request from a branch of this repository is already covered by the push, and both would run every job twice.
 on:
   push:
-  pull_request:
 
 jobs:
   go:
@@ -23,7 +23,8 @@ jobs:
         env:
           CGO_ENABLED: "0"
       - run: go vet ./...
-      - run: go test ./...
+      # -short skips the tests that need a microphone or speaker.
+      - run: go test -short ./...
 
   app:
     strategy:
@@ -39,7 +40,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 11
+          # The version used to write pnpm-lock.yaml. 11.28 rejects semver@6.3.1 under trustPolicy: no-downgrade.
+          version: 11.1.2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
