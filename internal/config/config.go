@@ -12,7 +12,7 @@ import (
 	"june/internal/util"
 )
 
-// Version is June's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it plainly, and internal/ui/ui.go wraps it as "v0.1.1-alpha" for the terminal banner.
+// Version is June's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it.
 const Version = "0.1.1"
 
 type JuneConfig struct {

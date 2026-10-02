@@ -33,8 +33,7 @@ var rootCmd = &cobra.Command{
 		isDaemon, _ := cmd.Flags().GetBool("daemon")
 		autostart, _ := cmd.Flags().GetString("autostart")
 		workdir, _ := cmd.Flags().GetString("workdir")
-		forceTUI, _ := cmd.Flags().GetBool("tui")
-		runRoot(isDaemon, autostart, workdir, forceTUI)
+		runRoot(isDaemon, autostart, workdir)
 	},
 }
 
@@ -69,11 +68,10 @@ func init() {
 	rootCmd.PersistentFlags().Bool("daemon", false, "Run as background daemon")
 	rootCmd.PersistentFlags().String("autostart", "", "Turn start-on-login on or off, persist it to the config, and exit (on|off)")
 	rootCmd.PersistentFlags().String("workdir", "", "Change to this directory before doing anything else — the login autostart entry passes it, because June loads .env relative to the working directory and a session manager launches from an arbitrary one")
-	rootCmd.PersistentFlags().Bool("tui", false, "Force the terminal UI even when a desktop window is available")
 }
 
-// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows June's desktop window if one is built and wanted, falling back to the terminal UI otherwise; --tui forces the terminal UI regardless; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
-func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
+// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows June's desktop window; --daemon runs the background daemon itself; --autostart flips start-on-login and returns.
+func runRoot(isDaemon bool, autostart, workdir string) {
 	// Must happen before anything reads a relative path (.env — every june-db/data path now resolves through config.DataDir(), independent of cwd).
 	if workdir != "" {
 		if err := os.Chdir(workdir); err != nil {
@@ -117,68 +115,55 @@ func runRoot(isDaemon bool, autostart, workdir string, forceTUI bool) {
 
 	// get-or-create daemon.
 	// using short per-request timeout without it http.Get hangs if the TCP port is bound but nobody has called Accept yet
-	var daemonStatus string
+	freshDaemon := false
 	if pingDaemon() {
 		slog.Info("connected to existing daemon")
-		daemonStatus = "connected"
 	} else {
 		slog.Info("daemon not found, spawning background process")
-		if spawnErr := spawnHiddenDaemon(); spawnErr != nil {
-			slog.Error("failed to spawn background daemon", "error", spawnErr)
-			daemonStatus = "daemon spawn failed: " + spawnErr.Error()
-		} else {
-			// 300ms timeout, i.e. no blocking
-			// poll until daemon is ready, max 10s, 100ms sleep b/w attempts
-			deadline := time.Now().Add(10 * time.Second)
-			daemonStatus = "daemon spawn failed: timed out"
-			for time.Now().Before(deadline) {
-				time.Sleep(100 * time.Millisecond)
-				if pingDaemon() {
-					daemonStatus = "started"
-					break
-				}
-			}
+		if err := spawnHiddenDaemon(); err != nil {
+			fmt.Fprintf(os.Stderr, "June could not start its daemon: %v\n", err)
+			exitCode = 1
+			return
 		}
-	}
-
-	// A stale daemon (still running an old build after a rebuild) doesn't fail pingDaemon — it's alive and answers just fine, it's just running old code. Only checked once a daemon is actually reachable, and never blocks startup on its own failure.
-	var buildMismatch string
-	if daemonStatus == "connected" || daemonStatus == "started" {
-		buildMismatch = checkDaemonBuildMismatch(daemonPingClient, "http://127.0.0.1:"+DaemonPort+"/ping")
-		if buildMismatch != "" {
-			slog.Warn(buildMismatch)
+		// poll until daemon is ready, max 10s, 100ms sleep b/w attempts
+		deadline := time.Now().Add(10 * time.Second)
+		for !freshDaemon && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			freshDaemon = pingDaemon()
 		}
-	}
-
-	// A live daemon is what a desktop window needs — one that failed to spawn has nothing to show a window in front of, so the terminal UI is the only option left.
-	if !forceTUI && (daemonStatus == "connected" || daemonStatus == "started") {
-		if offerWindow(daemonStatus == "started") {
+		if !freshDaemon {
+			fmt.Fprintln(os.Stderr, "June started its daemon but it did not answer within 10 seconds.")
+			exitCode = 1
 			return
 		}
 	}
 
-	// start tui
-	if err := runClient(ctx, shutdownObs, daemonStatus, buildMismatch); err != nil {
-		slog.Error("Client crashed", "error", err)
+	// A stale daemon (still running an old build after a rebuild) doesn't fail pingDaemon — it's alive and answers just fine, it's just running old code. Never blocks startup on its own failure.
+	if mismatch := checkDaemonBuildMismatch(daemonPingClient, "http://127.0.0.1:"+DaemonPort+"/ping"); mismatch != "" {
+		slog.Warn(mismatch)
+		fmt.Fprintln(os.Stderr, mismatch)
 	}
+
+	exitCode = showWindow(freshDaemon)
 }
 
-// freshDaemonOpenAttempts is how many times offerWindow retries the show instruction when this process just spawned the daemon itself.
+// freshDaemonOpenAttempts is how many times showWindow retries the show instruction when this process just spawned the daemon itself.
 const freshDaemonOpenAttempts = 5
 
 // openRetryInterval is the pause between those retries. A var, not a const, so a test can shrink it instead of actually waiting out four real pauses.
 var openRetryInterval = 400 * time.Millisecond
 
-// offerWindow decides whether this invocation of `june` should show the desktop window instead of the terminal UI, and does so when it can. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: true when it took over startup and there is nothing left for the caller to do (it already printed a line explaining what happened); false when the caller should still open the terminal UI, because the config has the window turned off or no window is built.
-func offerWindow(freshDaemon bool) bool {
+// showWindow asks the running daemon to show June's desktop window and prints one line saying what happened. Input: freshDaemon is true when this same process just spawned the daemon (as opposed to finding one already running) — its window child, if any, was only just started and needs a moment to launch and subscribe to the daemon's event stream before it can act on the show instruction. Output: the process exit code, 1 when no window binary is installed and 0 otherwise, including when the config has the window turned off.
+func showWindow(freshDaemon bool) int {
 	appConfig := config.LoadConfig()
 	if !appConfig.Window {
-		return false
+		fmt.Println("June is running without its desktop window, because \"window\" is false in june-config.json.")
+		return 0
 	}
 	path, tried, err := windowBinary()
 	if err != nil {
-		fmt.Printf("No desktop window binary found (looked at: %s). Set JUNE_WINDOW=/path/to/it, or build one in app/, and `june` will open it instead of the terminal UI.\n", strings.Join(tried, ", "))
-		return false
+		fmt.Fprintf(os.Stderr, "June's desktop window is not installed (looked at: %s). Set JUNE_WINDOW=/path/to/it, or build it in app/.\n", strings.Join(tried, ", "))
+		return 1
 	}
 
 	attempts := 1
@@ -197,8 +182,8 @@ func offerWindow(freshDaemon bool) bool {
 	if hotkey == "" {
 		hotkey = "your June shortcut"
 	}
-	fmt.Printf("June is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s or run `june --tui` for the terminal UI instead.\n", path, hotkey)
-	return true
+	fmt.Printf("June is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s.\n", path, hotkey)
+	return 0
 }
 
 // fetchWindowHotkey asks the daemon's own /settings for the GNOME accelerator that shows the window (see internal/ipc.windowHotkey). Output: the raw accelerator, e.g. "<Control><Alt>space", or "" on any failure — this only ever feeds a hint line, never something startup can block or fail on.

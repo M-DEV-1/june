@@ -100,17 +100,17 @@ func TestFileIdentity_DiffersAfterRebuild(t *testing.T) {
 	}
 }
 
-// captureStdout runs fn with os.Stdout redirected to a pipe and returns everything fn printed.
-func captureStdout(t *testing.T, fn func()) string {
+// captureOutput runs fn with *stream (os.Stdout or os.Stderr) redirected to a pipe and returns everything fn printed there.
+func captureOutput(t *testing.T, stream **os.File, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := os.Stdout
-	os.Stdout = w
+	old := *stream
+	*stream = w
 	fn()
-	os.Stdout = old
+	*stream = old
 	w.Close()
 	out, err := io.ReadAll(r)
 	if err != nil {
@@ -119,7 +119,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-// fakeDaemon stands a real HTTP server in for the daemon on DaemonPort (offerWindow and its helpers build their URLs from that package var directly, not from an injectable client), so this is what "the daemon ping faked" means for this file: a real listener on the port the code under test actually dials, restored once the test ends. Input: the mux to serve. Output: none — DaemonPort is left pointed at it until t's cleanup runs.
+// fakeDaemon stands a real HTTP server in for the daemon on DaemonPort (showWindow and its helpers build their URLs from that package var directly, not from an injectable client), so this is what "the daemon ping faked" means for this file: a real listener on the port the code under test actually dials, restored once the test ends. Input: the mux to serve. Output: none — DaemonPort is left pointed at it until t's cleanup runs.
 func fakeDaemon(t *testing.T, mux *http.ServeMux) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -142,16 +142,16 @@ func isolateConfig(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 }
 
-// A machine with no window built is told exactly where june looked and how to fix it, and offerWindow leaves the terminal UI as the caller's job.
-func TestOfferWindow_NoWindowBinary_PrintsHintAndDefersToTUI(t *testing.T) {
+// A machine with no window built is told exactly where june looked and how to fix it, and the command fails.
+func TestShowWindow_NoWindowBinary_PrintsHintAndFails(t *testing.T) {
 	isolateConfig(t)
 	t.Setenv("JUNE_WINDOW", filepath.Join(t.TempDir(), "not-here"))
 
-	var took bool
-	out := captureStdout(t, func() { took = offerWindow(false) })
+	var code int
+	out := captureOutput(t, &os.Stderr, func() { code = showWindow(false) })
 
-	if took {
-		t.Error("offerWindow should leave startup to the terminal UI when nothing is built")
+	if code != 1 {
+		t.Errorf("showWindow should exit 1 when no window is installed, got %d", code)
 	}
 	if !strings.Contains(out, "JUNE_WINDOW") {
 		t.Errorf("expected the hint to mention JUNE_WINDOW, got %q", out)
@@ -161,26 +161,26 @@ func TestOfferWindow_NoWindowBinary_PrintsHintAndDefersToTUI(t *testing.T) {
 	}
 }
 
-// A config with the window turned off runs the terminal UI without printing anything about a window at all — this is the user's own choice, not a missing binary.
-func TestOfferWindow_WindowTurnedOff_SilentlyDefersToTUI(t *testing.T) {
+// A config with the window turned off is the user's own choice, not a missing binary, so the command says so and succeeds.
+func TestShowWindow_WindowTurnedOff_Succeeds(t *testing.T) {
 	isolateConfig(t)
 	if err := config.SaveConfig(config.JuneConfig{Window: false}); err != nil {
 		t.Fatal(err)
 	}
 
-	var took bool
-	out := captureStdout(t, func() { took = offerWindow(false) })
+	var code int
+	out := captureOutput(t, &os.Stdout, func() { code = showWindow(false) })
 
-	if took {
-		t.Error("offerWindow should defer to the terminal UI when the config has the window off")
+	if code != 0 {
+		t.Errorf("showWindow should exit 0 when the config has the window off, got %d", code)
 	}
-	if out != "" {
-		t.Errorf("expected no output when the window is turned off by config, got %q", out)
+	if !strings.Contains(out, "june-config.json") {
+		t.Errorf("expected the line to name the config file, got %q", out)
 	}
 }
 
-// A window binary that exists is shown rather than the terminal UI opened, and the printed line names the binary and the accelerator that brings a hidden window back.
-func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
+// A window binary that exists is shown, and the printed line names the binary and the accelerator that brings a hidden window back.
+func TestShowWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 	isolateConfig(t)
 	binary := writeExecutable(t, filepath.Join(t.TempDir(), "june-window"))
 	t.Setenv("JUNE_WINDOW", binary)
@@ -197,11 +197,11 @@ func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 	})
 	fakeDaemon(t, mux)
 
-	var took bool
-	out := captureStdout(t, func() { took = offerWindow(false) })
+	var code int
+	out := captureOutput(t, &os.Stdout, func() { code = showWindow(false) })
 
-	if !took {
-		t.Fatal("offerWindow should take over startup when a window binary exists and the config wants one")
+	if code != 0 {
+		t.Fatalf("showWindow should exit 0 when a window binary exists, got %d", code)
 	}
 	if !strings.Contains(out, binary) {
 		t.Errorf("expected the line to name the binary %q, got %q", binary, out)
@@ -209,16 +209,13 @@ func TestOfferWindow_WindowFound_ShowsItAndReportsTheHotkey(t *testing.T) {
 	if !strings.Contains(out, "Ctrl+Alt+Space") {
 		t.Errorf("expected the line to report the hotkey, got %q", out)
 	}
-	if !strings.Contains(out, "june --tui") {
-		t.Errorf("expected the line to mention the --tui fallback, got %q", out)
-	}
 	if got := atomic.LoadInt32(&opens); got != 1 {
 		t.Errorf("expected exactly one show request for an already-running daemon, got %d", got)
 	}
 }
 
-// A daemon this process just spawned may not have its window listening yet, so offerWindow retries the show instruction rather than sending it once and hoping.
-func TestOfferWindow_FreshDaemon_RetriesTheShowInstruction(t *testing.T) {
+// A daemon this process just spawned may not have its window listening yet, so showWindow retries the show instruction rather than sending it once and hoping.
+func TestShowWindow_FreshDaemon_RetriesTheShowInstruction(t *testing.T) {
 	isolateConfig(t)
 	binary := writeExecutable(t, filepath.Join(t.TempDir(), "june-window"))
 	t.Setenv("JUNE_WINDOW", binary)
@@ -239,8 +236,8 @@ func TestOfferWindow_FreshDaemon_RetriesTheShowInstruction(t *testing.T) {
 	})
 	fakeDaemon(t, mux)
 
-	if took := offerWindow(true); !took {
-		t.Fatal("offerWindow should take over startup when a window binary exists")
+	if code := showWindow(true); code != 0 {
+		t.Fatalf("showWindow should exit 0 when a window binary exists, got %d", code)
 	}
 	if got := atomic.LoadInt32(&opens); got != freshDaemonOpenAttempts {
 		t.Errorf("expected %d retries for a freshly spawned daemon, got %d", freshDaemonOpenAttempts, got)

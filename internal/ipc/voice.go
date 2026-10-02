@@ -53,13 +53,13 @@ var voiceMaxConsecutiveFailures = 8
 // voiceStopTimeout bounds how long POST /voice/stop waits for the session goroutine to return before closing the audio devices anyway, so a wedged session cannot hang the request.
 var voiceStopTimeout = 5 * time.Second
 
-// levelTickInterval is how often a running voice session samples the microphone's and the speaker's amplitude for the window's waveform — the same 50ms the terminal UI already redraws its own two Waveforms at (see internal/ui/ui.go's tickMsg handling).
+// levelTickInterval is how often a running voice session samples the microphone's and the speaker's amplitude for the window's waveform.
 const levelTickInterval = 50 * time.Millisecond
 
 // levelChangeThreshold is how far a reading has to move from the last one broadcast, on either channel, before levels sends again. A session sitting in silence reads the same near-zero amplitude tick after tick, so without this it would still cost a "level" event twenty times a second for nothing on screen.
 const levelChangeThreshold = 0.005
 
-// levels samples mic's and speaker's amplitude every levelTickInterval and broadcasts a "level" event carrying both as JSON in Detail — {"mic":0.0-1.0,"speaker":0.0-1.0} — so the window can drive the same waveform the terminal UI draws from the same two CurrentAmplitude() calls (see internal/ui/waveform.go, internal/audio/capture_linux.go and player_linux.go). Input: the session's context (levels returns once it is cancelled, so the ticker starts and stops with the session itself), the session's id to stamp the event with, and the mic and speaker the session opened. Output: none. A reading within levelChangeThreshold of the last one sent on both channels is skipped, so a silent session emits nothing.
+// levels samples mic's and speaker's amplitude every levelTickInterval and broadcasts a "level" event carrying both as JSON in Detail — {"mic":0.0-1.0,"speaker":0.0-1.0} — so the window can drive its waveform from the two CurrentAmplitude() calls (see internal/audio/capture_linux.go and player_linux.go). Input: the session's context (levels returns once it is cancelled, so the ticker starts and stops with the session itself), the session's id to stamp the event with, and the mic and speaker the session opened. Output: none. A reading within levelChangeThreshold of the last one sent on both channels is skipped, so a silent session emits nothing.
 func (v *VoiceSession) levels(ctx context.Context, id string, mic audio.Microphone, speaker audio.Speaker) {
 	ticker := time.NewTicker(levelTickInterval)
 	defer ticker.Stop()
@@ -80,7 +80,7 @@ func (v *VoiceSession) levels(ctx context.Context, id string, mic audio.Micropho
 	}
 }
 
-// VoiceSession runs the Gemini Live voice loop inside the daemon, so the desktop window gets the same conversation the terminal client has instead of needing its own audio stack. At most one session exists at a time. Everything it hears, says and calls is broadcast on the same hub /events already serves, tagged with the session's id, so the window reads voice off the stream it is already reading.
+// VoiceSession runs the Gemini Live voice loop inside the daemon, so the desktop window gets a voice conversation without needing its own audio stack. At most one session exists at a time. Everything it hears, says and calls is broadcast on the same hub /events already serves, tagged with the session's id, so the window reads voice off the stream it is already reading.
 type VoiceSession struct {
 	hub *hub
 	// store is the token ledger a finished turn is filed in, so the voice model shows up on the usage screen next to the typed one. nil files nothing, for a daemon or a test running without a store.
@@ -190,7 +190,7 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// A spoken session belongs to no conversation, so its calls are filed under conversation 0 — until now it recorded nothing at all, which is why a voice turn that used look and draw looked, from the store, like a turn that used no tools.
 	ctx = agent.WithToolRecorder(ctx, toolRecorder(v.store, "voice", 0))
-	// Capture starts once and outlives every reconnect below, the same way the terminal client does it.
+	// Capture starts once and outlives every reconnect below.
 	micChan, err := mic.StartCapture(ctx)
 	if err != nil {
 		cancel()

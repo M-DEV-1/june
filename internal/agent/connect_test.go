@@ -169,7 +169,7 @@ func TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText(t *testing.T) {
 	}
 }
 
-// TestReceiveLoop_OutputTranscription_StreamsAsJuneText verifies the transcript of June's own spoken audio (ServerContent.OutputTranscription, enabled at handshake since the config landed) is forwarded to TextResponseChan as ordinary june text. With ResponseModalities=[Audio], ModelTurn text parts are incomplete fragments — this transcription stream is the only complete text form of what June actually said, so it's what the TUI renders.
+// TestReceiveLoop_OutputTranscription_StreamsAsJuneText verifies the transcript of June's own spoken audio (ServerContent.OutputTranscription, enabled at handshake since the config landed) is forwarded to TextResponseChan as ordinary june text. With ResponseModalities=[Audio], ModelTurn text parts are incomplete fragments — this transcription stream is the only complete text form of what June actually said, so it is what the window shows.
 func TestReceiveLoop_OutputTranscription_StreamsAsJuneText(t *testing.T) {
 	a := NewAgent(nil, nil, nil, nil, "")
 	fs := &fakeLiveSession{
