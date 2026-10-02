@@ -280,6 +280,10 @@ func TestVoiceEvents_HeardSaidAndStateReachASubscriber(t *testing.T) {
 	}
 	for _, w := range want {
 		ev := mustEvent(t, events)
+		// Level readings run on their own 50 ms clock beside these events, so one can land anywhere in the sequence.
+		for ev.Type == "level" {
+			ev = mustEvent(t, events)
+		}
 		if ev.Type != w.typ || ev.Text != w.text {
 			t.Fatalf("event = %q/%q, want %q/%q", ev.Type, ev.Text, w.typ, w.text)
 		}

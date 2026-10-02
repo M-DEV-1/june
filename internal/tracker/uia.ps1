@@ -122,7 +122,8 @@ function UiaHandle($q) {
             if ($S.els.Count -gt 20000) { $S.els.Clear() }
             $hw = [long]$q['hwnd']
             $text = [bool]$q['text']
-            $S.nodes = New-Object 'System.Collections.Generic.List[object]'
+            # ::new() rather than New-Object, whose output arrives wrapped in a PSObject that JavaScriptSerializer cannot serialize.
+            $S.nodes = [System.Collections.Generic.List[object]]::new()
             $S.seen = 0
             $S.ms = [int]$q['ms']
             $S.vcap = 500
@@ -130,7 +131,7 @@ function UiaHandle($q) {
             $S.sw = [System.Diagnostics.Stopwatch]::StartNew()
             $root = $AE::FromHandle([IntPtr]$hw).GetUpdatedCache($cr)
             UiaWalk $root 0 $text $hw
-            return @{ nodes = $S.nodes }
+            return @{ nodes = $S.nodes.ToArray() }
         }
         'desc' {
             $ref = [string]$q['ref']
