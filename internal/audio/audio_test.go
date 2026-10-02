@@ -9,6 +9,9 @@ import (
 
 // Needs a real input device: the mic must deliver PCM on the channel and the channel must close when the context is cancelled.
 func TestMicrophone_Capture(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs a real input device; CI runs -short")
+	}
 	mic, err := audio.NewMic()
 	if err != nil {
 		t.Fatalf("Failed to init mic: %+v", err)
