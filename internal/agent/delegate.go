@@ -170,7 +170,7 @@ func (a *Agent) Delegate(ctx context.Context, d Delegation, thread []db.Turn) (s
 	return a.delegate(ctx, ClaudeCodeRunner{}, d, thread)
 }
 
-// delegateResultBudget bounds what one delegate run puts into the next model prompt, in runes. A delegate writes as much as it likes and the whole of its stdout used to come back as the tool result; every other tool that reads outside data caps itself the same way (RunShellCommand at 2000 runes, read_file at 4000).
+// delegateResultBudget bounds what one delegate run puts into the next model prompt, in runes. A delegate writes as much as it likes and the whole of its stdout used to come back as the tool result; every other tool that reads outside data caps itself the same way (read_file at 4000 runes).
 const delegateResultBudget = 4000
 
 // delegate is Delegate against the given runner, so a test can drive a whole delegate call without starting the CLI.

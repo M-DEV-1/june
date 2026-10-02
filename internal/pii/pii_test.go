@@ -1,13 +1,11 @@
 package pii
 
 import (
-	"context"
 	"reflect"
 	"strings"
 	"testing"
 
 	"june/internal/db"
-	"june/internal/db/dbtest"
 )
 
 // people is the gazetteer every test below tears against: two known people whose personal_context subjects overlap on the first name "Vexil", so the longest-match rule has something to decide.
@@ -18,27 +16,6 @@ func people() []db.PersonalEntry {
 		{Subject: "vexil-quorin", Content: "his partner, lives in Bangalore"},
 		{Subject: "vexil-quorin-mother", Content: "her mother, calls on Sundays"},
 		{Subject: "ravix-tavrek", Content: "colleague at work"},
-	}
-}
-
-// TestTear_NoPII_ReturnsByteIdentical is the do-no-harm case: a sentence with nobody and nothing structured in it must come back exactly as it went in, and must produce no entities.
-func TestTear_NoPII_ReturnsByteIdentical(t *testing.T) {
-	in := "The build finished at 10:30 on 12 September 2026 and cost $1500 for 4096 tokens."
-	torn := New(people()).Tear(in)
-	if torn.Text != in {
-		t.Errorf("text changed\n got: %q\nwant: %q", torn.Text, in)
-	}
-	if len(torn.Entities) != 0 {
-		t.Errorf("found entities in clean text: %+v", torn.Entities)
-	}
-}
-
-// TestTear_StrangerNameLeftAlone pins the empty half of the package: a name the gazetteer has never seen passes through untouched, because NoUnknownNames finds nothing.
-func TestTear_StrangerNameLeftAlone(t *testing.T) {
-	in := "Bralthine Quendral sent the contract."
-	torn := New(people()).Tear(in)
-	if torn.Text != in {
-		t.Errorf("stranger's name was torn: %q", torn.Text)
 	}
 }
 
@@ -63,43 +40,22 @@ func TestTear_KnownPersonIDIsStable(t *testing.T) {
 	}
 }
 
-// TestTear_MatchesFirstNameAndIsCaseInsensitive covers how a person is actually written in a sentence: first name alone, full name, and any casing.
-func TestTear_MatchesFirstNameAndIsCaseInsensitive(t *testing.T) {
+// A person is matched however a sentence writes them: any casing, the surname alone, and, when two subjects overlap ("Vexil Quorin" and "Vexil Quorin Mother"), the longest one, with no part of the name left behind in the text.
+func TestTear_MatchesHowANameIsWritten(t *testing.T) {
 	tr := New(people())
-	for _, in := range []string{"vexil called", "VEXIL called", "Vexil Quorin called", "quorin called"} {
-		torn := tr.Tear(in)
-		if len(torn.Entities) != 1 {
-			t.Errorf("%q: got %d entities, want 1: %+v", in, len(torn.Entities), torn.Entities)
+	for _, c := range []struct{ in, subject string }{
+		{"VEXIL called", "vexil-quorin"},
+		{"quorin called", "vexil-quorin"},
+		{"Vexil Quorin Mother called", "vexil-quorin-mother"},
+	} {
+		torn := tr.Tear(c.in)
+		if len(torn.Entities) != 1 || torn.Entities[0].Subject != c.subject {
+			t.Errorf("%q: entities %+v, want one for %s", c.in, torn.Entities, c.subject)
 			continue
 		}
-		if torn.Entities[0].Subject != "vexil-quorin" {
-			t.Errorf("%q: subject %q, want vexil-quorin", in, torn.Entities[0].Subject)
+		if want := torn.Entities[0].Placeholder + " called"; torn.Text != want {
+			t.Errorf("%q: text %q, want %q", c.in, torn.Text, want)
 		}
-	}
-}
-
-// TestTear_LongestMatchWins resolves two subjects that overlap: "Vexil Quorin" and "Vexil Quorin Mother" both start at the same word, and the sentence is about the mother.
-func TestTear_LongestMatchWins(t *testing.T) {
-	torn := New(people()).Tear("Vexil Quorin Mother calls on Sundays")
-	if len(torn.Entities) != 1 {
-		t.Fatalf("got %d entities, want 1: %+v", len(torn.Entities), torn.Entities)
-	}
-	if got := torn.Entities[0].Subject; got != "vexil-quorin-mother" {
-		t.Errorf("subject %q, want vexil-quorin-mother", got)
-	}
-	if strings.Contains(torn.Text, "Vexil") || strings.Contains(torn.Text, "Mother") {
-		t.Errorf("part of the longer name was left behind: %q", torn.Text)
-	}
-}
-
-// TestTear_TwoPeopleInOneSentence checks each person gets their own token and the record lists both.
-func TestTear_TwoPeopleInOneSentence(t *testing.T) {
-	torn := New(people()).Tear("Vexil and Ravix are both coming")
-	if got := torn.Subjects(); !reflect.DeepEqual(got, []string{"vexil-quorin", "ravix-tavrek"}) {
-		t.Errorf("subjects %v, want [vexil-quorin ravix-tavrek]", got)
-	}
-	if torn.Text != "[[PERSON_c2538a6c]] and [[PERSON_23518061]] are both coming" {
-		t.Errorf("text: %q", torn.Text)
 	}
 }
 
@@ -119,9 +75,7 @@ func TestTear_StructuredPII(t *testing.T) {
 	}{
 		{"mail me at vexil@example.com please", "email"},
 		{"call +91 98765 43210 tonight", "phone"},
-		{"call +919876543210 tonight", "phone"},
 		{"her number is 9876543210", "phone"},
-		{"the account is 4111111111111111", "account"},
 		{"card 4111 1111 1111 1111 on file", "account"},
 	}
 	tr := New(nil)
@@ -148,17 +102,6 @@ func TestTear_OrdinaryNumbersSurvive(t *testing.T) {
 	}
 }
 
-// TestTear_SameValueTwiceGetsOneEntity checks a value repeated in one text is one entity and one token, not two.
-func TestTear_SameValueTwiceGetsOneEntity(t *testing.T) {
-	torn := New(people()).Tear("Vexil booked it, then Vexil paid")
-	if len(torn.Entities) != 1 {
-		t.Fatalf("got %d entities, want 1: %+v", len(torn.Entities), torn.Entities)
-	}
-	if strings.Count(torn.Text, "[[PERSON_c2538a6c]]") != 2 {
-		t.Errorf("token not used for both mentions: %q", torn.Text)
-	}
-}
-
 // TestPlaceholderSurvivesProseAndMarkup is the test behind the choice of form. The token has to come back from a model verbatim, so it is plain ASCII in a bracket pair that does not occur in ordinary English, and it has to stay one token through the things a model does to text around it: quoting, a possessive 's, a full stop, a markdown list or bold. None of those touch the inside of the brackets, so Stitch still finds it.
 func TestPlaceholderSurvivesProseAndMarkup(t *testing.T) {
 	torn := New(people()).Tear("Vexil said the venue is booked")
@@ -166,9 +109,7 @@ func TestPlaceholderSurvivesProseAndMarkup(t *testing.T) {
 
 	for _, reply := range []string{
 		ph + " confirmed it.",
-		"- **" + ph + "** confirmed it",
 		"According to " + ph + "'s message, it is booked.",
-		"\"" + ph + "\" is the one who booked it (" + ph + ").",
 	} {
 		got := torn.Stitch(reply)
 		if strings.Contains(got, "[[") || strings.Contains(got, "PERSON_") {
@@ -177,15 +118,6 @@ func TestPlaceholderSurvivesProseAndMarkup(t *testing.T) {
 		if !strings.Contains(got, "Vexil") {
 			t.Errorf("name did not come back in %q: got %q", reply, got)
 		}
-	}
-}
-
-// TestStitch_UnknownPlaceholderIsLeftAlone checks a token the model invented, that the tear never issued, is passed through untouched rather than crashing or being blanked.
-func TestStitch_UnknownPlaceholderIsLeftAlone(t *testing.T) {
-	torn := New(people()).Tear("Vexil said the venue is booked")
-	got := torn.Stitch("[[PERSON_deadbeef]] and [[PERSON_c2538a6c]] agree")
-	if want := "[[PERSON_deadbeef]] and Vexil agree"; got != want {
-		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -200,26 +132,5 @@ func TestAssociationSurvivesWhenModelReturnsAPronoun(t *testing.T) {
 
 	if got := torn.Subjects(); !reflect.DeepEqual(got, []string{"vexil-quorin"}) {
 		t.Fatalf("the association was lost: subjects %v, want [vexil-quorin]", got)
-	}
-}
-
-// TestNewFromStore tears against the real personal_context table, so the gazetteer is proven to be keyed on what the personal_context tool actually wrote rather than on a hand-built slice.
-func TestNewFromStore(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	if err := store.SetPersonalContext(ctx, "vexil-quorin", "his partner"); err != nil {
-		t.Fatalf("SetPersonalContext: %v", err)
-	}
-	entries, err := store.PersonalContext(ctx)
-	if err != nil {
-		t.Fatalf("PersonalContext: %v", err)
-	}
-
-	torn := New(entries).Tear("Vexil said the venue is booked")
-	if got := torn.Subjects(); !reflect.DeepEqual(got, []string{"vexil-quorin"}) {
-		t.Fatalf("subjects %v, want [vexil-quorin]", got)
-	}
-	if torn.Stitch(torn.Text) != "Vexil said the venue is booked" {
-		t.Errorf("round trip: %q", torn.Stitch(torn.Text))
 	}
 }

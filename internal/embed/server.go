@@ -125,6 +125,7 @@ func (p *serverProcess) beginStart() (*startState, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("%s: start %s: %w", p.name, p.binary, err)
 	}
+	util.KillWithDaemon(cmd)
 
 	exited := make(chan struct{})
 	go func() {
@@ -220,14 +221,6 @@ func (p *serverProcess) pid() int {
 		return 0
 	}
 	return p.cmd.Process.Pid
-}
-
-func (p *serverProcess) killChildForTest() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.aliveLocked() {
-		p.cmd.Process.Kill()
-	}
 }
 
 func (p *serverProcess) Close() error {

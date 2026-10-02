@@ -5,14 +5,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
-	user32                         = syscall.NewLazyDLL("user32.dll")
-	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
-	dwmapi                         = syscall.NewLazyDLL("dwmapi.dll")
+	user32                         = windows.NewLazySystemDLL("user32.dll")
+	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")
+	dwmapi                         = windows.NewLazySystemDLL("dwmapi.dll")
 	procEnumWindows                = user32.NewProc("EnumWindows")
 	procIsWindowVisible            = user32.NewProc("IsWindowVisible")
 	procGetWindow                  = user32.NewProc("GetWindow")
@@ -21,7 +24,8 @@ var (
 	procGetForegroundWindow        = user32.NewProc("GetForegroundWindow")
 	procSetForegroundWindow        = user32.NewProc("SetForegroundWindow")
 	procBringWindowToTop           = user32.NewProc("BringWindowToTop")
-	procShowWindow                 = user32.NewProc("ShowWindow")
+	procShowWindowAsync            = user32.NewProc("ShowWindowAsync")
+	procIsHungAppWindow            = user32.NewProc("IsHungAppWindow")
 	procIsIconic                   = user32.NewProc("IsIconic")
 	procGetWindowRect              = user32.NewProc("GetWindowRect")
 	procAttachThreadInput          = user32.NewProc("AttachThreadInput")
@@ -56,17 +60,26 @@ type rect struct{ Left, Top, Right, Bottom int32 }
 
 // List enumerates the windows a person would see in Alt+Tab: visible, unowned, titled, and not cloaked (a cloaked window is a suspended UWP app or one on another virtual desktop). Input: a context, unused because EnumWindows does not block. Output: one Window per such window, with WmClass set to the owning program's file name without ".exe" and the frame in physical pixels.
 func (r *Raiser) List(ctx context.Context) ([]Window, error) {
-	fg, _, _ := procGetForegroundWindow.Call()
-	var out []Window
-	cb := syscall.NewCallback(func(hwnd, _ uintptr) uintptr {
-		if w, ok := describe(hwnd, fg); ok {
-			out = append(out, w)
+	listMu.Lock()
+	defer listMu.Unlock()
+	listFg, _, _ = procGetForegroundWindow.Call()
+	listOut = nil
+	procEnumWindows.Call(listCallback, 0)
+	return listOut, nil
+}
+
+// The EnumWindows callback is made once: Go never frees a callback made with syscall.NewCallback and the process dies after about two thousand of them. listMu guards the two variables it writes.
+var (
+	listMu       sync.Mutex
+	listFg       uintptr
+	listOut      []Window
+	listCallback = syscall.NewCallback(func(hwnd, _ uintptr) uintptr {
+		if w, ok := describe(hwnd, listFg); ok {
+			listOut = append(listOut, w)
 		}
 		return 1
 	})
-	procEnumWindows.Call(cb, 0)
-	return out, nil
-}
+)
 
 // describe reads one top-level window. Input: the window handle and the current foreground handle. Output: the Window, and false when it is not one a person would switch to.
 func describe(hwnd, fg uintptr) (Window, bool) {
@@ -144,12 +157,16 @@ func (r *Raiser) activateFirst(ctx context.Context, match func(Window) bool) (bo
 func activate(hwnd uintptr) bool {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	// Async, and no attach to a hung foreground thread: both calls otherwise wait on the other program's message loop, which never answers when it is hung.
 	if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
-		procShowWindow.Call(hwnd, swRestore)
+		procShowWindowAsync.Call(hwnd, swRestore)
 	}
 	fg, _, _ := procGetForegroundWindow.Call()
 	self, _, _ := procGetCurrentThreadId.Call()
 	other, _, _ := procGetWindowThreadProcessId.Call(fg, 0)
+	if hung, _, _ := procIsHungAppWindow.Call(fg); hung != 0 {
+		other = 0
+	}
 	if other != 0 && other != self {
 		procAttachThreadInput.Call(self, other, 1)
 		defer procAttachThreadInput.Call(self, other, 0)

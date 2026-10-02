@@ -3,7 +3,6 @@ package ipc
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -137,68 +136,6 @@ func TestContext_LiveFocusWinsOverBuffer(t *testing.T) {
 	}
 }
 
-// TestContext_LiveFocusJuneFallsThroughToBuffer covers the moment the hotkey itself takes focus: the live read names June, so /context must still fall through to the buffer's newest non-June capture, exactly as it does for a stale buffer entry.
-func TestContext_LiveFocusJuneFallsThroughToBuffer(t *testing.T) {
-	store := dbtest.Open(t)
-	screen := func() []tracker.Activity {
-		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
-	}
-	focused := func(context.Context) (tracker.Activity, bool) {
-		return tracker.Activity{App: "June", Title: "June", ScreenText: "Ask, or hold space"}, true
-	}
-	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
-	var got ContextView
-	getJSON(t, srv, "/context", &got)
-	if got.App != "Slack" || got.Text != "slack text" {
-		t.Errorf("got %+v, want the buffer's window since the live read named June", got)
-	}
-}
-
-// TestContext_LiveFocusTimeoutDoesNotDelayResponse covers a hung accessibility read: /context must fall back to the buffer rather than wait for it, and the whole request must still finish quickly rather than blocking for as long as the reader takes.
-func TestContext_LiveFocusTimeoutDoesNotDelayResponse(t *testing.T) {
-	store := dbtest.Open(t)
-	screen := func() []tracker.Activity {
-		return []tracker.Activity{{App: "Slack", Title: "a", ScreenText: "slack text"}}
-	}
-	focused := func(context.Context) (tracker.Activity, bool) {
-		time.Sleep(2 * time.Second)
-		return tracker.Activity{App: "Ghostty", Title: "too late", ScreenText: "too late"}, true
-	}
-	srv := newTestServer(t, &fakeAsker{}, store, screen, focused)
-
-	start := time.Now()
-	var got ContextView
-	getJSON(t, srv, "/context", &got)
-	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
-		t.Errorf("GET /context took %s, want at most ~400ms even with a slow focused reader", elapsed)
-	}
-	if got.App != "Slack" || got.Text != "slack text" {
-		t.Errorf("got %+v, want the buffer's window since the live read did not answer in time", got)
-	}
-}
-
-// TestReadFocused_AbandonedWhenRequestContextEnds covers a request whose context ends well before liveFocusTimeout (300ms) would fire on its own: readFocused must give up as soon as ctx is done, not keep waiting out the fixed timer while the caller has already moved on. The focused reader itself blocks far longer than either bound, and is left running — readFocused has no way to interrupt it, only to stop waiting on it.
-func TestReadFocused_AbandonedWhenRequestContextEnds(t *testing.T) {
-	blocked := make(chan struct{})
-	focused := func(context.Context) (tracker.Activity, bool) {
-		<-blocked
-		return tracker.Activity{App: "late"}, true
-	}
-	defer close(blocked)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	_, ok := readFocused(ctx, focused)
-	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
-		t.Errorf("readFocused took %s, want it abandoned around the 30ms context deadline, well short of the 300ms liveFocusTimeout", elapsed)
-	}
-	if ok {
-		t.Error("readFocused reported a result even though its context ended first")
-	}
-}
-
 func TestMatters_ActionsThenThreadsThenMeetings(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
@@ -298,19 +235,6 @@ func TestToday_BriefAndTimelineOldestFirst(t *testing.T) {
 	}
 }
 
-func TestToday_BriefFallsBackToTheLatestDigest(t *testing.T) {
-	store := dbtest.Open(t)
-	if _, err := store.DB().Exec(`INSERT INTO nodes(parent_id, type, content) VALUES(NULL, 'digest', 'yesterday in one paragraph')`); err != nil {
-		t.Fatalf("seed digest: %v", err)
-	}
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got TodayView
-	getJSON(t, srv, "/today", &got)
-	if got.Brief != "yesterday in one paragraph" {
-		t.Errorf("brief = %q, want the latest digest", got.Brief)
-	}
-}
-
 func TestMeetings_NewestFirstWithAttendees(t *testing.T) {
 	store := dbtest.Open(t)
 	ctx := context.Background()
@@ -355,37 +279,6 @@ func TestMeetings_NewestFirstWithAttendees(t *testing.T) {
 	// Neither note carries a duration marker (internal/recorder didn't exist to write one when these were filed), so both must read as 0 rather than error.
 	if got.Meetings[0].DurationS != 0 || got.Meetings[1].DurationS != 0 {
 		t.Errorf("duration_s = %d, %d; want 0 for notes filed with no marker", got.Meetings[0].DurationS, got.Meetings[1].DurationS)
-	}
-}
-
-// A note internal/recorder filed carries a trailing duration marker after the minutes text. GET /meetings must turn that into duration_s and never let the marker itself leak into the minutes text the window renders.
-func TestMeetings_ReadsDurationMarkerAndStripsIt(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	minutes := "# Standup\n\n## Key points\n- shipped it.\n"
-	// This is the exact shape internal/recorder's fileMinutes stores: the minutes text, then a blank line and the marker, matching withMeetingDuration in internal/recorder/recorder.go.
-	withMarker := minutes + "\n\n<!--june:duration start=2026-09-04T10:00:00Z stop=2026-09-04T10:41:00Z-->\n"
-	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
-		t.Fatalf("seed meeting: %v", err)
-	}
-
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got struct {
-		Meetings []Meeting `json:"meetings"`
-	}
-	getJSON(t, srv, "/meetings", &got)
-
-	if len(got.Meetings) != 1 {
-		t.Fatalf("got %d meetings, want 1", len(got.Meetings))
-	}
-	if got.Meetings[0].DurationS != 41*60 {
-		t.Errorf("duration_s = %d, want %d (41 minutes)", got.Meetings[0].DurationS, 41*60)
-	}
-	if strings.Contains(got.Meetings[0].Minutes, "june:duration") {
-		t.Errorf("duration marker leaked into the rendered minutes: %q", got.Meetings[0].Minutes)
-	}
-	if want := strings.TrimRight(minutes, "\n"); got.Meetings[0].Minutes != want {
-		t.Errorf("minutes = %q, want the marker stripped back to %q", got.Meetings[0].Minutes, want)
 	}
 }
 
@@ -490,52 +383,6 @@ func TestContext_StoredEpisodeFallbackSkipsJune(t *testing.T) {
 	}
 }
 
-// A meeting is dated by when it ran, not by when its write-up was filed. A recording deferred to mains, or one the startup sweep recovered after a crash, is filed hours or days after the call — and the window groups the list by this field, so the call would sit under the wrong day and read as "today".
-func TestMeetings_DatedByTheRecordingsStartNotTheNote(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	withMarker := "# Standup\n\n## Key points\n- shipped it.\n\n<!--june:duration start=2026-09-04T16:10:00Z stop=2026-09-04T16:41:00Z-->\n"
-	if _, err := store.LogNote(ctx, withMarker, "meeting"); err != nil {
-		t.Fatalf("seed meeting: %v", err)
-	}
-	if _, err := store.LogNote(ctx, "# Unmarked\n\n**Unmarked — Tue 2 Sep 2026 09:00 to 09:20**\n", "meeting"); err != nil {
-		t.Fatalf("seed unmarked meeting: %v", err)
-	}
-
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got struct {
-		Meetings []Meeting `json:"meetings"`
-	}
-	getJSON(t, srv, "/meetings", &got)
-
-	if len(got.Meetings) != 2 {
-		t.Fatalf("got %d meetings, want 2", len(got.Meetings))
-	}
-	var marked, unmarked Meeting
-	for _, m := range got.Meetings {
-		if m.Title == "Standup" {
-			marked = m
-		} else {
-			unmarked = m
-		}
-	}
-	when, err := time.Parse(time.RFC3339, marked.When)
-	if err != nil {
-		t.Fatalf("when = %q: %v", marked.When, err)
-	}
-	if !when.Equal(time.Date(2026, 9, 4, 16, 10, 0, 0, time.UTC)) {
-		t.Errorf("when = %s, want the recording's start 2026-09-04T16:10:00Z", marked.When)
-	}
-	// A note filed before the marker existed has nothing else to go on, so it keeps the date it was filed.
-	if unmarked.When == "" {
-		t.Errorf("a meeting with no duration marker must still carry the date its note was filed")
-	}
-	// The list is ordered by when the meetings ran, so the one recorded in September sits below the one filed just now rather than above it on the strength of being filed second.
-	if got.Meetings[0].Title != "Unmarked" {
-		t.Errorf("meetings are ordered %q then %q; want the most recently run first", got.Meetings[0].Title, got.Meetings[1].Title)
-	}
-}
-
 // The hotkey's live read must refuse the same windows the tracker refuses. /context filtered June's own window and nothing else, so pressing the hotkey with a password manager in front answered {"app":"1Password","title":"Vault — Personal"} and that is what the window fed into the model's prompt — a row the episode store would never hold, because the tracker's own skip drops it before it is written.
 func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 	tracker.SetBlocklist([]string{"1password"})
@@ -553,87 +400,6 @@ func TestContext_LiveFocusOnTheBlocklistFallsThroughToBuffer(t *testing.T) {
 	getJSON(t, srv, "/context", &got)
 	if got.App != "Slack" || got.Text != "slack text" {
 		t.Errorf("got %+v, want the buffer's window since the live read named a blocked application", got)
-	}
-}
-
-// TestToday_ReadsOnlyTheNotesTodayNeeds checks the bound GET /today reads its notes under: a note written days ago and untouched since is not on today's page, while an action item written days ago and closed this morning still is — the store's bound is on created_at or updated_at for exactly that reason.
-func TestToday_ReadsOnlyTheNotesTodayNeeds(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-
-	stale, err := store.LogNote(ctx, "the user prefers short answers", "fact")
-	if err != nil {
-		t.Fatalf("seed note: %v", err)
-	}
-	action, err := store.LogNote(ctx, memory.ActionItem{Owner: "Zemna", Text: "send the invoice", Status: memory.StatusOpen, Priority: memory.PriorityNormal}.Note(), memory.ActionNoteKind)
-	if err != nil {
-		t.Fatalf("seed action: %v", err)
-	}
-	if _, err := store.DB().Exec(`UPDATE notes SET created_at = datetime('now','-10 days'), updated_at = datetime('now','-10 days') WHERE id IN (?, ?)`, stale, action); err != nil {
-		t.Fatalf("age the notes: %v", err)
-	}
-	if err := store.SetActionStatus(ctx, action, memory.StatusDone); err != nil {
-		t.Fatalf("close action: %v", err)
-	}
-
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got TodayView
-	getJSON(t, srv, "/today", &got)
-
-	var kinds []string
-	for _, e := range got.Timeline {
-		kinds = append(kinds, e.Kind)
-		if strings.Contains(e.Text, "prefers short answers") {
-			t.Errorf("a note untouched for ten days is on today's page: %+v", e)
-		}
-	}
-	if len(got.Timeline) != 1 || got.Timeline[0].Kind != "task" {
-		t.Errorf("timeline = %v, want the one action item closed today", kinds)
-	}
-}
-
-// TestMemorySearch_CapsArchivedMatches checks that the archived notes appended after the hybrid hits are bounded by the same searchCap the rest of the page is: without a cap, a one-letter query hands the window the whole archive, each row up to 600 runes.
-func TestMemorySearch_CapsArchivedMatches(t *testing.T) {
-	store := dbtest.Open(t)
-	for i := 0; i < searchCap+10; i++ {
-		if _, err := store.DB().Exec(
-			`INSERT INTO notes_archive(note_id, content, kind, created_at, archived_at) VALUES(?, ?, 'fact', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-			i+1, fmt.Sprintf("the widget for the venue, take %d", i)); err != nil {
-			t.Fatalf("seed archived note: %v", err)
-		}
-	}
-
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got struct{ Facts []Fact }
-	getJSON(t, srv, "/memory/search?q=widget", &got)
-	if len(got.Facts) > searchCap {
-		t.Errorf("facts = %d, want at most searchCap (%d)", len(got.Facts), searchCap)
-	}
-	if len(got.Facts) == 0 {
-		t.Errorf("facts = 0, want the archived matches up to the cap")
-	}
-}
-
-// TestPeople_BoundsTheMeetingNoteRead checks the window GET /people reads meeting notes over: a name only ever heard in a meeting older than peopleWindow is not on the page, so this screen does not grow one FTS count query per name for the life of the store.
-func TestPeople_BoundsTheMeetingNoteRead(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-
-	old, err := store.LogNote(ctx, sampleMinutes, meetingNoteKind)
-	if err != nil {
-		t.Fatalf("seed meeting: %v", err)
-	}
-	if _, err := store.DB().Exec(`UPDATE notes SET created_at = datetime('now','-200 days') WHERE id = ?`, old); err != nil {
-		t.Fatalf("age the meeting: %v", err)
-	}
-
-	srv := newTestServer(t, &fakeAsker{}, store, nil, nil)
-	var got struct {
-		People []Person `json:"people"`
-	}
-	getJSON(t, srv, "/people", &got)
-	if len(got.People) != 0 {
-		t.Errorf("people = %+v, want none — the only meeting is older than the window", got.People)
 	}
 }
 

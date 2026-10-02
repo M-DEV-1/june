@@ -39,11 +39,8 @@ const (
 	smCYVirtualScreen = 79
 )
 
-// BitBlt raster operation: copy the source, and include layered (translucent or click-through) windows, which a plain SRCCOPY leaves out.
-const (
-	srcCopy    = 0x00CC0020
-	captureBlt = 0x40000000
-)
+// srcCopy is BitBlt's plain copy raster operation. CAPTUREBLT is left off because it makes the cursor flicker on every grab, and under DWM on Windows 8 and later a plain copy already includes layered windows.
+const srcCopy = 0x00CC0020
 
 // bitmapInfo is Win32's BITMAPINFO for a 32-bit uncompressed bitmap: the BITMAPINFOHEADER plus the one RGBQUAD the struct declares, unused at this depth.
 type bitmapInfo struct {
@@ -101,7 +98,7 @@ func grabVirtual() (*image.RGBA, image.Point, error) {
 	defer procDeleteObject.Call(bmp) //nolint:errcheck
 
 	old, _, _ := procSelectObject.Call(mem, bmp)
-	ok, _, _ := procBitBlt.Call(mem, 0, 0, uintptr(w), uintptr(h), screen, uintptr(desk.Min.X), uintptr(desk.Min.Y), srcCopy|captureBlt)
+	ok, _, _ := procBitBlt.Call(mem, 0, 0, uintptr(w), uintptr(h), screen, uintptr(desk.Min.X), uintptr(desk.Min.Y), srcCopy)
 	// GetDIBits must not be called on a bitmap that is still selected into a DC, so it is put back before the read whether or not the copy worked.
 	procSelectObject.Call(mem, old) //nolint:errcheck
 	if ok == 0 {

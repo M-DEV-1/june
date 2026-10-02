@@ -8,10 +8,13 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
-	user32               = syscall.NewLazyDLL("user32.dll")
+	// NewLazySystemDLL loads from System32 only, so a user32.dll planted beside june.exe is never picked up.
+	user32               = windows.NewLazySystemDLL("user32.dll")
 	procSendInput        = user32.NewProc("SendInput")
 	procSetCursorPos     = user32.NewProc("SetCursorPos")
 	procMapVirtualKeyW   = user32.NewProc("MapVirtualKeyW")
@@ -165,7 +168,7 @@ func (s *Session) RightClickAt(x, y float64) error {
 	return s.click(x, y, mouseeventfRightDown, mouseeventfRightUp)
 }
 
-// click moves the pointer and presses and releases one button there. SendInput's left and right are the physical buttons, which Windows swaps for a user who set the mouse left-handed, so they are swapped back here. Input: the point and the button's down and up flags. Output: the first error from the move or either half of the press.
+// click moves the pointer and presses and releases one button there. SendInput's left and right are the physical buttons, which Windows swaps for a user who set the mouse left-handed, so they are swapped back here. A refused release is sent once more, because a button left held drags whatever the pointer touches next. Input: the point and the button's down and up flags. Output: the first error from the move or either half of the press.
 func (s *Session) click(x, y float64, down, up uint32) error {
 	if swapped, _, _ := procGetSystemMetrics.Call(smSwapButton); swapped != 0 {
 		down ^= mouseeventfLeftDown | mouseeventfRightDown
@@ -179,7 +182,11 @@ func (s *Session) click(x, y float64, down, up uint32) error {
 	if err := sendPointer(down, 0); err != nil {
 		return err
 	}
-	return sendPointer(up, 0)
+	if err := sendPointer(up, 0); err != nil {
+		sendPointer(up, 0) // one more try, so the button is not left held
+		return err
+	}
+	return nil
 }
 
 // ScrollAt moves the pointer to (x, y), in physical virtual-desktop pixels, and turns the wheel dy notches (positive is down, as on Linux; Windows counts toward the user as negative).

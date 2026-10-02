@@ -108,6 +108,7 @@ func serveFakeExtension(t *testing.T, addr string, ext *fakeExtension) {
 	}
 }
 
+// Each Raiser method reaches the june@june.local extension under the method name and argument the extension exports, and reports the extension's own answer.
 func TestRaiser_CallsTheRightMethodWithTheRightArgument(t *testing.T) {
 	addr := startPrivateBus(t)
 	ext := &fakeExtension{want: "1234"}
@@ -131,11 +132,17 @@ func TestRaiser_CallsTheRightMethodWithTheRightArgument(t *testing.T) {
 	if ok, err := r.ByPid(ctx, 9999); err != nil || ok {
 		t.Fatalf("ByPid(9999): ok=%v err=%v, want false", ok, err)
 	}
+	if ok, err := r.ByTitle(ctx, "1234"); err != nil || !ok {
+		t.Fatalf("ByTitle: ok=%v err=%v, want true", ok, err)
+	}
+	if ok, err := r.ByWmClass(ctx, "1234"); err != nil || !ok {
+		t.Fatalf("ByWmClass: ok=%v err=%v, want true", ok, err)
+	}
 
 	ext.mu.Lock()
 	calls := append([]string(nil), ext.calls...)
 	ext.mu.Unlock()
-	want := []string{"List()", "ActivateByPid(1234)", "ActivateByPid(9999)"}
+	want := []string{"List()", "ActivateByPid(1234)", "ActivateByPid(9999)", "ActivateByTitle(1234)", "ActivateByWmClass(1234)"}
 	if len(calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", calls, want)
 	}
@@ -143,29 +150,6 @@ func TestRaiser_CallsTheRightMethodWithTheRightArgument(t *testing.T) {
 		if calls[i] != want[i] {
 			t.Errorf("call %d = %q, want %q", i, calls[i], want[i])
 		}
-	}
-}
-
-func TestRaiser_ByTitleAndByWmClass(t *testing.T) {
-	addr := startPrivateBus(t)
-	ext := &fakeExtension{want: "Brave"}
-	serveFakeExtension(t, addr, ext)
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", addr)
-	r, err := New()
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if ok, err := r.ByTitle(ctx, "Brave"); err != nil || !ok {
-		t.Fatalf("ByTitle: ok=%v err=%v, want true", ok, err)
-	}
-	if ok, err := r.ByWmClass(ctx, "Brave"); err != nil || !ok {
-		t.Fatalf("ByWmClass: ok=%v err=%v, want true", ok, err)
-	}
-	if ok, err := r.ByTitle(ctx, "Slack"); err != nil || ok {
-		t.Fatalf("ByTitle(Slack): ok=%v err=%v, want false", ok, err)
 	}
 }
 

@@ -168,7 +168,7 @@ func monitorCount(ctx context.Context, conn *dbus.Conn) int {
 	return len(monitors)
 }
 
-// localPieceChecks reports every piece June runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, and what recording and call detection need from the desktop (see audioChecks). Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
+// localPieceChecks reports every piece June runs locally and a clean machine may not have: whisper-cli and its model, the Silero voice-activity model, the sherpa-onnx diarizer and its models, the embedding llama-server and its GGUF, and what recording and call detection need from the desktop (see platformChecks). Nothing downloads any of them. Each line names the exact path it was looked for at and the feature that is off without it.
 // Input: the data directory, $XDG_RUNTIME_DIR, and the embed block of the config. Output: one check per piece, in that order.
 func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []doctorCheck {
 	var out []doctorCheck
@@ -188,7 +188,7 @@ func localPieceChecks(dataDir, runtimeDir string, embed config.EmbedConfig) []do
 		out = append(out, doctorCheck{Name: "speaker diarization", Detail: "diarizer at " + bin, OK: true})
 	}
 	out = append(out, embedCheck(embed))
-	out = append(out, audioChecks(runtimeDir)...)
+	out = append(out, platformChecks(runtimeDir)...)
 	return out
 }
 

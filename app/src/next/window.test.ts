@@ -5,15 +5,12 @@ import { describe, expect, it } from "vitest";
 import { parseGeometry } from "./window";
 
 describe("reading a stored window geometry", () => {
-  it("refuses nothing, rubbish, and a shape with a field missing", () => {
+  it("refuses nothing, rubbish, a shape with a field missing, and a window too small to be worth putting back, which is what a minimised one stores", () => {
     expect(parseGeometry(null)).toBeUndefined();
     expect(parseGeometry("")).toBeUndefined();
     expect(parseGeometry("not json")).toBeUndefined();
     expect(parseGeometry(JSON.stringify({ x: 0, y: 0, width: 900 }))).toBeUndefined();
     expect(parseGeometry(JSON.stringify({ x: "0", y: 0, width: 900, height: 700 }))).toBeUndefined();
-  });
-
-  it("refuses a window too small to be worth putting back, which is what a minimised one stores", () => {
     expect(parseGeometry(JSON.stringify({ x: 0, y: 0, width: 100, height: 700 }))).toBeUndefined();
     expect(parseGeometry(JSON.stringify({ x: 0, y: 0, width: 900, height: 40 }))).toBeUndefined();
   });

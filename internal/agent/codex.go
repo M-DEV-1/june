@@ -293,7 +293,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 		slog.Warn("askCodex: personal context fetch failed, continuing without it on screen rounds", "error", err)
 	}
 
-	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancelRecall()
 	if err != nil {

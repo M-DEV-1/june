@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +37,24 @@ func pickDesktopEntry(entries map[string]string, app string) string {
 		}
 	}
 	return partial
+}
+
+// appsFolder is the shell namespace every Start-menu application, desktop or Store, can be started from by its AppID: explorer.exe opens shell:AppsFolder\<AppID> the way a click on its Start tile does.
+const appsFolder = `shell:AppsFolder\`
+
+// startAppEntries reads what Windows' Get-StartApps printed as JSON, an array of {Name, AppID} for every Start-menu application including Store apps, into entries keyed by the shell:AppsFolder path each one starts from. Input: PowerShell's stdout, which may open with a UTF-8 byte order mark. Output: entry to the localized display name, or nil when the output does not parse.
+func startAppEntries(out []byte) map[string]string {
+	var apps []struct{ Name, AppID string }
+	if json.Unmarshal(bytes.TrimPrefix(out, []byte("\xef\xbb\xbf")), &apps) != nil {
+		return nil
+	}
+	entries := make(map[string]string, len(apps))
+	for _, app := range apps {
+		if app.Name != "" && app.AppID != "" {
+			entries[appsFolder+app.AppID] = app.Name
+		}
+	}
+	return entries
 }
 
 // shortcutEntries lists the Start-menu shortcuts under the given roots, path to display name, the Windows counterpart of readDesktopEntries. Input: the Start-menu Programs directories; one that does not exist is skipped. Output: every .lnk file found at any depth, named by its file name without the extension.

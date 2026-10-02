@@ -29,7 +29,7 @@ func NewMic() (Microphone, error) {
 	return &winMic{}, nil
 }
 
-// StartCapture opens the default capture device and returns a channel of 24 kHz mono s16le chunks of about 20 ms. The channel closes once ctx is cancelled or Close is called. A chunk the consumer is not ready for is dropped rather than blocking the capture thread.
+// StartCapture opens the default capture device and returns a channel of 24 kHz mono s16le chunks of about 20 ms. The channel closes once ctx is cancelled, Close is called, or the device is lost and no default device comes back. A chunk the consumer is not ready for is dropped rather than blocking the capture thread.
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.mu.Lock()
 	if m.isCapturing {
@@ -60,7 +60,12 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.cancel = cancel
 	m.mu.Unlock()
 	go func() {
-		<-captureCtx.Done()
+		// A stream that ended on its own (its device went and none came back) closes micChan too, so the consumer sees the microphone end instead of waiting on a channel that never sends again.
+		select {
+		case <-captureCtx.Done():
+		case <-stream.done:
+			cancel()
+		}
 		// Close waits for the capture thread, so nothing sends on micChan after it is closed.
 		stream.Close()
 		close(micChan)

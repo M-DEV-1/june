@@ -16,8 +16,11 @@ import (
 // HeaderName is the HTTP header IPC clients must set to the token value.
 const HeaderName = "X-June-Token"
 
-// DefaultPath is where the daemon writes the token and where every IPC client (the june command, the tray, the desktop window) reads it from — inside config.DataDir(), so it resolves to the same file regardless of the process's working directory (the daemon and a terminal-launched june command otherwise disagree on cwd and silently open different token files).
-var DefaultPath = filepath.Join(config.DataDir(), "ipc-token")
+// DefaultPath is where the daemon writes the token and where every IPC client (the june command, the tray, the desktop window) reads it from: inside config.DataDir(), so it resolves to the same file regardless of the process's working directory.
+// It is worked out on each call rather than at package init, because JUNE_DATA_DIR may come from a .env file that is only loaded after init, and a path fixed earlier would put the daemon's token in one place and the window's read in another.
+func DefaultPath() string {
+	return filepath.Join(config.DataDir(), "ipc-token")
+}
 
 // tokenBytes is the random token length in bytes (32 → 64 hex chars) — comfortably beyond brute-force range for a same-machine, process-lifetime secret.
 const tokenBytes = 32

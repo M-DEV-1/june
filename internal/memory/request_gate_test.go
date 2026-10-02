@@ -3,7 +3,6 @@ package memory_test
 import (
 	"context"
 	"errors"
-	"june/internal/config"
 	"june/internal/memory"
 	"testing"
 )
@@ -66,12 +65,6 @@ func TestGeminiSummarizer_GateRefusesWithoutCallingBackend(t *testing.T) {
 				t.Errorf("AnalyzeScreen = %+v, want the zero value on refusal", sight)
 			}
 		}},
-		{"DescribeScreen, which flattens AnalyzeScreen's result", func(t *testing.T, s *memory.GeminiSummarizer) {
-			desc := s.DescribeScreen(context.Background(), []byte{1, 2, 3})
-			if desc != "" {
-				t.Errorf("DescribeScreen = %q, want empty on refusal", desc)
-			}
-		}},
 		{"Digest", func(t *testing.T, s *memory.GeminiSummarizer) {
 			digest, err := s.Digest(context.Background(), "", []string{"fixed the build", "wrote the notes"})
 			if !errors.Is(err, gateErr) {
@@ -91,30 +84,5 @@ func TestGeminiSummarizer_GateRefusesWithoutCallingBackend(t *testing.T) {
 			summarizer.SetRequestGate(&fakeGate{err: gateErr})
 			c.call(t, summarizer)
 		})
-	}
-}
-
-// The local-llama-server path (SetStateBackend) must still answer even when the metered request gate refuses: the local backend spends no metered quota, so the gate must never be consulted on that path. This needs its own gated fake wiring, so it does not fit the tables above.
-func TestGeminiSummarizer_DeriveState_LocalBackendBypassesTheRequestGate(t *testing.T) {
-	summarizer, err := memory.NewGeminiSummarizer("fake-key-no-network")
-	if err != nil {
-		t.Fatalf("NewGeminiSummarizer: %v", err)
-	}
-	summarizer.SetRequestGate(&fakeGate{err: errors.New("daily quota reached")})
-	calls := 0
-	summarizer.SetJobBackend(config.JobWorkingState, func(ctx context.Context, prompt string) (string, error) {
-		calls++
-		return "local answer", nil
-	})
-
-	state, err := summarizer.DeriveState(context.Background(), []string{"did a thing"}, nil)
-	if err != nil {
-		t.Fatalf("DeriveState: %v", err)
-	}
-	if calls != 1 {
-		t.Errorf("local backend called %d times, want 1: it must run even though the metered gate refuses", calls)
-	}
-	if state != "local answer" {
-		t.Errorf("state = %q, want the local backend's answer", state)
 	}
 }

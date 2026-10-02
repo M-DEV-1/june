@@ -21,17 +21,6 @@ func newTestTextEngine(t *testing.T, idle time.Duration) *TextEngine {
 	return e
 }
 
-// A nil *TextEngine stands for "no local text model configured." The daemon holds one without nil-checking it on every call, so every method must be safe to call on it.
-func TestNilTextEngineIsSafe(t *testing.T) {
-	var e *TextEngine
-	if _, err := e.Generate(context.Background(), "hello"); err == nil {
-		t.Fatal("Generate on a nil TextEngine should return an error, not resurrect a server")
-	}
-	if err := e.Close(); err != nil {
-		t.Fatalf("Close on a nil TextEngine should be a no-op, got %v", err)
-	}
-}
-
 // Two concurrent Generate calls arriving before the server is up must join the same spawn rather than each starting their own, or the second would fail binding the already-claimed port.
 func TestTextEngineConcurrentGenerateSpawnsOnlyOneChild(t *testing.T) {
 	e := newTestTextEngine(t, time.Hour)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -101,8 +102,23 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 		return fmt.Errorf("bind daemon port %s: %w", DaemonPort, err)
 	}
 
+	setCrashLog()
 	runDaemonSupervisor(ctx, listener)
 	return nil
+}
+
+// setCrashLog has the runtime write a fatal panic to crash.log in the data directory as well as to stderr. junew.exe is built without a console and has no stderr at all, so without this a crash leaves no trace anywhere.
+func setCrashLog() {
+	path := filepath.Join(config.DataDir(), "crash.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		slog.Warn("could not open the crash log; a fatal panic will reach stderr only", "path", path, "error", err)
+		return
+	}
+	defer f.Close() // SetCrashOutput keeps its own duplicate of the file.
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+		slog.Warn("could not set the crash log; a fatal panic will reach stderr only", "path", path, "error", err)
+	}
 }
 
 // startDaemonServices wires up all background services and the IPC HTTP server.
@@ -437,7 +453,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		ipctoken.Attach(req, ipctoken.DefaultPath)
+		ipctoken.Attach(req, ipctoken.DefaultPath())
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return err
@@ -530,7 +546,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	go drainEpisodes(ctx, eventChan, store.WriteEpisode, ingestEpisode)
 
 	// IPC token: every handler below except /ping requires it (see requireIPCToken) — without this, any local process (or, since browsers can reach 127.0.0.1, any webpage) could read the store, ask questions as the user, or toggle tracking. Regenerated on every startup so a leftover/stale process's copy stops working.
-	ipcToken, err := ipctoken.Generate(ipctoken.DefaultPath)
+	ipcToken, err := ipctoken.Generate(ipctoken.DefaultPath())
 	if err != nil {
 		slog.Error("failed to generate IPC auth token, daemon IPC will be unreachable", "error", err)
 	}

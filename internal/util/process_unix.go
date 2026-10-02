@@ -24,3 +24,6 @@ func Detach(cmd *exec.Cmd) {
 
 // HideConsole does nothing outside Windows, where a started program never opens a console window of its own.
 func HideConsole(cmd *exec.Cmd) {}
+
+// KillWithDaemon does nothing outside Windows: on Linux ChildProcAttr's parent-death signal already stops the child when the daemon dies.
+func KillWithDaemon(cmd *exec.Cmd) {}

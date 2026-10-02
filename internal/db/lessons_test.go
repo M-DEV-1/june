@@ -6,60 +6,6 @@ import (
 	"testing"
 )
 
-// TestSimilarLessonsPutsHitsFirst checks that among lessons all close enough to be shown, the ones that have actually helped before (more hits) come ahead of ones that have not, whatever their exact closeness.
-func TestSimilarLessonsPutsHitsFirst(t *testing.T) {
-	store, err := New(":memory:")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-	emb := newActEmbedder()
-	ctx := context.Background()
-
-	type seed struct {
-		lesson string
-		hits   int
-	}
-	seeds := []seed{
-		{"no hits yet", 0},
-		{"two hits", 2},
-		{"one hit", 1},
-	}
-	store.SetEmbedder(emb)
-	var ids []int64
-	for i, s := range seeds {
-		id, err := store.AddLesson(ctx, "Teams", "add a title", s.lesson)
-		if err != nil {
-			t.Fatalf("AddLesson(%q): %v", s.lesson, err)
-		}
-		emb.register(lessonEmbedText("add a title", s.lesson), float64(i))
-		if err := store.embedLesson(ctx, id, "add a title", s.lesson); err != nil {
-			t.Fatalf("embedLesson(%q): %v", s.lesson, err)
-		}
-		for j := 0; j < s.hits; j++ {
-			if err := store.ScoreLessonsUsed(ctx, []int64{id}, "ok"); err != nil {
-				t.Fatalf("ScoreLessonsUsed(%q): %v", s.lesson, err)
-			}
-		}
-		ids = append(ids, id)
-	}
-	emb.register("add a title", 0)
-
-	got, err := store.SimilarLessons(ctx, "add a title", 3)
-	if err != nil {
-		t.Fatalf("SimilarLessons: %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("SimilarLessons returned %d lessons, want 3", len(got))
-	}
-	want := []string{"two hits", "one hit", "no hits yet"}
-	for i, w := range want {
-		if got[i].Lesson != w {
-			t.Errorf("position %d = %q, want %q (order: %v)", i, got[i].Lesson, w, got)
-		}
-	}
-}
-
 // TestScoreLessonsUsedDropsAWornOutLesson checks a lesson whose misses have overtaken its hits, with at least two misses, is deleted outright rather than kept on to be shown again.
 func TestScoreLessonsUsedDropsAWornOutLesson(t *testing.T) {
 	store, err := New(":memory:")

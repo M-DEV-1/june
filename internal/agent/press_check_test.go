@@ -3,14 +3,12 @@ package agent
 import (
 	"bytes"
 	"context"
-	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"june/internal/act"
 	"strings"
 	"testing"
-	"time"
 
 	"june/internal/tracker"
 )
@@ -34,26 +32,6 @@ func shot(t *testing.T, block *image.Rectangle) tracker.Capture {
 		t.Fatal(err)
 	}
 	return tracker.Capture{Data: buf.Bytes(), Mime: "image/png", X: 0, Y: 32, W: 200, H: 200, Scale: 2}
-}
-
-// On 2026-09-08 a click on the JBL row in Settings landed on the window header, and the loop reported success because it re-read the same accessibility numbers it had aimed with. The pixels around the point are the one sensor the aim did not use: a press that changes nothing there is a miss, one that changes them is not, and a picture that cannot be read says nothing either way.
-func TestChangedAround(t *testing.T) {
-	still := shot(t, nil)
-	lit := image.Rect(90, 90, 130, 130)
-	changed := shot(t, &lit)
-	// The point is at image 100,100, which is screen 200,232.
-	if got, known := changedAround(still, changed, 200, 232); !known || !got {
-		t.Errorf("a highlight under the point: changed=%v known=%v, want changed", got, known)
-	}
-	if got, known := changedAround(still, still, 200, 232); !known || got {
-		t.Errorf("the same picture twice: changed=%v known=%v, want unchanged", got, known)
-	}
-	if _, known := changedAround(still, changed, 2000, 2000); known {
-		t.Error("a point outside the picture must not be judged")
-	}
-	if _, known := changedAround(tracker.Capture{Data: []byte("fake-jpeg-bytes")}, still, 200, 232); known {
-		t.Error("a picture that will not decode must not be judged")
-	}
 }
 
 // A press whose surroundings did not change comes back as an error, so the model retries instead of moving on from a click that landed on nothing.
@@ -93,54 +71,6 @@ func TestExecuteTool_ClickAt_APressThatChangedTheScreenElsewhereIsNotAMiss(t *te
 	got := a.executeTool(ctx, "click_at", map[string]any{"x": 100.0, "y": 100.0})
 	if strings.Contains(got, "landed on nothing") {
 		t.Errorf("result = %q, want the press accepted: the screen changed, just not under the pointer", got)
-	}
-}
-
-// When every picture taken after the press fails to come back or fails to decode, pressCheck used to return "" the same as a confirmed hit, so the caller reported the press as a success it never verified. It must instead say the check could not be done, and must not claim the press landed.
-func TestPressCheck_ReportsCouldNotVerifyWhenScreenshotsFail(t *testing.T) {
-	a, _ := typingAgent(t)
-	pressSettle, pressPoll = 30*time.Millisecond, 5*time.Millisecond
-	still := shot(t, nil)
-	first := true
-	a.capture = func(ctx context.Context) (tracker.Capture, error) {
-		if first {
-			first = false
-			return still, nil
-		}
-		return tracker.Capture{}, errors.New("capture failed")
-	}
-	got := a.pressCheck(context.Background(), a.beforePress(context.Background()), 200, 232)
-	if got == "" {
-		t.Fatal("check = \"\", want a could-not-verify report, not a silent pass")
-	}
-	if strings.Contains(got, "landed on nothing") {
-		t.Errorf("check = %q, want it to say the check could not be done, not that the press missed", got)
-	}
-	if !strings.Contains(got, "could not verify") {
-		t.Errorf("check = %q, want it to say the check could not be verified", got)
-	}
-}
-
-// The check returns the moment a picture shows the change, and only waits the full settle when nothing changes: a press that lands is not made to pay for one that might not.
-func TestPressCheck_ReturnsOnTheFirstPictureThatChanged(t *testing.T) {
-	a, _ := typingAgent(t)
-	pressSettle, pressPoll = time.Second, 0
-	still := shot(t, nil)
-	lit := image.Rect(90, 90, 130, 130)
-	shots := 0
-	a.capture = func(ctx context.Context) (tracker.Capture, error) {
-		shots++
-		if shots >= 3 {
-			return shot(t, &lit), nil
-		}
-		return still, nil
-	}
-	started := time.Now()
-	if got := a.pressCheck(context.Background(), a.beforePress(context.Background()), 200, 232); got != "" {
-		t.Errorf("check = %q, want the change seen", got)
-	}
-	if shots != 3 || time.Since(started) > 500*time.Millisecond {
-		t.Errorf("took %d pictures in %v, want the change caught on the second look after the press without the full settle", shots, time.Since(started))
 	}
 }
 

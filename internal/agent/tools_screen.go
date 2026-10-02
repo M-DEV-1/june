@@ -1127,9 +1127,3 @@ func (a *Agent) frontWindowChanged(ctx context.Context) string {
 	}
 	return toolError(fmt.Sprintf("the window in front is now %q, not %q where observe_screen listed this element, call observe_screen again, or say which window to use", front, from))
 }
-
-// liveScreenScope gives one live voice session its own screen state, the way withAskLookState gives one to every typed ask. Input: the session's context. Output: a context carrying that state, to be used for every tool call the session makes.
-// Without it lookStateFrom hands each tool call a throwaway, so look records its picture into something discarded the moment it returns and the draw that follows cannot tell a look ever happened: it answers needLookFirst, the model looks again, and the two go round forever. One state per session instead of one per turn because the session, not the turn, is what the model treats as continuous — a picture taken while answering one question is drawn on while answering the next.
-func liveScreenScope(ctx context.Context) context.Context {
-	return withAskLookState(ctx)
-}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,11 @@ func whisperCPPPath(dataDir string) string {
 	if p := os.Getenv("JUNE_WHISPER_CPP"); p != "" {
 		return p
 	}
-	return filepath.Join(dataDir, "whispercpp", whisperCPPBinaryName)
+	name := whisperCPPBinaryName
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(dataDir, "whispercpp", name)
 }
 
 // whisperCPPArgs returns the flags that point whisper-cli at its model and its GPU, or nil when no model sits beside the binary — which is how a test's bare stub script gets run without flags it would not understand.

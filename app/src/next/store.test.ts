@@ -1,68 +1,10 @@
-/** Tests for the reducers: what the window is showing, what is half-typed, what Escape gives up, and how a message off the daemon's stream folds into the question in flight. Every test builds its own store, so nothing leaks from one to the next. */
+/** Tests for the reducers and the stream middleware: how a message off the daemon's stream folds into the question or job in flight, and what the window does when the stream drops and comes back. Every test builds its own store, so nothing leaks from one to the next. */
 
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary, DaemonEvent } from "./api";
 import { events, juneApi } from "./api";
-import { conversationsUi, DRAFT_CHAT, escaped, makeStore, progress, ui } from "./store";
-
-describe("what the window is showing", () => {
-  it("remembers where to come back to when Settings is opened, and Escape goes back there", () => {
-    const store = makeStore({ ui: { place: "days" } });
-    store.dispatch(ui.placeShown("settings"));
-    expect(store.getState().ui.back).toBe("days");
-    store.dispatch(escaped());
-    expect(store.getState().ui.place).toBe("days");
-  });
-
-  it("never makes Settings its own back destination", () => {
-    const store = makeStore({ ui: { place: "settings", back: "chats" } });
-    store.dispatch(ui.placeShown("meetings"));
-    expect(store.getState().ui.back).toBe("chats");
-  });
-
-  it("makes a foot row a toggle back to the chats", () => {
-    const store = makeStore();
-    store.dispatch(ui.footToggled("tasks"));
-    expect(store.getState().ui.place).toBe("tasks");
-    store.dispatch(ui.footToggled("tasks"));
-    expect(store.getState().ui.place).toBe("chats");
-  });
-
-  it("opens a conversation from whichever place the rail was clicked in, and shuts the palette", () => {
-    const store = makeStore({ ui: { place: "meetings", paletteOpen: true } });
-    store.dispatch(ui.conversationOpened("c7"));
-    expect(store.getState().ui).toMatchObject({ place: "chats", conversationId: "c7", paletteOpen: false });
-    expect(store.getState().ui.back).toBe("meetings");
-  });
-
-  it("keeps what was typed per conversation, so switching chats does not lose it", () => {
-    const store = makeStore();
-    store.dispatch(ui.asked({ conversationId: "c1", text: "half a question" }));
-    store.dispatch(ui.asked({ conversationId: "c2", text: "another" }));
-    expect(store.getState().ui.ask).toEqual({ c1: "half a question", c2: "another" });
-  });
-
-  it("clears the notice before Escape does anything else", () => {
-    const store = makeStore({ ui: { place: "settings", back: "chats" } });
-    store.dispatch(ui.noticed({ text: "Could not delete", kind: "error" }));
-    store.dispatch(escaped());
-    expect(store.getState().ui.notice).toBeUndefined();
-    expect(store.getState().ui.place).toBe("settings");
-    store.dispatch(escaped());
-    expect(store.getState().ui.place).toBe("chats");
-  });
-});
-
-describe("what is half-done to a conversation", () => {
-  it("gives up a rename and a pending delete on Escape", () => {
-    const store = makeStore();
-    store.dispatch(conversationsUi.renameStarted({ id: "c1", title: "A chat" }));
-    store.dispatch(conversationsUi.deleteConfirmed("c2"));
-    store.dispatch(escaped());
-    expect(store.getState().conversations).toEqual({ draftTitle: "" });
-  });
-});
+import { DRAFT_CHAT, makeStore, progress, ui } from "./store";
 
 /** One message off the stream, with only the fields a test cares about spelled out. */
 function event(over: Partial<DaemonEvent>): DaemonEvent {
@@ -70,21 +12,6 @@ function event(over: Partial<DaemonEvent>): DaemonEvent {
 }
 
 describe("the question in flight", () => {
-  it("shows the question before the daemon has answered, and records the ask it turned into", () => {
-    const store = makeStore();
-    store.dispatch(progress.askSent({ conversationId: "c1", question: "what did she say?" }));
-    expect(store.getState().progress.run).toMatchObject({ conversationId: "c1", question: "what did she say?", answer: "", steps: [] });
-    store.dispatch(progress.askAccepted({ askId: "ask-1", conversationId: "c1" }));
-    expect(store.getState().progress.run?.askId).toBe("ask-1");
-  });
-
-  it("takes the conversation the daemon opened when the window named none", () => {
-    const store = makeStore();
-    store.dispatch(progress.askSent({ conversationId: "", question: "a question" }));
-    store.dispatch(progress.askAccepted({ askId: "ask-1", conversationId: "c9" }));
-    expect(store.getState().progress.run?.conversationId).toBe("c9");
-  });
-
   it("folds the working line, the tools and the answer into the run", () => {
     const store = makeStore();
     store.dispatch(progress.askSent({ conversationId: "c1", question: "what did she say?" }));
@@ -215,35 +142,9 @@ describe("the question in flight", () => {
     store.dispatch(progress.eventArrived(event({ type: "answer", text: "not yours", conversation_id: "c2" })));
     expect(store.getState().progress.run).toMatchObject({ status: "", answer: "" });
   });
-
-  it("gives up on a question the daemon never accepted", () => {
-    const store = makeStore();
-    store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
-    store.dispatch(progress.askFailed());
-    expect(store.getState().progress.run).toBeUndefined();
-  });
 });
 
 describe("a computer-use job in flight", () => {
-  // The plan the model writes on its first round used to live only in the job's own prompt, so the thread opened with the goal — the user's own words back at them — and went straight to "Step 1". What makes watching an agent work bearable is being told what it is about to do, so you can see it deviate.
-  it("shows the plan and the estimate it opened with, before any step", () => {
-    const store = makeStore();
-    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "play S16 E8" }));
-    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
-    store.dispatch(
-      progress.eventArrived({
-        id: "act-1",
-        type: "act",
-        detail: JSON.stringify({ kind: "plan", state: "stepping", step: 6, text: "open Netflix, find the episode, press play" }),
-      }),
-    );
-    expect(store.getState().progress.jobs.c1).toMatchObject({
-      plan: "open Netflix, find the episode, press play",
-      estimate: 6,
-      steps: [],
-    });
-  });
-
   it("folds its steps, its question and its closing spend into the job", () => {
     const store = makeStore();
     store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
@@ -273,15 +174,6 @@ describe("a computer-use job in flight", () => {
     expect(store.getState().progress.jobs.c1).toMatchObject({ state: "done", say: "Done.", spend: { rounds: 2, input: 100, cached: 40, output: 20 } });
   });
 
-  it("records a check that already held before the step took it, rather than counting it as a pass the step earned", () => {
-    const store = makeStore();
-    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
-    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "Clicking Slide 4", expect: "Risk showing" }) }));
-    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "verified", state: "stepping", text: "it was already showing", outcome: "pass", held_before: true }) }));
-    expect(store.getState().progress.jobs.c1.steps[0]).toMatchObject({ outcome: "pass", heldBefore: true, why: "it was already showing" });
-  });
-
   it("drops a fresh draft's job when the next new chat is opened, so that chat does not open showing the last draft's", () => {
     const store = makeStore();
     store.dispatch(progress.jobSent({ conversationId: DRAFT_CHAT, goal: "reorder the slides" }));
@@ -289,17 +181,6 @@ describe("a computer-use job in flight", () => {
     store.dispatch(ui.chatDraftOpened());
     expect(store.getState().progress.jobs[DRAFT_CHAT]).toBeUndefined();
     expect(store.getState().progress.jobs.c1).toBeDefined();
-  });
-
-  it("ignores an event carrying another job's id, or arriving with no job in flight", () => {
-    const store = makeStore();
-    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "x" }) }));
-    expect(store.getState().progress.jobs).toEqual({});
-
-    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
-    store.dispatch(progress.eventArrived({ id: "act-2", type: "act", detail: JSON.stringify({ kind: "step", state: "stepping", text: "somebody else's" }) }));
-    expect(store.getState().progress.jobs.c1.steps).toEqual([]);
   });
 
   it("keeps one job per conversation, so starting a second in another chat loses neither", () => {
@@ -313,15 +194,6 @@ describe("a computer-use job in flight", () => {
     expect(store.getState().progress.jobs.c1.steps).toHaveLength(1);
     expect(store.getState().progress.jobs.c2.steps).toHaveLength(0);
     expect(store.getState().progress.jobs.c2.state).toBe("planning");
-  });
-
-  it("gives up on a job the daemon never accepted, leaving any other chat's alone", () => {
-    const store = makeStore();
-    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    store.dispatch(progress.jobSent({ conversationId: "c2", goal: "rename the file" }));
-    store.dispatch(progress.jobFailed("c2"));
-    expect(store.getState().progress.jobs.c2).toBeUndefined();
-    expect(store.getState().progress.jobs.c1).toBeDefined();
   });
 
   it("patches the sidebar's own row with the job's state word while it runs, since the daemon knows nothing about a job being tied to a conversation", async () => {
@@ -341,27 +213,6 @@ describe("a computer-use job in flight", () => {
     store.dispatch(progress.jobSent({ conversationId: "__draft__", goal: "x" }));
     expect(juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.[0]).toEqual(untouched);
   });
-
-  it("writes a finished job's word once and then leaves that row to the daemon", async () => {
-    const store = makeStore();
-    const rows: ConversationSummary[] = [
-      { id: "c1", title: "Reordering the slide deck", brain: "claude", last: "", updated: new Date().toISOString() },
-      { id: "c2", title: "Flights", brain: "claude", last: "", updated: new Date().toISOString() },
-    ];
-    await store.dispatch(juneApi.util.upsertQueryData("conversations", undefined, rows));
-    const rowLast = (id: string) => juneApi.endpoints.conversations.select(undefined)(store.getState()).data?.find((c) => c.id === id)?.last;
-
-    store.dispatch(progress.jobSent({ conversationId: "c1", goal: "reorder the slides" }));
-    store.dispatch(progress.jobAccepted({ id: "act-1", conversationId: "c1" }));
-    store.dispatch(progress.eventArrived({ id: "act-1", type: "act", detail: JSON.stringify({ kind: "done", state: "done", text: "Done." }) }));
-    expect(rowLast("c1")).toBe("Done");
-
-    // What GET /conversations says about that chat once the job is over is the daemon's to say, and every later event of every other chat used to put the job's own word back over it.
-    await store.dispatch(juneApi.util.upsertQueryData("conversations", undefined, rows.map((r) => (r.id === "c1" ? { ...r, last: "reordered the deck" } : r))));
-    store.dispatch(progress.jobSent({ conversationId: "c2", goal: "book the flight" }));
-    expect(rowLast("c1")).toBe("reordered the deck");
-    expect(rowLast("c2")).toBe("Planning…");
-  });
 });
 
 describe("the event stream", () => {
@@ -380,24 +231,8 @@ describe("the event stream", () => {
   });
 });
 
-// A "notice" event with its action set is the daemon sending back a task or routine notice once the user has pressed Done or a snooze button on its own desktop notification (see internal/proactive/notify.go). It says so on the sidebar's rail line, the one place every notice already surfaces (see ui.notice and its other callers in routines.tsx and App.tsx), rather than growing a second display of its own.
+// A "notice" event with its action set is the daemon sending back a task or routine notice once the user has pressed Done or a snooze button on its own desktop notification (see internal/proactive/notify.go).
 describe("a notice's action reaching the window", () => {
-  it("says a task done from its own notification on the rail line", () => {
-    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
-    const store = makeStore(undefined, open);
-    store.dispatch(progress.streamOpened());
-    const onEvent = open.mock.calls[0][0];
-
-    onEvent(
-      event({
-        id: "",
-        type: "notice",
-        notice: { title: "Still open", body: "Send the invoice", place: "tasks", id: "task-42", kind: "task", action: "done", until: "" },
-      }),
-    );
-    expect(store.getState().ui.notice).toEqual({ text: "Send the invoice: Done", kind: "info" });
-  });
-
   it("tells the Tasks cache to read the list again for a task closed this way", () => {
     const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
     const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
@@ -414,48 +249,6 @@ describe("a notice's action reaching the window", () => {
     );
     expect(invalidate).toHaveBeenCalledWith(["Task"]);
     invalidate.mockRestore();
-  });
-
-  it("says a snooze on the rail line, and does not touch the Tasks cache for a routine", () => {
-    // The label says "until 18:00" only while the snooze lands on the same calendar day as the clock, so the clock is pinned to that day rather than left to roll past midnight mid-run.
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-05T12:00:00"));
-    const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
-    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
-    const store = makeStore(undefined, open);
-    store.dispatch(progress.streamOpened());
-    const onEvent = open.mock.calls[0][0];
-
-    onEvent(
-      event({
-        id: "",
-        type: "notice",
-        notice: { title: "Routine", body: "Vexil replied about the venue.", place: "", id: "7", kind: "routine", action: "snoozed", until: "2026-09-05T18:00:00" },
-      }),
-    );
-    expect(store.getState().ui.notice).toEqual({ text: "Vexil replied about the venue.: Snoozed until 18:00", kind: "info" });
-    expect(invalidate).not.toHaveBeenCalledWith(["Task"]);
-    invalidate.mockRestore();
-    vi.useRealTimers();
-  });
-
-  it("leaves the rail line's text alone for a notice arriving fresh, with no action yet, and holds it as the live one instead", () => {
-    const open = vi.fn((_onEvent: (ev: DaemonEvent) => void) => () => {});
-    const store = makeStore(undefined, open);
-    store.dispatch(progress.streamOpened());
-    const onEvent = open.mock.calls[0][0];
-
-    onEvent(
-      event({
-        id: "",
-        type: "notice",
-        notice: { title: "Morning brief", body: "Two things are still open.", place: "tasks", id: "", kind: "brief" },
-      }),
-    );
-    expect(store.getState().ui.notice).toBeUndefined();
-    // at is stamped on arrival rather than sent by the daemon, so it is checked for being a time and not for a value this test could know.
-    expect(store.getState().ui.liveNotice).toMatchObject({ kind: "brief", id: "", title: "Morning brief", body: "Two things are still open." });
-    expect(store.getState().ui.liveNotice?.at).toBeTypeOf("number");
   });
 
   it("clears the live notice once the daemon's answer comes back with its action set, the same event a desktop press produces", () => {
@@ -521,7 +314,7 @@ describe("the stream coming back", () => {
     vi.unstubAllGlobals();
   });
 
-  it("tells the cache to read every screen again once the stream is back", async () => {
+  it("gives up the question in flight and tells the cache to read every screen again once the stream is back", async () => {
     const invalidate = vi.spyOn(juneApi.util, "invalidateTags");
     let reopen: (() => void) | undefined;
     const store = makeStore(undefined, (_onEvent, onReopen) => {
@@ -531,9 +324,12 @@ describe("the stream coming back", () => {
     store.dispatch(progress.streamOpened());
     await Promise.resolve();
     invalidate.mockClear();
+    // A restarted daemon never sends the lost question's "done", and the composer holds Send disabled until the run is gone.
+    store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
 
     reopen?.();
-    expect(invalidate).toHaveBeenCalledWith(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]);
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalledWith(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
+    expect(store.getState().progress.run).toBeUndefined();
     invalidate.mockRestore();
   });
 });

@@ -24,20 +24,22 @@ func (f *fakeRecorder) RecordUsage(provider string, ok bool, ms time.Duration, p
 	return f.failErr
 }
 
-// TestWrap_SuccessAndFailure_TableDriven asserts Wrap records exactly one call per invocation, with ok/failed set from whether the wrapped Brain returned an error, and passes the reply/error through unchanged.
+// TestWrap_SuccessAndFailure_TableDriven asserts Wrap records exactly one call per invocation, with ok/failed set from whether the wrapped Brain returned an error, and passes the reply/error through unchanged, even when the Recorder itself fails.
 func TestWrap_SuccessAndFailure_TableDriven(t *testing.T) {
 	cases := []struct {
 		name    string
 		brainOK bool
+		recErr  error
 		wantOK  bool
 	}{
-		{"success is recorded ok=true", true, true},
-		{"failure is recorded ok=false", false, false},
+		{"success is recorded ok=true", true, nil, true},
+		{"failure is recorded ok=false", false, nil, false},
+		{"a failing recorder never fails the call", true, errors.New("disk full"), true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &fakeRecorder{}
+			rec := &fakeRecorder{failErr: tc.recErr}
 			var brainErr error
 			if !tc.brainOK {
 				brainErr = errors.New("brain down")
@@ -68,21 +70,5 @@ func TestWrap_SuccessAndFailure_TableDriven(t *testing.T) {
 				t.Errorf("ms = %v, want >= 0", got.ms)
 			}
 		})
-	}
-}
-
-// TestWrap_RecorderFailure_NeverFailsTheCall verifies a broken Recorder can't take down a brain call — the reply and error must pass through exactly as if recording had succeeded.
-func TestWrap_RecorderFailure_NeverFailsTheCall(t *testing.T) {
-	rec := &fakeRecorder{failErr: errors.New("disk full")}
-	wrapped := Wrap("claude-cli", func(ctx context.Context, prompt string) (string, error) {
-		return "the reply", nil
-	}, rec)
-
-	reply, err := wrapped(context.Background(), "prompt")
-	if err != nil {
-		t.Errorf("err = %v, want nil despite the Recorder failing", err)
-	}
-	if reply != "the reply" {
-		t.Errorf("reply = %q, want %q", reply, "the reply")
 	}
 }

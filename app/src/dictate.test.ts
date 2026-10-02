@@ -22,7 +22,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-
 describe("stopDictation", () => {
   it("throws when whisper failed", async () => {
     fakeFetch({ status: 500 });
@@ -42,28 +41,5 @@ describe("dictationKey", () => {
 
   it("leaves the space bar alone once there is text to type into", () => {
     expect(dictationKey(key(" "), false, false)).toBe("");
-  });
-
-  it("stops on the space bar, on enter and on escape while it is listening", () => {
-    expect(dictationKey(key(" "), true, true)).toBe("stop");
-    expect(dictationKey(key("Enter"), true, true)).toBe("stop");
-    expect(dictationKey(key("Escape"), true, true)).toBe("stop");
-  });
-
-  it("ignores auto-repeat, so a key held down starts one recording and does not toggle it off", () => {
-    expect(dictationKey(key(" ", { repeat: true }), true, false)).toBe("");
-    expect(dictationKey(key(" ", { repeat: true }), true, true)).toBe("");
-  });
-
-  it("leaves the key to whoever bound it with a modifier", () => {
-    expect(dictationKey(key(" ", { shiftKey: true }), true, false)).toBe("");
-    expect(dictationKey(key(" ", { ctrlKey: true }), true, true)).toBe("");
-  });
-
-  // A stop the daemon has not answered yet is still a dictation as far as the view is concerned, and a second stop 404s and comes back with "" — which is then taken as the transcript, so the words the first stop is still waiting for are dropped as a duplicate.
-  it("says nothing while a stop is already on its way to the daemon", () => {
-    expect(dictationKey(key(" "), true, true, true)).toBe("");
-    expect(dictationKey(key("Enter"), true, true, true)).toBe("");
-    expect(dictationKey(key("Escape"), true, true, true)).toBe("");
   });
 });

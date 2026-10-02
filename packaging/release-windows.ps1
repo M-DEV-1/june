@@ -32,6 +32,8 @@ try {
 } finally { Pop-Location }
 Push-Location app\src-tauri
 try {
+	# Links the C runtime into june-window.exe, so a machine without the Visual C++ redistributable can still start it. tauri-build only does this when the variable is set, and the Tauri CLI is what normally sets it.
+	$env:STATIC_VCRUNTIME = 'true'
 	Invoke-Checked 'cargo build' { cargo build --release }
 } finally { Pop-Location }
 Copy-Item app\src-tauri\target\release\june.exe "$dist\june-window.exe"

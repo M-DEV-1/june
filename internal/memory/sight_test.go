@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// ParseScreenSight reads the vision model's JSON reply, and keeps a prose reply as the summary.
 func TestParseScreenSight_JSON(t *testing.T) {
 	s := ParseScreenSight(`{"user_activity":"watching Suits","visible_text":["Harvey: object","Donna: noted"],"summary":"courtroom"}`)
 	if s.UserActivity != "watching Suits" {
@@ -16,22 +17,10 @@ func TestParseScreenSight_JSON(t *testing.T) {
 	if s.Summary != "courtroom" {
 		t.Fatalf("summary=%q", s.Summary)
 	}
-}
 
-func TestParseScreenSight_ProseFallback(t *testing.T) {
-	s := ParseScreenSight("just a paragraph about the screen")
-	if s.Summary != "just a paragraph about the screen" || s.UserActivity != "" {
-		t.Fatalf("%+v", s)
-	}
-}
-
-func TestComposeMoment_PrefersStructured(t *testing.T) {
-	got := ComposeMoment("editing compiler.go", []string{"func Ingest", "wordFlushLimit"}, "raw a11y dump")
-	if !strings.Contains(got, "editing compiler.go") || !strings.Contains(got, "func Ingest") {
-		t.Fatalf("got %q", got)
-	}
-	if strings.Contains(got, "raw a11y") {
-		t.Fatalf("fallback leaked: %q", got)
+	// A reply that is not JSON is kept as the summary rather than lost.
+	if s := ParseScreenSight("just a paragraph about the screen"); s.Summary != "just a paragraph about the screen" || s.UserActivity != "" {
+		t.Fatalf("prose fallback = %+v", s)
 	}
 }
 
@@ -50,5 +39,10 @@ func TestComposeMoment_StripsObjectReplacementChars(t *testing.T) {
 
 	if got := ComposeMoment("￼￼", []string{"￼", "￼￼￼"}, ""); got != "" {
 		t.Errorf("a capture that is nothing but object replacement characters composed to %q, want empty", got)
+	}
+
+	// The structured activity and visible text win over the raw fallback.
+	if got := ComposeMoment("editing compiler.go", []string{"func Ingest"}, "raw a11y dump"); !strings.Contains(got, "func Ingest") || strings.Contains(got, "raw a11y") {
+		t.Errorf("ComposeMoment with structured input = %q, want it without the fallback", got)
 	}
 }

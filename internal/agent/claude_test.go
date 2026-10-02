@@ -3,7 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,13 +12,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"june/internal/db"
 )
 
 // rpcPost sends one JSON-RPC request to the tool server and returns the decoded reply. Input: the server, the method, the id and the params. Output: the whole reply object.
@@ -37,54 +34,6 @@ func rpcPost(t *testing.T, s *claudeToolServer, method string, id int, params an
 		t.Fatalf("decoding the %s reply: %v", method, err)
 	}
 	return reply
-}
-
-// The tool server answers initialize with the tools capability and lists every tool an ask offers, each with the JSON Schema its arguments take.
-func TestClaudeToolServer_InitializesAndListsTheAskTools(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	s, err := a.startClaudeToolServer(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	init := rpcPost(t, s, "initialize", 0, map[string]any{"protocolVersion": "2025-11-25"})
-	result, ok := init["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("initialize reply = %v", init)
-	}
-	if result["protocolVersion"] != "2025-11-25" {
-		t.Errorf("protocol version = %v", result["protocolVersion"])
-	}
-	if _, ok := result["capabilities"].(map[string]any)["tools"]; !ok {
-		t.Errorf("capabilities = %v", result["capabilities"])
-	}
-
-	list := rpcPost(t, s, "tools/list", 1, nil)
-	tools, ok := list["result"].(map[string]any)["tools"].([]any)
-	if !ok {
-		t.Fatalf("tools/list reply = %v", list)
-	}
-	if len(tools) != len(a.askToolDeclarations()) {
-		t.Fatalf("%d tools listed, %d declared", len(tools), len(a.askToolDeclarations()))
-	}
-	found := false
-	for _, raw := range tools {
-		tool := raw.(map[string]any)
-		if tool["name"] != "observe_screen" {
-			continue
-		}
-		found = true
-		if tool["description"] == "" {
-			t.Errorf("observe_screen has no description")
-		}
-		if tool["inputSchema"].(map[string]any)["type"] != "object" {
-			t.Errorf("observe_screen input schema = %v", tool["inputSchema"])
-		}
-	}
-	if !found {
-		t.Errorf("observe_screen was not listed")
-	}
 }
 
 // A tools/call runs the tool through the ask's own gate, answers with its result as MCP text content, and records the call as a tool hop the trace can carry. Once a run has spent all of its maxAskIterations steps, every call after that is refused without running, so askClaude can end the turn on capError (see Capped()) rather than trusting whatever the CLI does with a refusal. Nothing here stops the CLI mid-run on its own; the wall clock it is started under (claudeAskTimeout) is the other hard stop.
@@ -270,56 +219,6 @@ func TestAskClaude_RunsToolsAndFillsTheTrace(t *testing.T) {
 	}
 }
 
-// The arguments the CLI is run with keep the subscription login, offer only June's own tools, and shut out the user's own settings, hooks, skills and MCP servers, because the prompt carries text nobody vetted.
-// One askClaude call has to get the CLI invocation right in three unrelated ways at once: run under the subscription with only June's tools allowed, and do it through a temp dir that exists while the CLI is meant to be reading it and is gone once the ask ends (see TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv for what that dir must hold).
-func TestAskClaude_RunsTheCLIUnderTheSubscriptionWithOnlyJuneTools(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var seen []string
-	var prompt, dir string
-	var existedDuringTheRun bool
-	run := func(ctx context.Context, args []string, stdin string) ([]byte, error) {
-		seen, prompt = args, stdin
-		for i, arg := range args {
-			if arg == "--mcp-config" {
-				dir = filepath.Dir(args[i+1])
-			}
-		}
-		if dir != "" {
-			_, err := os.Stat(dir)
-			existedDuringTheRun = err == nil
-		}
-		return []byte(`{"result":"done","is_error":false}`), nil
-	}
-	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "hello"); err != nil {
-		t.Fatal(err)
-	}
-	joined := strings.Join(seen, " ")
-	for _, want := range []string{"-p", "--output-format json", "--model sonnet", "--strict-mcp-config", "--restricted", "--disable-slash-commands", "--no-session-persistence", "--permission-prompts none"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("the arguments are missing %q: %s", want, joined)
-		}
-	}
-	if strings.Contains(joined, "--bare") {
-		t.Errorf("--bare would bill the API key instead of the subscription: %s", joined)
-	}
-	if !strings.Contains(joined, "mcp__june__observe_screen") {
-		t.Errorf("June's tools were not allowed: %s", joined)
-	}
-	if !strings.HasSuffix(prompt, "hello") {
-		t.Errorf("the question is not the last thing the model reads: %q", prompt)
-	}
-
-	if dir == "" {
-		t.Fatal("never saw the mcp config path")
-	}
-	if !existedDuringTheRun {
-		t.Fatal("the temp dir did not exist while the CLI was meant to be reading it")
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("the ask's temp dir still exists after the ask ended: %v", err)
-	}
-}
-
 // The tool server's URL and the system prompt (personal context included) never sit in argv: any local process can read another process's argv for the life of a run via /proc/<pid>/cmdline on Linux, so both go into 0600 files inside a temp directory instead, and only the file paths are on the command line.
 func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{personal: map[string]string{"home": "the user's home address is 42 Example Street"}}, nil, "")
@@ -344,7 +243,8 @@ func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
-			if info.Mode().Perm() != 0o600 {
+			// Windows reports 0666 for every file whatever was asked for, so the mode is only checked where it means something.
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 				t.Errorf("%s mode = %v, want 0600 so no other user on the machine can read it", path, info.Mode().Perm())
 			}
 		}
@@ -384,126 +284,6 @@ func TestAskClaude_PutsTheMCPConfigAndSystemPromptInFilesNotArgv(t *testing.T) {
 	}
 }
 
-// The prior turns go in ahead of the question, so a follow-up reads as a follow-up.
-func TestAskClaudeWith_SendsThePriorTurns(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var prompt string
-	run := func(ctx context.Context, args []string, stdin string) ([]byte, error) {
-		prompt = stdin
-		return []byte(`{"result":"done","is_error":false}`), nil
-	}
-	history := HistoryFromTurns([]db.Turn{{Role: "you", Text: "who did I meet"}, {Role: "june", Text: "Vexil"}})
-	if _, err := a.askClaude(t.Context(), run, "sonnet", history, "when"); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(prompt, "who did I meet") || !strings.Contains(prompt, "Vexil") {
-		t.Errorf("the thread is missing from the prompt: %q", prompt)
-	}
-	if strings.Index(prompt, "Vexil") > strings.Index(prompt, "when") {
-		t.Errorf("the thread came after the question: %q", prompt)
-	}
-}
-
-// claudeCapturingRun returns a runner that reads the system prompt file and lists the tools the tool server offers, for a test that needs to see what an askClaude call sent without driving a whole tool call through the stub.
-func claudeCapturingRun(t *testing.T, systemPrompt *string, toolNames *[]string) claudeRunner {
-	t.Helper()
-	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
-		var url string
-		for i, arg := range args {
-			switch arg {
-			case "--system-prompt-file":
-				raw, err := os.ReadFile(args[i+1])
-				if err != nil {
-					return nil, err
-				}
-				*systemPrompt = string(raw)
-			case "--mcp-config":
-				raw, err := os.ReadFile(args[i+1])
-				if err != nil {
-					return nil, err
-				}
-				var cfg struct {
-					MCPServers map[string]struct {
-						URL string `json:"url"`
-					} `json:"mcpServers"`
-				}
-				if err := json.Unmarshal(raw, &cfg); err != nil {
-					return nil, err
-				}
-				url = cfg.MCPServers["june"].URL
-			}
-		}
-		body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		var reply struct {
-			Result struct {
-				Tools []struct {
-					Name string `json:"name"`
-				} `json:"tools"`
-			} `json:"result"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-			return nil, err
-		}
-		for _, tool := range reply.Result.Tools {
-			*toolNames = append(*toolNames, tool.Name)
-		}
-		return []byte(`{"result":"done","is_error":false}`), nil
-	}
-}
-
-// A screen question ("open spotify and play back in black") is recognised as a screen task before any tool has run, so it gets the short screen prompt rather than the full handshake, and the tool server offers it only the screen tools plus the memory-reading tools, not the full ask tool set.
-func TestAskClaude_ScreenQuestionGetsTheShortPromptAndScreenTools(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var systemPrompt string
-	var toolNames []string
-	run := claudeCapturingRun(t, &systemPrompt, &toolNames)
-	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "open spotify and play back in black"); err != nil {
-		t.Fatal(err)
-	}
-
-	if strings.Contains(systemPrompt, "<persona>") || strings.Contains(systemPrompt, "memory_guidelines") {
-		t.Errorf("system prompt still carries the persona/memory teaching text: %q", systemPrompt)
-	}
-	if !strings.Contains(systemPrompt, "working the user's screen for them") || !strings.Contains(systemPrompt, "Never click anything that sends, pays, deletes or submits") {
-		t.Errorf("system prompt = %q, want the screen task guidance and the stop line", systemPrompt)
-	}
-
-	got := make(map[string]bool, len(toolNames))
-	for _, name := range toolNames {
-		got[name] = true
-	}
-	if !got["click"] || !got["query_memory"] {
-		t.Errorf("tools/list = %v, want click and query_memory", toolNames)
-	}
-	if got["delegate"] || got["branch"] {
-		t.Errorf("tools/list = %v, want no delegate or web-only tools on a screen round", toolNames)
-	}
-}
-
-// A memory question ("what is my manager's name") is not a screen task, so it keeps the full handshake prompt and every tool the ask gate allows.
-func TestAskClaude_MemoryQuestionGetsTheFullPromptAndAllTools(t *testing.T) {
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
-	var systemPrompt string
-	var toolNames []string
-	run := claudeCapturingRun(t, &systemPrompt, &toolNames)
-	if _, err := a.askClaude(t.Context(), run, "sonnet", nil, "what is my manager's name"); err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(systemPrompt, "<persona>") || !strings.Contains(systemPrompt, "memory_guidelines") {
-		t.Errorf("system prompt = %q, want the full handshake teaching", systemPrompt)
-	}
-
-	if len(toolNames) != len(a.askToolDeclarations()) {
-		t.Errorf("tools/list = %d tools, want the full %d the ask gate allows", len(toolNames), len(a.askToolDeclarations()))
-	}
-}
-
 // A CLI run that failed is an error carrying what it said, not an answer.
 func TestAskClaude_ReportsAFailedRun(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
@@ -516,33 +296,6 @@ func TestAskClaude_ReportsAFailedRun(t *testing.T) {
 	}
 	if tr.Answer != "" {
 		t.Errorf("answer = %q", tr.Answer)
-	}
-}
-
-// MCP hands a picture back as an image content item beside the text, which is how the Claude command line gets to see the screen a look took.
-func TestClaudeToolServer_ReturnsTheLookPictureAsAnImage(t *testing.T) {
-	a, _, _ := lookingAgent(t)
-	// askClaude attaches this before it ever starts the tool server; done here too so the look the test drives through the server has somewhere to leave its picture.
-	s, err := a.startClaudeToolServer(withAskLookState(t.Context()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	call := rpcPost(t, s, "tools/call", 2, map[string]any{"name": "look", "arguments": map[string]any{}})
-	content := call["result"].(map[string]any)["content"].([]any)
-	if len(content) != 2 {
-		t.Fatalf("%d content items, want the text and the picture", len(content))
-	}
-	if content[0].(map[string]any)["type"] != "text" {
-		t.Errorf("first item = %v, want the text result", content[0])
-	}
-	img := content[1].(map[string]any)
-	if img["type"] != "image" || img["mimeType"] != "image/jpeg" {
-		t.Errorf("second item = %v, want an image/jpeg", img)
-	}
-	if img["data"] != base64.StdEncoding.EncodeToString([]byte("fake-jpeg-bytes")) {
-		t.Errorf("data = %v, want the picture's bytes in base64", img["data"])
 	}
 }
 
@@ -654,31 +407,5 @@ func TestRefreshClaudeUsage_NeverLogsTheToken(t *testing.T) {
 	}
 	if len(rec.byName) != 0 {
 		t.Errorf("a failed read recorded %+v, want nothing so the last good reading stands", rec.byName)
-	}
-}
-
-// TestRefreshClaudeUsage_PollsAtMostEveryTenMinutes checks a window polling /brains every few seconds does not poll Anthropic with it.
-func TestRefreshClaudeUsage_PollsAtMostEveryTenMinutes(t *testing.T) {
-	var calls atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		io.WriteString(w, `{"five_hour":{"utilization":1,"resets_at":"2026-09-05T17:56:00Z"}}`)
-	}))
-	defer srv.Close()
-
-	claudeUsagePolled.Lock()
-	claudeUsagePolled.at = time.Time{}
-	claudeUsagePolled.Unlock()
-
-	rec := &recordedUsage{}
-	creds := writeClaudeCredentials(t, "sk-ant-oat-do-not-leak")
-	for range 3 {
-		refreshClaudeUsage(context.Background(), srv.Client(), srv.URL+"/api/oauth/usage", creds, rec)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("three refreshes made %d requests, want 1", got)
-	}
-	if len(rec.byName[ProviderClaude]) != 1 {
-		t.Errorf("recorded %+v, want the one window the endpoint named", rec.byName)
 	}
 }

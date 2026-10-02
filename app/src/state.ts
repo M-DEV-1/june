@@ -409,7 +409,7 @@ export function stepSeconds(s: ToolStep, now: number): number {
   return Math.round(((s.finishedAt ?? now) - s.startedAt) / 100) / 10;
 }
 
-/** The small icon kind drawn beside a step's label — one of the eight the card knows: look, point, click, type, scroll, note, search, open. Input: a tool's name. Output: its kind, or "step" for a tool with no icon of its own (shell_exec, read_file, list_files, action_items — plain enough that a generic dot reads fine). */
+/** The small icon kind drawn beside a step's label — one of the eight the card knows: look, point, click, type, scroll, note, search, open. Input: a tool's name. Output: its kind, or "step" for a tool with no icon of its own (read_file, list_files, action_items — plain enough that a generic dot reads fine). */
 export function stepIconKind(name: string): string {
   return TOOL_STEP.get(name)?.icon ?? "step";
 }
@@ -501,14 +501,6 @@ const TOOL_STEP = new Map<
       icon: "open",
       verb: "Opening a page",
       template: (d) => (d ? `Opening ${d}` : ""),
-    },
-  ],
-  [
-    "shell_exec",
-    {
-      icon: "step",
-      verb: "Running a command",
-      template: (d) => (d ? `Running ${d}` : ""),
     },
   ],
   [

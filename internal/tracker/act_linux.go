@@ -286,13 +286,6 @@ func deskNow() (desk, bool) {
 	return deskCache.desk, deskCache.ok
 }
 
-// forgetDesk drops the cached desktop so the next deskNow reads X again. It exists for the tests, which need a known starting point and must not leave one behind.
-func forgetDesk() {
-	deskCache.mu.Lock()
-	defer deskCache.mu.Unlock()
-	deskCache.at = time.Time{}
-}
-
 // MonitorLogicalSize reports how big the monitor holding a desktop point is, in the logical pixels the accessibility bus, the work area and the portal's pointer all work in. Input: the point in those logical desktop pixels, which for the portal is the top-left corner its granted stream reported. Output: the monitor's logical width and height, and false when the desktop cannot be read or no monitor covers that point.
 // It exists for the portal's pointer mapping (see input.UseMonitorLayout): a screen-cast stream is sized in the monitor's device pixels, and dividing the two is the only way to know how many stream pixels one logical pixel is worth on a scaled display.
 func MonitorLogicalSize(x, y int) (w, h int, ok bool) {

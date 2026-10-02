@@ -8,6 +8,9 @@ import (
 
 // Needs a real microphone and playback device: both streams open, the mic delivers about a second of 16 kHz audio, and Stop returns with nothing written after it. The system side only fills when something is playing, so play a sound during the test to see it too.
 func TestMeetingCaptureWindows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs a real input device; CI runs -short")
+	}
 	var mic, sys bytes.Buffer
 	c, err := StartMeetingCapture(&mic, &sys)
 	if err != nil {

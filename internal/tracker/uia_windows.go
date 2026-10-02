@@ -12,12 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -39,11 +41,15 @@ type uiaRequest struct {
 
 // uiaHost is one running copy of the host script: its process, the pipe requests go into, and the lines it answers with, which is closed when its output ends.
 type uiaHost struct {
-	proc  *os.Process
-	stdin io.WriteCloser
-	lines chan []byte
-	ready bool // whether the script's ready line has been read
+	proc    *os.Process
+	stdin   io.WriteCloser
+	lines   chan []byte
+	ready   bool      // whether the script's ready line has been read
+	started time.Time // when the process was started, to give up on one that never gets ready
 }
+
+// uiaStartLimit is how long a host may take to print its ready line before it is killed and the next call starts a fresh one. PowerShell plus its first Add-Type takes a few seconds; a script that threw before its ready line, such as under Constrained Language Mode or an AppLocker rule that blocks Add-Type's compiler, never prints it.
+const uiaStartLimit = 30 * time.Second
 
 var (
 	// uiaTurn lets one request at a time talk to the host; holding it is what guards uiaLive.
@@ -55,6 +61,10 @@ var (
 // uiaCall sends one request to the host script and waits for its answer, starting the host first when none is running. Input: a context bounding the whole call, waiting for a turn included, and the request. Output: the reply, or an error naming what failed, the script's own error message included.
 // A context that ends while the host is still starting leaves it starting, since PowerShell plus its first Add-Type takes a few seconds and killing it there would mean it never finishes; a context that ends while a request is in flight kills the host, because a UI Automation call into a hung application does not come back, and the next call starts a fresh one.
 func uiaCall(ctx context.Context, req uiaRequest) (uiaReply, error) {
+	// A UI Automation call into a window that stopped pumping messages does not come back, which would cost a host restart and its Add-Type compile on every read.
+	if req.Hwnd != 0 && winHung(windows.HWND(req.Hwnd)) {
+		return uiaReply{}, errors.New("the window is not responding")
+	}
 	select {
 	case uiaTurn <- struct{}{}:
 	case <-ctx.Done():
@@ -70,6 +80,10 @@ func uiaCall(ctx context.Context, req uiaRequest) (uiaReply, error) {
 		uiaLive = h
 	}
 	h := uiaLive
+	if !h.ready && time.Since(h.started) > uiaStartLimit {
+		h.kill()
+		return uiaReply{}, fmt.Errorf("the UI Automation host was not ready after %s, so it was stopped", uiaStartLimit)
+	}
 	for !h.ready {
 		select {
 		case line, ok := <-h.lines:
@@ -146,10 +160,11 @@ func startUIAHost() (*uiaHost, error) {
 	if err != nil {
 		return nil, err
 	}
+	cmd.Stderr = uiaStderr{}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	h := &uiaHost{proc: cmd.Process, stdin: stdin, lines: make(chan []byte)}
+	h := &uiaHost{proc: cmd.Process, stdin: stdin, lines: make(chan []byte), started: time.Now()}
 	// The script line is some kilobytes, more than a pipe holds before PowerShell starts reading, so it is written on its own goroutine and the caller's context governs the wait for the ready line instead.
 	go func() {
 		line := "iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64.StdEncoding.EncodeToString([]byte(uiaScript)) + "')))\n"
@@ -174,6 +189,14 @@ func startUIAHost() (*uiaHost, error) {
 	return h, nil
 }
 
+// uiaStderr logs whatever the host writes to stderr, which is where PowerShell reports a script error such as one that stops the host before its ready line.
+type uiaStderr struct{}
+
+func (uiaStderr) Write(p []byte) (int, error) {
+	slog.Warn("the UI Automation host reported an error", "stderr", strings.TrimSpace(string(p)))
+	return len(p), nil
+}
+
 // uiaJSON finds the JSON object in one line of the host's output. Input: the line. Output: the line from its first "{" on, or nil for a line with none, such as anything PowerShell itself prints, which may also sit in front of a reply on the same line.
 func uiaJSON(line []byte) []byte {
 	if i := bytes.IndexByte(line, '{'); i >= 0 {
@@ -194,6 +217,7 @@ var (
 	uiaUser32       = windows.NewLazySystemDLL("user32.dll")
 	procWinText     = uiaUser32.NewProc("GetWindowTextW")
 	procWinLong     = uiaUser32.NewProc("GetWindowLongW")
+	procIsHung      = uiaUser32.NewProc("IsHungAppWindow")
 	gwlExStyle      = int32(-20)
 	wsExToolWindow  = uint32(0x80)
 	winEnumMu       sync.Mutex
@@ -248,6 +272,12 @@ func winListable(h windows.HWND) bool {
 	}
 	ex, _, _ := procWinLong.Call(uintptr(h), uintptr(gwlExStyle))
 	return uint32(ex)&wsExToolWindow == 0
+}
+
+// winHung reports whether Windows considers a window hung: it has not answered messages for several seconds.
+func winHung(h windows.HWND) bool {
+	r, _, _ := procIsHung.Call(uintptr(h))
+	return r != 0
 }
 
 // trimExe drops a trailing ".exe" in any case. Input: an executable's file name. Output: the name without it, such as "chrome".

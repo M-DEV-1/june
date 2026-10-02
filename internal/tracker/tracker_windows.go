@@ -3,8 +3,9 @@ package tracker
 import (
 	"path/filepath"
 	"strings"
-	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // info dump
@@ -13,8 +14,8 @@ import (
 // W (ref '90s windows text handling) - A (ANSI/ASCII), W (WIDE) - A was 1 byte/char, W was 2 bytes/char but can handle everything in the world (go strings are UTF-8, this helps convert to UTF-16)
 
 var (
-	user32                         = syscall.NewLazyDLL("user32.dll")               // user interface
-	kernel32                       = syscall.NewLazyDLL("kernel32.dll")             // system core info
+	user32                         = windows.NewLazySystemDLL("user32.dll")         // user interface
+	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")       // system core info
 	procGetForegroundWindow        = user32.NewProc("GetForegroundWindow")          // current active window
 	procGetWindowTextW             = user32.NewProc("GetWindowTextW")               // title bar text
 	procGetWindowThreadProcessId   = user32.NewProc("GetWindowThreadProcessId")     // return pid for window
@@ -49,7 +50,7 @@ func (w *winTracker) GetActiveWindow() (*Activity, error) {
 
 	// dlls are written in C, hence convert memory pointer returns to string later
 	procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), uintptr(len(titleBuf)))
-	title := syscall.UTF16ToString(titleBuf)
+	title := windows.UTF16ToString(titleBuf)
 
 	return Normalize(windowApp(hwnd), title), nil
 }
@@ -76,7 +77,7 @@ func windowApp(hwnd uintptr) string {
 	}
 
 	// C:\\something\\something\\something.exe
-	fullPath := syscall.UTF16ToString(appBuf[:size])
+	fullPath := windows.UTF16ToString(appBuf[:size])
 	app := filepath.Base(fullPath)
 	// the on-disk casing varies (JUNE.EXE, june.exe), so the suffix is matched without case
 	if strings.EqualFold(filepath.Ext(app), ".exe") {

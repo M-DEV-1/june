@@ -179,7 +179,7 @@ func blockedRead(app string) error {
 	return fmt.Errorf("%s is on this machine's blocklist, so its windows are not read or pictured", app)
 }
 
-// typableRoles mirrors the roles act.Filter keeps without a label, because an empty box to type in is still a target. Kept here because act does not export it; keptCount's test holds the two rules together.
+// typableRoles mirrors the roles act.Filter keeps without a label, because an empty box to type in is still a target. Kept here because act does not export it.
 var typableRoles = map[string]bool{"entry": true, "text": true, "password text": true}
 
 // keptCount is how many of a walked window's nodes act.Filter would list, without act.Filter's cap on the length of the list. Input: the nodes of one window. Output: the count.

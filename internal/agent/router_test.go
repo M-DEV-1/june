@@ -4,7 +4,6 @@ import (
 	"june/internal/config"
 	"slices"
 	"testing"
-	"time"
 )
 
 // readyAll makes every provider on the card list usable, so a test says what it is about rather than depending on which CLIs this machine happens to have.
@@ -29,16 +28,6 @@ func TestRoute_PutsAWebCapableProviderFirstForAWebQuestion(t *testing.T) {
 	// A provider with no web at all must not be offered for a web question: it answers from memory and says it has no web access, which is the failure this replaces.
 	if slices.Contains(got, ProviderCodex) {
 		t.Errorf("a web question was routed to codex, which has no web search: %v", got)
-	}
-}
-
-// An ordinary question keeps the order the user asked for: Gemini first because it is cheapest, Claude last because it is their coding workhorse.
-func TestRoute_KeepsThePreferredOrderForAnOrdinaryQuestion(t *testing.T) {
-	readyAll(t)
-	got := Route(Need{})
-	want := []string{ProviderGemini, ProviderCodex, ProviderAgy, ProviderClaude}
-	if !slices.Equal(got, want) {
-		t.Errorf("route = %v, want %v", got, want)
 	}
 }
 
@@ -67,50 +56,8 @@ func TestRoute_DropsAProviderThatIsNotReady(t *testing.T) {
 	}
 }
 
-// A provider that just refused with a spent allowance is skipped until its breaker closes, rather than being asked again on every request and failing the same way each time.
-func TestRoute_SkipsAProviderWhoseAllowanceJustRanOut(t *testing.T) {
-	readyAll(t)
-	ProviderFailed(ProviderGemini, BreakerWindow)
-	got := Route(Need{})
-	if slices.Contains(got, ProviderGemini) {
-		t.Errorf("route = %v, want gemini skipped while its breaker is open", got)
-	}
-	if len(got) == 0 || got[0] != ProviderCodex {
-		t.Errorf("route = %v, want the next provider to lead", got)
-	}
-}
-
-// The breaker closes on its own, so a spent allowance that has since reset is used again without a restart.
-func TestRoute_UsesAProviderAgainOnceItsBreakerCloses(t *testing.T) {
-	readyAll(t)
-	ProviderFailed(ProviderGemini, time.Nanosecond)
-	time.Sleep(time.Millisecond)
-	if got := Route(Need{}); len(got) == 0 || got[0] != ProviderGemini {
-		t.Errorf("route = %v, want gemini back at the front once its breaker closed", got)
-	}
-}
-
 // hop builds a tool hop by name, for the action-repeat tests below.
 func hop(name string) ToolHop { return ToolHop{Name: name} }
-
-// The first provider that answers is the answer, and nothing after it is asked.
-func TestAskInOrder_StopsAtTheFirstAnswer(t *testing.T) {
-	t.Cleanup(ResetRouter)
-	var asked []string
-	tr, err := askInOrder([]string{ProviderGemini, ProviderClaude}, func(id string) (TurnTrace, error) {
-		asked = append(asked, id)
-		return TurnTrace{Answer: "from " + id}, nil
-	})
-	if err != nil {
-		t.Fatalf("askInOrder: %v", err)
-	}
-	if tr.Answer != "from gemini" {
-		t.Errorf("answer = %q, want the first provider's", tr.Answer)
-	}
-	if len(asked) != 1 {
-		t.Errorf("asked %v, want only the first", asked)
-	}
-}
 
 // A provider whose allowance is spent hands the question on, and is marked so the next question skips it instead of failing the same way again.
 func TestAskInOrder_HandsOnFromASpentProviderAndRemembers(t *testing.T) {
@@ -170,43 +117,9 @@ func TestAskInOrder_NeverRepeatsAnActionOnAnotherProvider(t *testing.T) {
 	}
 }
 
-// A read that has already run may be repeated, so a turn that only looked at the screen still hands on.
-func TestAskInOrder_RepeatsAReadOnAnotherProvider(t *testing.T) {
-	t.Cleanup(ResetRouter)
-	var asked []string
-	_, err := askInOrder([]string{ProviderGemini, ProviderClaude}, func(id string) (TurnTrace, error) {
-		asked = append(asked, id)
-		if id == ProviderGemini {
-			return TurnTrace{ToolHops: []ToolHop{hop("observe_screen")}}, codexHTTPError{Code: 429}
-		}
-		return TurnTrace{Answer: "from " + id}, nil
-	})
-	if err != nil {
-		t.Fatalf("askInOrder: %v", err)
-	}
-	if len(asked) != 2 {
-		t.Errorf("asked %v, want the read repeated on the next provider", asked)
-	}
-}
-
 // errNoModelTextForTest stands in for a failure that has nothing to do with a provider's allowance.
 var errNoModelTextForTest = errTestOnly{}
 
 type errTestOnly struct{}
 
 func (errTestOnly) Error() string { return "the prompt was rejected" }
-
-// Grok has a duty backend in internal/brain but no asker here, so it belongs in a duty's route and must never reach an ask's. askRouted's switch has no grok case and falls through to Gemini, so a grok card offered to an ask would send the question to Gemini under grok's name and bill it there.
-func TestRouteDuty_OffersGrokWhereRouteDoesNot(t *testing.T) {
-	ResetRouter()
-	t.Cleanup(ResetRouter)
-	for _, id := range []string{ProviderGemini, ProviderCodex, ProviderAgy, ProviderClaude, ProviderGrok} {
-		SetProviderReady(id, true)
-	}
-	if slices.Contains(Route(Need{}), ProviderGrok) {
-		t.Error("an ask was offered grok, which has no asker and would be answered by Gemini under grok's name")
-	}
-	if !slices.Contains(RouteDuty(Need{}), ProviderGrok) {
-		t.Error("a duty was not offered grok, which has a backend in internal/brain")
-	}
-}

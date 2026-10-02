@@ -10,8 +10,8 @@ import (
 	"june/internal/util"
 )
 
-// audioChecks reports the PipeWire pieces recording and call detection go through: the pulse server and pw-dump. Input: $XDG_RUNTIME_DIR. Output: one check each.
-func audioChecks(runtimeDir string) []doctorCheck {
+// platformChecks reports the PipeWire pieces recording and call detection go through: the pulse server and pw-dump. Input: $XDG_RUNTIME_DIR. Output: one check each.
+func platformChecks(runtimeDir string) []doctorCheck {
 	var out []doctorCheck
 	// Recording goes through PipeWire's pulse server, found the way github.com/jfreymuth/pulse finds it: $PULSE_SERVER when set, the socket under $XDG_RUNTIME_DIR otherwise.
 	if server := os.Getenv("PULSE_SERVER"); server != "" {

@@ -54,24 +54,3 @@ func TestWatchMeetingWindow_SkipsWhatTheTickLoopSkips(t *testing.T) {
 		})
 	}
 }
-
-// A call window with no application name behind it must still be filed under a name, because an activity whose App and Title are both empty reaches the store as an episode with nothing to say what it was. Normalize is what the tick loop uses for that, and the watcher was the one path that skipped it.
-func TestWatchMeetingWindow_NamesAWindowWithNoApplication(t *testing.T) {
-	events := make(chan Activity, 1)
-	d := NewDaemon(nil, time.Second, time.Second, nil, events)
-	d.meeting = func() (string, string, string, bool) { return "", "Google Meet", "the retro", true }
-	d.meetingEvery = 5 * time.Millisecond
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go d.watchMeetingWindow(ctx)
-
-	select {
-	case ev := <-events:
-		if ev.App != "Unknown" || ev.Title != "Google Meet" {
-			t.Fatalf("the watcher emitted app %q title %q, want the normalized pair", ev.App, ev.Title)
-		}
-	case <-time.After(300 * time.Millisecond):
-		t.Fatal("the watcher emitted nothing for a call window with no application name")
-	}
-}

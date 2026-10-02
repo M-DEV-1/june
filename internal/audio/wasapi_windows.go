@@ -5,6 +5,7 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -23,7 +24,7 @@ type wasapiStream struct {
 	stop    chan struct{}
 	done    chan struct{}
 	once    sync.Once
-	// failed is set when the device went away or emit refused a chunk, which ends the stream early.
+	// failed is set when the device went away and none came back, or a capture call or emit failed, which ends the stream early.
 	failed atomic.Bool
 }
 
@@ -33,7 +34,31 @@ const wasapiPoll = 20 * time.Millisecond
 // wasapiBuffer is the shared-mode buffer asked for, one second in 100 ns units: far more than one poll, so a late wake-up loses nothing.
 const wasapiBuffer = 10_000_000
 
+// reopenFor is how long a stream keeps trying to reopen on the default device after losing its own. A Bluetooth headset switching between its music and call profiles leaves no default device for a second or two.
+const reopenFor = 5 * time.Second
+
+// deviceCheck is how often a stream asks Windows which device is the default now, so a headset plugged in mid-call is followed rather than the old device recorded as silence.
+const deviceCheck = time.Second
+
+// audclntDeviceInvalidated is AUDCLNT_E_DEVICE_INVALIDATED, the HRESULT a capture client returns once its device is unplugged, disabled or reconfigured.
+const audclntDeviceInvalidated = 0x88890004
+
+// endpoint is one opened and started device: its id, its audio client, the capture client reading from it, and the converter for its packets.
+type endpoint struct {
+	id   string
+	ac   *wca.IAudioClient
+	acc  *wca.IAudioCaptureClient
+	conv *converter
+}
+
+func (e *endpoint) close() {
+	e.ac.Stop()
+	e.acc.Release()
+	e.ac.Release()
+}
+
 // startWASAPI opens the default endpoint for flow (wca.ECapture for a microphone, wca.ERender to record what that device plays) and role (wca.EConsole or wca.ECommunications), and calls emit on the capture thread with each drain's worth of 16-bit little-endian mono PCM at rate until Close.
+// When the device goes away or another device becomes the default, the stream reopens on the current default device and keeps calling the same emit, with the time it was away written as silence. When no device comes back within reopenFor, the stream ends and reports failed.
 // Input: flow, role, the sample rate wanted, and emit, whose error stops the stream. Output: the running stream once the device has started, or the error that kept it from starting.
 func startWASAPI(flow, role uint32, rate int, emit func([]byte) error) (*wasapiStream, error) {
 	s := &wasapiStream{stop: make(chan struct{}), done: make(chan struct{})}
@@ -51,22 +76,30 @@ func startWASAPI(flow, role uint32, rate int, emit func([]byte) error) (*wasapiS
 			}
 		}
 		defer ole.CoUninitialize()
-		ac, acc, conv, err := openWASAPI(flow, role, rate)
+		var de *wca.IMMDeviceEnumerator
+		if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &de); err != nil {
+			startErr <- fmt.Errorf("create device enumerator: %w", err)
+			return
+		}
+		defer de.Release()
+		ep, err := openWASAPI(de, flow, role, rate)
 		if err != nil {
 			startErr <- err
 			return
 		}
-		defer ac.Release()
-		defer acc.Release()
-		if err := ac.Start(); err != nil {
-			startErr <- fmt.Errorf("start audio client: %w", err)
-			return
-		}
-		defer ac.Stop()
 		s.started = time.Now()
-		startHNS := qpcHNS()
+		clock := packetClock{rate: rate, next: qpcHNS()}
 		startErr <- nil
-		s.read(acc, conv, rate, flow == wca.ERender, startHNS, emit)
+		for {
+			reopen := s.read(de, ep, &clock, flow, role, emit)
+			ep.close()
+			if !reopen {
+				return
+			}
+			if ep = s.reopen(de, flow, role, rate); ep == nil {
+				return
+			}
+		}
 	}()
 	if err := <-startErr; err != nil {
 		<-s.done
@@ -75,19 +108,54 @@ func startWASAPI(flow, role uint32, rate int, emit func([]byte) error) (*wasapiS
 	return s, nil
 }
 
-// openWASAPI activates the default endpoint and initialises it in shared mode. It first asks Windows to convert to 16-bit mono at rate itself; when the device refuses that, it takes the device's own mix format and converts in Go.
-// Input: flow, role and rate as for startWASAPI. Output: the audio client, its capture client and the converter for its packets, or an error naming the step that failed.
-func openWASAPI(flow, role uint32, rate int) (*wca.IAudioClient, *wca.IAudioCaptureClient, *converter, error) {
-	var de *wca.IMMDeviceEnumerator
-	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &de); err != nil {
-		return nil, nil, nil, fmt.Errorf("create device enumerator: %w", err)
+// reopen opens the current default device after the stream lost its own, trying every second for reopenFor. Input: the enumerator, flow, role and rate as for startWASAPI. Output: the new endpoint, or nil when Close was called or no device came back, in which case the stream is marked failed.
+func (s *wasapiStream) reopen(de *wca.IMMDeviceEnumerator, flow, role uint32, rate int) *endpoint {
+	deadline := time.Now().Add(reopenFor)
+	for {
+		ep, err := openWASAPI(de, flow, role, rate)
+		if err == nil {
+			slog.Info("audio stream moved to the current default device", "device", ep.id)
+			return ep
+		}
+		if time.Now().After(deadline) {
+			slog.Warn("audio device went away and no default device came back", "error", err)
+			s.failed.Store(true)
+			return nil
+		}
+		select {
+		case <-s.stop:
+			return nil
+		case <-time.After(time.Second):
+		}
 	}
-	defer de.Release()
+}
+
+// defaultID returns the id of the default device for flow and role, or "" when there is none.
+func defaultID(de *wca.IMMDeviceEnumerator, flow, role uint32) string {
 	var dev *wca.IMMDevice
 	if err := de.GetDefaultAudioEndpoint(flow, role, &dev); err != nil {
-		return nil, nil, nil, fmt.Errorf("no default audio device: %w", err)
+		return ""
 	}
 	defer dev.Release()
+	var id string
+	if err := dev.GetId(&id); err != nil {
+		return ""
+	}
+	return id
+}
+
+// openWASAPI activates the default endpoint, initialises it in shared mode and starts it. It first asks Windows to convert to 16-bit mono at rate itself; when the device refuses that, it takes the device's own mix format and converts in Go.
+// Input: the device enumerator, and flow, role and rate as for startWASAPI. Output: the started endpoint, or an error naming the step that failed.
+func openWASAPI(de *wca.IMMDeviceEnumerator, flow, role uint32, rate int) (*endpoint, error) {
+	var dev *wca.IMMDevice
+	if err := de.GetDefaultAudioEndpoint(flow, role, &dev); err != nil {
+		return nil, fmt.Errorf("no default audio device: %w", err)
+	}
+	defer dev.Release()
+	var id string
+	if err := dev.GetId(&id); err != nil {
+		return nil, fmt.Errorf("read audio device id: %w", err)
+	}
 
 	var flags uint32
 	if flow == wca.ERender {
@@ -98,7 +166,7 @@ func openWASAPI(flow, role uint32, rate int) (*wca.IAudioClient, *wca.IAudioCapt
 	for _, direct := range []bool{true, false} {
 		var ac *wca.IAudioClient
 		if err := dev.Activate(wca.IID_IAudioClient, wca.CLSCTX_ALL, nil, &ac); err != nil {
-			return nil, nil, nil, fmt.Errorf("activate audio client: %w", err)
+			return nil, fmt.Errorf("activate audio client: %w", err)
 		}
 		conv, err := initClient(ac, flags, rate, direct)
 		if err != nil {
@@ -107,16 +175,21 @@ func openWASAPI(flow, role uint32, rate int) (*wca.IAudioClient, *wca.IAudioCapt
 				firstErr = err
 				continue
 			}
-			return nil, nil, nil, fmt.Errorf("initialise audio client: %w (converting in Windows: %v)", err, firstErr)
+			return nil, fmt.Errorf("initialise audio client: %w (converting in Windows: %v)", err, firstErr)
 		}
 		var acc *wca.IAudioCaptureClient
 		if err := ac.GetService(wca.IID_IAudioCaptureClient, &acc); err != nil {
 			ac.Release()
-			return nil, nil, nil, fmt.Errorf("get capture client: %w", err)
+			return nil, fmt.Errorf("get capture client: %w", err)
 		}
-		return ac, acc, conv, nil
+		if err := ac.Start(); err != nil {
+			acc.Release()
+			ac.Release()
+			return nil, fmt.Errorf("start audio client: %w", err)
+		}
+		return &endpoint{id: id, ac: ac, acc: acc, conv: conv}, nil
 	}
-	return nil, nil, nil, firstErr
+	return nil, firstErr
 }
 
 // initClient initialises ac in shared mode. Direct asks for 16-bit mono at rate with Windows' own converter; otherwise the device's mix format is used as is, which must be 32-bit float or 16-bit integer.
@@ -135,7 +208,7 @@ func initClient(ac *wca.IAudioClient, flags uint32, rate int, direct bool) (*con
 		if err := ac.Initialize(wca.AUDCLNT_SHAREMODE_SHARED, flags, wasapiBuffer, 0, want, nil); err != nil {
 			return nil, err
 		}
-		return &converter{block: 2, direct: true}, nil
+		return &converter{block: 2, from: rate, direct: true}, nil
 	}
 	var mix *wca.WAVEFORMATEX
 	if err := ac.GetMixFormat(&mix); err != nil {
@@ -156,28 +229,35 @@ func initClient(ac *wca.IAudioClient, flags uint32, rate int, direct bool) (*con
 	}
 	return &converter{
 		block:    int(mix.NBlockAlign),
+		from:     int(mix.NSamplesPerSec),
 		channels: int(mix.NChannels),
 		float:    float,
 		rs:       resampler{from: int(mix.NSamplesPerSec), to: rate},
 	}, nil
 }
 
-// read drains the capture client every wasapiPoll until Close or a failure. A loopback stream gets silence written into the gaps where nothing was playing, since WASAPI delivers no packets then.
-func (s *wasapiStream) read(acc *wca.IAudioCaptureClient, conv *converter, rate int, loopback bool, startHNS int64, emit func([]byte) error) {
-	var written int64
+// read drains ep every wasapiPoll until Close, a failure, or a reason to reopen. Silence is written into the gaps where the device delivered nothing, which a loopback stream does while nothing plays.
+// Input: the enumerator, the endpoint, the stream's clock, flow and role, and emit. Output: true when the stream should reopen on the current default device, because its own device was invalidated or another device became the default; false when it was closed or failed, in which case failed is set.
+func (s *wasapiStream) read(de *wca.IMMDeviceEnumerator, ep *endpoint, clock *packetClock, flow, role uint32, emit func([]byte) error) bool {
+	checked := time.Now()
 	for {
 		select {
 		case <-s.stop:
-			return
+			return false
 		case <-time.After(wasapiPoll):
+		}
+		if time.Since(checked) >= deviceCheck {
+			checked = time.Now()
+			if id := defaultID(de, flow, role); id != "" && id != ep.id {
+				return true
+			}
 		}
 		var chunk []byte
 		for {
 			// GetBuffer on an empty buffer returns AUDCLNT_S_BUFFER_EMPTY, which go-wca reports as an error, so the packet size is asked first.
 			var frames uint32
-			if err := acc.GetNextPacketSize(&frames); err != nil {
-				s.failed.Store(true)
-				return
+			if err := ep.acc.GetNextPacketSize(&frames); err != nil {
+				return s.lost(err)
 			}
 			if frames == 0 {
 				break
@@ -185,35 +265,40 @@ func (s *wasapiStream) read(acc *wca.IAudioCaptureClient, conv *converter, rate 
 			var data *byte
 			var flags uint32
 			var devPos, qpc uint64
-			if err := acc.GetBuffer(&data, &frames, &flags, &devPos, &qpc); err != nil {
-				s.failed.Store(true)
-				return
+			if err := ep.acc.GetBuffer(&data, &frames, &flags, &devPos, &qpc); err != nil {
+				return s.lost(err)
 			}
-			n := int(frames) * conv.block
+			n := int(frames) * ep.conv.block
 			var pcm []byte
 			if flags&wca.AUDCLNT_BUFFERFLAGS_SILENT != 0 {
 				// A silent packet's data is to be ignored, not read.
-				pcm = conv.convert(make([]byte, n))
+				pcm = ep.conv.convert(make([]byte, n))
 			} else {
-				pcm = conv.convert(unsafe.Slice(data, n))
+				pcm = ep.conv.convert(unsafe.Slice(data, n))
 			}
-			acc.ReleaseBuffer(frames)
-			if loopback {
-				if gap := gapFrames(int64(qpc), startHNS, rate, written); gap > 0 {
-					chunk = append(chunk, make([]byte, gap*2)...)
-					written += gap
-				}
+			ep.acc.ReleaseBuffer(frames)
+			if gap := clock.silenceBefore(int64(qpc), int(frames), ep.conv.from, flags&wca.AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR != 0, qpcHNS()); gap > 0 {
+				chunk = append(chunk, make([]byte, gap*2)...)
 			}
 			chunk = append(chunk, pcm...)
-			written += int64(len(pcm) / 2)
 		}
 		if len(chunk) > 0 {
 			if err := emit(chunk); err != nil {
 				s.failed.Store(true)
-				return
+				return false
 			}
 		}
 	}
+}
+
+// lost decides what a capture error means. Input: the error from the capture client. Output: true to reopen when the device was invalidated; otherwise false, with failed set.
+func (s *wasapiStream) lost(err error) bool {
+	var oe *ole.OleError
+	if errors.As(err, &oe) && uint32(oe.Code()) == audclntDeviceInvalidated {
+		return true
+	}
+	s.failed.Store(true)
+	return false
 }
 
 // Close stops the stream and waits for its thread to finish, so emit is never called once Close has returned.

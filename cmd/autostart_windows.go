@@ -31,6 +31,33 @@ func autostartEnabled() bool {
 	return err == nil
 }
 
+// autostartCurrent reports whether June's Run value is exactly the command setAutostart would write now. It is not after the folder holding june.exe is moved, or when junew.exe has appeared beside it, and reconcileAutostart then rewrites it.
+func autostartCurrent() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, autostartRunKey, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+	defer k.Close()
+	got, _, err := k.GetStringValue(autostartValueName)
+	want, werr := autostartCommand()
+	return err == nil && werr == nil && got == want
+}
+
+// autostartCommand is the Run value that starts the binary running now as the daemon. Output: the command line, or the error from finding this executable.
+func autostartCommand() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	// june.exe is a console program, so Explorer would open a console window for it at login and closing that window would end the daemon. The package ships the same program built without a console as junew.exe beside it (see packaging/release-windows.ps1), and the login entry runs that one when it is there.
+	if gui := filepath.Join(filepath.Dir(exe), "junew.exe"); util.Exists(gui) {
+		exe = gui
+	}
+	// The Run key offers no working-directory setting the way an XDG .desktop entry's Path= does, and June loads .env relative to the working directory, so the entry passes --workdir with the binary's own directory instead.
+	// EscapeArg quotes a path with spaces and doubles a trailing backslash, so a root directory like C:\ does not swallow the closing quote.
+	return windows.EscapeArg(exe) + " --daemon --workdir " + windows.EscapeArg(filepath.Dir(exe)), nil
+}
+
 // setAutostart writes June's value under the per-user Run key when on is true, and deletes it when false.
 // Deleting a value that isn't there is not an error.
 func setAutostart(on bool) error {
@@ -47,15 +74,9 @@ func setAutostart(on bool) error {
 		return nil
 	}
 
-	exe, err := os.Executable()
+	cmd, err := autostartCommand()
 	if err != nil {
 		return err
 	}
-	// june.exe is a console program, so Explorer would open a console window for it at login and closing that window would end the daemon. The package ships the same program built without a console as junew.exe beside it (see packaging/release-windows.ps1), and the login entry runs that one when it is there.
-	if gui := filepath.Join(filepath.Dir(exe), "junew.exe"); util.Exists(gui) {
-		exe = gui
-	}
-	// The Run key offers no working-directory setting the way an XDG .desktop entry's Path= does, and June loads .env relative to the working directory, so the entry passes --workdir with the binary's own directory instead. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)
-	// EscapeArg quotes a path with spaces and doubles a trailing backslash, so a root directory like C:\ does not swallow the closing quote.
-	return k.SetStringValue(autostartValueName, windows.EscapeArg(exe)+" --daemon --workdir "+windows.EscapeArg(filepath.Dir(exe)))
+	return k.SetStringValue(autostartValueName, cmd)
 }

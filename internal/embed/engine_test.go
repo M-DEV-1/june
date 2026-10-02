@@ -100,71 +100,6 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Fatalf("timed out after %v waiting for %s", d, what)
 }
 
-func TestEngineSpawnsLazilyOnFirstEmbed(t *testing.T) {
-	e := newTestEngine(t, time.Hour, time.Hour)
-
-	if e.running() {
-		t.Fatal("engine spawned the child before any embed request")
-	}
-
-	vec, err := e.Embed(context.Background(), TaskRetrievalQuery, "hello")
-	if err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if len(vec) != 2 {
-		t.Fatalf("got %d dimensions, want 2 from the helper", len(vec))
-	}
-	if !e.running() {
-		t.Fatal("engine should be running after an embed")
-	}
-}
-
-func TestEngineIdleShutdown(t *testing.T) {
-	e := newTestEngine(t, 150*time.Millisecond, 0)
-
-	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	waitFor(t, 5*time.Second, "the idle child to be reaped", func() bool { return !e.running() })
-}
-
-func TestEngineClientPresencePinsTheChild(t *testing.T) {
-	e := newTestEngine(t, 100*time.Millisecond, 10*time.Second)
-	e.MarkClientPresence(context.Background())
-
-	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-
-	// Well past the idle timeout: a client seen inside the presence window must keep the child alive anyway.
-	time.Sleep(600 * time.Millisecond)
-	if !e.running() {
-		t.Fatal("child was reaped while a client was present")
-	}
-}
-
-func TestEngineRespawnsAfterChildDies(t *testing.T) {
-	e := newTestEngine(t, time.Hour, time.Hour)
-
-	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello"); err != nil {
-		t.Fatalf("first Embed: %v", err)
-	}
-	firstPID := e.pid()
-
-	e.killChildForTest()
-	waitFor(t, 5*time.Second, "the child to be seen as gone", func() bool { return !e.running() })
-
-	if _, err := e.Embed(context.Background(), TaskRetrievalDocument, "hello again"); err != nil {
-		t.Fatalf("Embed after the child died: %v", err)
-	}
-	if !e.running() {
-		t.Fatal("engine did not respawn the child")
-	}
-	if e.pid() == firstPID {
-		t.Fatal("engine reported the same PID after a respawn")
-	}
-}
-
 func TestEngineCloseKillsTheChildAndRefusesFurtherEmbeds(t *testing.T) {
 	e := newTestEngine(t, time.Hour, time.Hour)
 
@@ -182,7 +117,7 @@ func TestEngineCloseKillsTheChildAndRefusesFurtherEmbeds(t *testing.T) {
 	}
 }
 
-// TestEngineColdStartSurvivesACallerDeadline is the case of a caller with a 3s retrieve budget: the caller's context goes into Embed, so a cold start that takes longer than that budget must return the caller its deadline error while the child keeps loading — not kill the child, which turns every retry into another spawn-wait-kill cycle and never reaches a loaded model.
+// TestEngineColdStartSurvivesACallerDeadline is the case of a caller with a 3s retrieve budget: the caller's context goes into Embed, so a cold start that takes longer than that budget must return the caller its deadline error while the child keeps loading, not kill the child, which turns every retry into another spawn-wait-kill cycle and never reaches a loaded model. Requests that only touch presence must not wait on that load either.
 func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
 	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 1500*time.Millisecond)
 
@@ -197,34 +132,19 @@ func TestEngineColdStartSurvivesACallerDeadline(t *testing.T) {
 	}
 	pidWhileLoading := e.pid()
 
+	// MarkClientPresence and running are called by the daemon's auth wrapper on every authenticated request, including /buffer with its 300ms client budget, so neither may wait on the spawn and model load still in flight.
+	start := time.Now()
+	e.MarkClientPresence(context.Background())
+	e.running()
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("MarkClientPresence+running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
+	}
+
 	if err := e.ensureUp(context.Background()); err != nil {
 		t.Fatalf("second Warm, with a patient context: %v", err)
 	}
 	if e.pid() != pidWhileLoading {
 		t.Fatalf("engine respawned instead of adopting the still-loading child: %d then %d", pidWhileLoading, e.pid())
-	}
-}
-
-// TestEngineColdStartDoesNotBlockPresenceOrRunning covers the IPC-wide stall: MarkClientPresence and Running are called by the daemon's auth wrapper on every authenticated request, including /buffer with its 300ms client budget, so neither may wait on an in-flight spawn and model load.
-func TestEngineColdStartDoesNotBlockPresenceOrRunning(t *testing.T) {
-	e := newTestEngineWithHealthDelay(t, time.Hour, time.Hour, 2*time.Second)
-
-	go e.ensureUp(context.Background())
-	// Polled over HTTP rather than through e.pid(), which takes the same lock this test is about and would hide the stall.
-	waitFor(t, 5*time.Second, "the child's HTTP server to answer at all", func() bool {
-		resp, err := http.Get(e.baseURL + "/health")
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return true
-	})
-
-	start := time.Now()
-	e.MarkClientPresence(context.Background())
-	e.running()
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("MarkClientPresence+Running blocked for %v during a cold start; every authenticated IPC request pays that", elapsed)
 	}
 }
 

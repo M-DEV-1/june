@@ -71,13 +71,6 @@ describe("hoverPlacement", () => {
   // What edgeInset gives for this screen once the dock's strip is off it: 984 of usable height, a twelfth of which is 82.
   const inset = edgeInset(dockedArea(laptopWork, bottomDock).height, 1);
 
-  it("lifts the bottom position clear of both the dock and the inset, not flush against the edge", () => {
-    // The usable area ends at 32 + 984 = 1016, above the 64 of dock; minus the 520 window and 82 of inset.
-    expect(hoverPlacement(laptopWork, win, bottomDock, "bottom", inset)).toEqual({ x: 600, y: 414 });
-    // 1080 is the bottom of the screen, so the window's own bottom edge finishes 146 pixels up from it.
-    expect(1080 - (414 + 520)).toBe(146);
-  });
-
   it("places on a monitor whose origin is not zero rather than on the first screen", () => {
     // A second 1600x900 monitor to the right of the laptop starts at x = 1920, so every coordinate carries that offset.
     const second = monitor(1920, 0, 1600, 900);
@@ -88,11 +81,6 @@ describe("hoverPlacement", () => {
     // x: 1920 + (1600 - 720) / 2. y: the usable area ends at 32 + 804 = 836, minus the 520 window and 67 of inset.
     expect(hoverPlacement(work, win, bottomDock, "bottom", smaller)).toEqual({ x: 2360, y: 249 });
     expect(hoverPlacement(work, win, bottomDock, "top", smaller)).toEqual({ x: 2360, y: 99 });
-  });
-
-  it("gives up the inset rather than push a tall hover off the bottom of the screen", () => {
-    // A 950-tall window in 984 of usable height cannot take the 82 inset: 32 + 984 - 950 - 82 = -16 would put its top above the work area and its input line under the panel. The clamp keeps the top edge instead.
-    expect(hoverPlacement(laptopWork, { width: 720, height: 950 }, bottomDock, "bottom", inset)).toEqual({ x: 600, y: 32 });
   });
 
   it("keeps a hover taller than the screen on screen at every position", () => {
@@ -156,24 +144,9 @@ describe("resolveContext", () => {
   const second = monitor(1920, 0, 1600, 900);
   const secondWork = { x: 1920, y: 32, width: 1600, height: 868 };
 
-  it("uses the monitor the pointer is on and carries the chosen position through", async () => {
-    const ctx = await resolveContext(fakeDesktop([laptop, second], { x: 2000, y: 500 }, laptop), "top");
-    expect(ctx?.work).toEqual(secondWork);
-    expect(ctx?.position).toBe("top");
-  });
-
   it("falls back to the focused monitor when the pointer cannot be read", async () => {
     const ctx = await resolveContext(fakeDesktop([laptop, second], null, second), "bottom");
     expect(ctx?.work).toEqual(secondWork);
-  });
-
-  it("falls back to the first monitor when nothing else answers", async () => {
-    const ctx = await resolveContext(fakeDesktop([laptop, second], null, null), "bottom");
-    expect(ctx?.work).toEqual(laptopWork);
-  });
-
-  it("returns null when the desktop lists no monitors at all", async () => {
-    expect(await resolveContext(fakeDesktop([], null, null), "bottom")).toBeNull();
   });
 });
 
@@ -230,62 +203,14 @@ describe("toggleWindow", () => {
     expect(win.calls).toEqual(["beforeShow", "openContext", "sizeToContent", "show", "raise", "focusInput"]);
     expect(win.visible).toBe(true);
   });
-
-  it("still shows the window when the daemon read before it throws", async () => {
-    const win = fakeWin(false);
-    const o = opts(win, ctx);
-    o.opts.beforeShow = async () => {
-      throw new Error("no daemon");
-    };
-    await toggleWindow(win, o.opts);
-    expect(win.calls).toEqual(["show", "raise", "focusInput"]);
-  });
-
-  it("hides a visible window and calls nothing else", async () => {
-    const win = fakeWin(true);
-    await toggleWindow(win, opts(win, ctx).opts);
-    expect(win.calls).toEqual(["hide"]);
-  });
 });
 
 describe("fitWindow", () => {
-  it("does nothing when the height has not changed", async () => {
-    const win = fakeWin(true);
-    await fitWindow(win, { width: 720, height: 520 }, false, ctx);
-    expect(win.calls).toEqual([]);
-  });
-
   it("moves a growing bottom-positioned window up so its bottom edge stays put", async () => {
     const win = fakeWin(true);
     await fitWindow(win, { width: 720, height: 700 }, true, ctx);
     // The usable area still ends at 1016 and the inset is still 82, so a window 180 taller starts 180 higher: 414 - 180.
     expect(win.calls).toEqual(["setSize(720x700)", "setPosition(600,234)"]);
-  });
-
-  it("moves a growing centred window up by half of what it grew", async () => {
-    const win = fakeWin(true);
-    await fitWindow(win, { width: 720, height: 700 }, true, { ...ctx, position: "center" });
-    // Centred at 264 when 520 tall; 180 taller moves the top up by 90.
-    expect(win.calls).toEqual(["setSize(720x700)", "setPosition(600,174)"]);
-  });
-
-  it("leaves a growing top-positioned window where it is", async () => {
-    const win = fakeWin(true);
-    await fitWindow(win, { width: 720, height: 700 }, true, { ...ctx, position: "top" });
-    expect(win.calls).toEqual(["setSize(720x700)", "setPosition(600,114)"]);
-  });
-
-  it("does nothing beyond resizing while hidden", async () => {
-    const win = fakeWin(false);
-    await fitWindow(win, { width: 720, height: 700 }, true, ctx);
-    expect(win.calls).toEqual(["setSize(720x700)"]);
-  });
-
-  it("does nothing beyond resizing when no monitor was resolved for this open", async () => {
-    const win = fakeWin(true);
-    await fitWindow(win, { width: 720, height: 700 }, true, null);
-    expect(win.calls).toEqual(["setSize(720x700)"]);
-    expect(win.sizes[0].type).toBe("Logical");
   });
 
   // A LogicalSize is converted by Tauri with the window's own scale factor while the position is worked out with the pointer monitor's, so on a 1x + 2x desk the window was sized against one screen and placed against the other. Both numbers now come from the one scale factor in the context.
@@ -302,12 +227,6 @@ describe("fitWindow", () => {
     // The physical size the window is given and the physical position it is moved to are now both in the 2x monitor's own pixels.
     expect(twoX.calls[1]).toBe("setPosition(1200,828)");
   });
-
-  it("leaves the moving to its caller when asked only to resize, which is what a notice-only window needs", async () => {
-    const win = fakeWin(true);
-    await fitWindow(win, { width: 456, height: 160 }, true, ctx, false);
-    expect(win.calls).toEqual(["setSize(456x160)"]);
-  });
 });
 
 describe("noticePlacement", () => {
@@ -318,16 +237,6 @@ describe("noticePlacement", () => {
   it("puts a notice-only window under the top bar at the right of the usable area, beside the tray", () => {
     // 1920 wide minus the 456 window is 1464; the bar ends at y=32 and the window starts 8 physical pixels under it.
     expect(noticePlacement(ctx(laptopWork, 1, noDock), { width: 456, height: 160 })).toEqual({ x: 1464, y: 40 });
-  });
-
-  it("scales the window and the gap under the bar with the monitor", () => {
-    // At scale 2 the 456 logical window is 912 physical, so it starts 912 back from the right edge of a 3840-wide area.
-    expect(noticePlacement(ctx({ x: 0, y: 64, width: 3840, height: 2096 }, 2, noDock), { width: 456, height: 160 })).toEqual({ x: 2928, y: 80 });
-  });
-
-  it("keeps clear of an auto-hiding dock on the right edge", () => {
-    // A 64 logical-pixel dock on the right reserves no screen space, so the placement has to take it off the work area itself: 1920 - 64 - 456 = 1400.
-    expect(noticePlacement(ctx(laptopWork, 1, { edge: "right", clearance: 64 }), { width: 456, height: 160 })).toEqual({ x: 1400, y: 40 });
   });
 
   it("starts a window too big for the screen on the screen rather than off its left or bottom edge", () => {

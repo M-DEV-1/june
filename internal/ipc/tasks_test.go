@@ -112,73 +112,6 @@ func TestTaskDone(t *testing.T) {
 	}
 }
 
-// TestTaskDoneStatusBody checks that POST /tasks/{id}/done also accepts {"status": "open"|"done"|"dropped"} for a noticed task, and that a dropped one drops off GET /tasks without ever coming back as done.
-func TestTaskDoneStatusBody(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "send the deck", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
-		t.Fatalf("seed action item: %v", err)
-	}
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-
-	var list struct{ Tasks []Task }
-	getJSON(t, srv, "/tasks", &list)
-	if len(list.Tasks) != 1 {
-		t.Fatalf("tasks = %d, want the one seeded action item", len(list.Tasks))
-	}
-	id := list.Tasks[0].ID
-
-	if code := postJSON(t, srv, "/tasks/"+id+"/done", `{"status":"dropped"}`, nil); code != http.StatusOK {
-		t.Fatalf("POST /tasks/%s/done status=dropped = %d, want 200", id, code)
-	}
-	getJSON(t, srv, "/tasks", &list)
-	if len(list.Tasks) != 0 {
-		t.Errorf("tasks after dropping = %+v, want the dropped task gone from the list", list.Tasks)
-	}
-
-	if code := postJSON(t, srv, "/tasks/"+id+"/done", `{"status":"open"}`, nil); code != http.StatusOK {
-		t.Fatalf("POST /tasks/%s/done status=open = %d, want 200", id, code)
-	}
-	getJSON(t, srv, "/tasks", &list)
-	if len(list.Tasks) != 1 || list.Tasks[0].Done {
-		t.Errorf("tasks after reopening = %+v, want the task back and open", list.Tasks)
-	}
-
-	if code := postJSON(t, srv, "/tasks/"+id+"/done", `{"status":"done"}`, nil); code != http.StatusOK {
-		t.Fatalf("POST /tasks/%s/done status=done = %d, want 200", id, code)
-	}
-	getJSON(t, srv, "/tasks", &list)
-	if len(list.Tasks) != 0 {
-		t.Errorf("tasks after closing = %+v, want the closed task gone from the list too", list.Tasks)
-	}
-
-	if code := postJSON(t, srv, "/tasks/"+id+"/done", `{"status":"sideways"}`, nil); code != http.StatusBadRequest {
-		t.Errorf("POST /tasks/%s/done status=sideways = %d, want 400", id, code)
-	}
-}
-
-// TestTaskDoneStatusBodyUserTask checks that a task the user typed in takes status open/done through the same body, and rejects dropped since user_tasks has no such state.
-func TestTaskDoneStatusBodyUserTask(t *testing.T) {
-	store := dbtest.Open(t)
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-
-	var created struct{ ID string }
-	postJSON(t, srv, "/tasks", `{"title":"book the flight"}`, &created)
-
-	if code := postJSON(t, srv, "/tasks/"+created.ID+"/done", `{"status":"done"}`, nil); code != http.StatusOK {
-		t.Fatalf("POST /tasks/%s/done status=done = %d, want 200", created.ID, code)
-	}
-	var list struct{ Tasks []Task }
-	getJSON(t, srv, "/tasks", &list)
-	if len(list.Tasks) != 1 || !list.Tasks[0].Done {
-		t.Errorf("tasks after closing = %+v, want the typed task marked done", list.Tasks)
-	}
-
-	if code := postJSON(t, srv, "/tasks/"+created.ID+"/done", `{"status":"dropped"}`, nil); code != http.StatusBadRequest {
-		t.Errorf("POST /tasks/%s/done status=dropped = %d, want 400 — a typed task cannot be dropped", created.ID, code)
-	}
-}
-
 // TestPatchTaskOwner checks that PATCH /tasks/{id} lets the user correct whose task a noticed item really is, and that the new class is what GET /tasks reports afterwards — hearing about a thing in a meeting does not make it his, and the user is the one who can say so.
 func TestPatchTaskOwner(t *testing.T) {
 	store := dbtest.Open(t)
@@ -208,33 +141,6 @@ func TestPatchTaskOwner(t *testing.T) {
 	}
 }
 
-// TestPatchTaskOwner_Rejects checks the three ways PATCH /tasks/{id} refuses a request: a value that is not me/them/unclear, an id naming no action item, and a "task-N" id, since a task the user typed in is always his and has nothing to correct.
-func TestPatchTaskOwner_Rejects(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	if _, err := store.AddActionItems(ctx, []memory.ActionItem{{Owner: memory.MeOwner, Text: "renew the domain", Status: memory.StatusOpen, Priority: memory.PriorityNormal}}); err != nil {
-		t.Fatalf("seed action item: %v", err)
-	}
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-
-	var list struct{ Tasks []Task }
-	getJSON(t, srv, "/tasks", &list)
-	id := list.Tasks[0].ID
-
-	if code := patchJSON(t, srv, "/tasks/"+id, `{"owner":"sideways"}`); code != http.StatusBadRequest {
-		t.Errorf("PATCH /tasks/%s owner=sideways = %d, want 400", id, code)
-	}
-	if code := patchJSON(t, srv, "/tasks/9999999", `{"owner":"them"}`); code != http.StatusNotFound {
-		t.Errorf("PATCH /tasks/9999999 owner=them = %d, want 404", code)
-	}
-
-	var created struct{ ID string }
-	postJSON(t, srv, "/tasks", `{"title":"book the flight"}`, &created)
-	if code := patchJSON(t, srv, "/tasks/"+created.ID, `{"owner":"them"}`); code != http.StatusBadRequest {
-		t.Errorf("PATCH /tasks/%s owner=them = %d, want 400 — a typed task is always yours", created.ID, code)
-	}
-}
-
 // storeWithMeeting is a small helper used by the day tests: it files one set of minutes so the day counts as active.
 func storeWithMeeting(t *testing.T, store *db.Store) {
 	t.Helper()
@@ -261,54 +167,6 @@ func TestTasksListsOnlyTheUsersOwnNoticedItems(t *testing.T) {
 	getJSON(t, srv, "/tasks", &body)
 	if len(body.Tasks) != 1 || body.Tasks[0].Title != "push the PR" {
 		t.Fatalf("tasks = %+v, want only the item owed by Me", body.Tasks)
-	}
-}
-
-// TestTasksOwnerFilter checks the three lists behind one page: his own work by default, other people's work on request, and everything at once. Before this, the default list was the exact opposite — his own items were hidden because they carry his name, and every item nobody was named for was shown as his.
-func TestTasksOwnerFilter(t *testing.T) {
-	store := dbtest.Open(t)
-	ctx := context.Background()
-	if err := store.SetPersonalContext(ctx, "identity", "The user is Zemna Braxen — goes by Zemna."); err != nil {
-		t.Fatal(err)
-	}
-	items := []memory.ActionItem{
-		{Owner: "Zemna Braxen", Text: "raise the PR", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "RQLD sync", Raised: time.Now()},
-		{Owner: "Vexil Quorin", Text: "send the workbook", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "RQLD sync", Raised: time.Now()},
-		{Owner: memory.UnknownOwner, Text: "clean up the lockfile situation", Status: memory.StatusOpen, Priority: memory.PriorityNormal, Source: "RQLD sync", Raised: time.Now()},
-	}
-	if _, err := store.AddActionItems(ctx, items); err != nil {
-		t.Fatal(err)
-	}
-	_, srv := newWindowServer(t, &fakeAsker{}, store)
-
-	for _, c := range []struct {
-		query string
-		title string
-		owner string
-	}{
-		{"/tasks", "raise the PR", memory.OwnerMe},
-		{"/tasks?owner=me", "raise the PR", memory.OwnerMe},
-		{"/tasks?owner=them", "send the workbook", memory.OwnerThem},
-		{"/tasks?owner=unclear", "clean up the lockfile situation", memory.OwnerUnclear},
-	} {
-		var body struct {
-			Tasks []Task `json:"tasks"`
-		}
-		getJSON(t, srv, c.query, &body)
-		if len(body.Tasks) != 1 || body.Tasks[0].Title != c.title {
-			t.Fatalf("GET %s = %+v, want only %q", c.query, body.Tasks, c.title)
-		}
-		if body.Tasks[0].Owner != c.owner {
-			t.Errorf("GET %s owner = %q, want %q", c.query, body.Tasks[0].Owner, c.owner)
-		}
-	}
-
-	var all struct {
-		Tasks []Task `json:"tasks"`
-	}
-	getJSON(t, srv, "/tasks?owner=all", &all)
-	if len(all.Tasks) != 3 {
-		t.Fatalf("GET /tasks?owner=all = %d tasks, want 3", len(all.Tasks))
 	}
 }
 

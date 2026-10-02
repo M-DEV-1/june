@@ -370,7 +370,9 @@ func NotifyAt(icon, title, body, place, id string) {
 	}
 	// ponytail: Windows gets a text-only toast with no "Read in full", so a long body is cut off after a few lines; open the text in the June window if that matters.
 	if runtime.GOOS == "windows" {
-		toast(title, body)
+		if !notifyThroughBus(n) {
+			toast(title, body)
+		}
 		return
 	}
 	if len([]rune(body)) <= longBodyRunes {

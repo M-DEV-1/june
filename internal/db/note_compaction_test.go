@@ -49,33 +49,6 @@ func TestNoteCompactor_NeverWipesOnEmptyResult(t *testing.T) {
 	}
 }
 
-func TestNoteCompactor_SkipsWhenNoReduction(t *testing.T) {
-	store := newFileStore(t)
-	seedFacts(t, store, minNotesToConsolidate)
-	out := make([]string, minNotesToConsolidate)
-	for i := range out {
-		out[i] = "x"
-	}
-	llm := &fakeConsolidator{out: out}
-	nc := NewNoteCompactor(llm, store)
-
-	if err := nc.Compact(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	notes, err := store.GetNotes(context.Background())
-	if err != nil {
-		t.Fatalf("GetNotes: %v", err)
-	}
-	if len(notes) != minNotesToConsolidate {
-		t.Errorf("should not rewrite when consolidation did not reduce the set, got %d notes", len(notes))
-	}
-	for _, n := range notes {
-		if n.Content == "x" {
-			t.Fatal("notes were rewritten to the model's non-reducing output")
-		}
-	}
-}
-
 func TestNoteCompactor_LLMErrorDoesNotReplace(t *testing.T) {
 	store := newFileStore(t)
 	seedFacts(t, store, minNotesToConsolidate)

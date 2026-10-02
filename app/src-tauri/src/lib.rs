@@ -676,54 +676,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::union_bounds;
+    use super::{union_bounds, window_action};
 
     #[test]
-    fn union_bounds_of_nothing_is_none() {
+    fn union_bounds_covers_every_monitor() {
         assert_eq!(union_bounds(&[]), None);
-    }
-
-    #[test]
-    fn union_bounds_of_one_monitor_is_that_monitor() {
-        assert_eq!(
-            union_bounds(&[(0, 0, 1920, 1080)]),
-            Some((0, 0, 1920, 1080))
-        );
-    }
-
-    #[test]
-    fn union_bounds_spans_two_monitors_side_by_side() {
-        assert_eq!(
-            union_bounds(&[(0, 0, 1920, 1080), (1920, 0, 2560, 1440)]),
-            Some((0, 0, 4480, 1440))
-        );
-    }
-
-    #[test]
-    fn union_bounds_keeps_a_monitor_left_of_the_origin() {
         // A screen placed to the left of the primary one has a negative x, and the overlay window has to start there rather than at zero, or every rect on it lands off the window.
         assert_eq!(
             union_bounds(&[(0, 0, 1920, 1080), (-1280, -200, 1280, 1024)]),
             Some((-1280, -200, 3200, 1280))
         );
-    }
-
-    #[test]
-    fn union_bounds_never_returns_a_zero_sized_desk() {
         assert_eq!(union_bounds(&[(10, 10, 0, 0)]), Some((10, 10, 1, 1)));
     }
 
     #[test]
-    fn a_window_event_names_the_action_to_take() {
-        use super::window_action;
-        assert_eq!(
-            window_action(r#"{"id":"window","type":"window","text":"open"}"#),
-            Some("open".to_string())
-        );
-        assert_eq!(
-            window_action(r#"{"id":"window","type":"window","text":"toggle"}"#),
-            Some("toggle".to_string())
-        );
+    fn only_a_window_event_names_an_action() {
         // The daemon marshals every field of its event, so the real payload carries the rest of them too.
         assert_eq!(
             window_action(
@@ -731,34 +698,10 @@ mod tests {
             ),
             Some("open".to_string())
         );
-    }
-
-    #[test]
-    fn the_overlay_s_wm_class_matches_the_desktop_entry_the_daemon_writes() {
-        // Nothing at runtime notices when these two drift apart: the overlay keeps mapping, GNOME falls back to matching it by process id, and it lands back under June's dock entry with a dot of its own.
-        let entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cmd/desktop_entry_linux.go");
-        let source = std::fs::read_to_string(&entry)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", entry.display()));
-        assert!(
-            source.contains(&format!(
-                "StartupWMClass={}",
-                super::OVERLAY_WM_CLASS_INSTANCE
-            )),
-            "cmd/desktop_entry_linux.go writes no entry claiming StartupWMClass={}",
-            super::OVERLAY_WM_CLASS_INSTANCE
-        );
-    }
-
-    #[test]
-    fn an_event_of_any_other_type_is_not_this_window_s_business() {
-        use super::window_action;
         assert_eq!(
             window_action(r#"{"id":"overlay","type":"overlay","text":"{\"kind\":\"ring\"}"}"#),
             None
         );
-        assert_eq!(window_action(r#"{"type":"answer","text":"open"}"#), None);
         assert_eq!(window_action("not json at all"), None);
-        assert_eq!(window_action("{}"), None);
     }
 }

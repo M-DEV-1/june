@@ -73,14 +73,34 @@ func pcm16(samples []float64) []byte {
 	return buf
 }
 
-// gapFrames returns how many frames of silence belong before a packet so a stream that stops delivering while nothing plays (WASAPI loopback) stays on the wall clock.
-// Input: the packet's timestamp and the stream's start, both in 100 ns units, the stream's rate, and the frames written so far. Output: the frames of silence to write first, 0 when the gap is under 50 ms of jitter or the stream is ahead.
-func gapFrames(posHNS, startHNS int64, rate int, written int64) int64 {
-	gap := (posHNS-startHNS)*int64(rate)/10_000_000 - written
-	if gap < int64(rate)/20 {
+// hns is one second in the 100 ns units WASAPI and the performance counter count in.
+const hns = 10_000_000
+
+// clockJitter is how far a packet may land from where the previous one ended, 50 ms, before the difference counts as a gap or as a bad stamp.
+const clockJitter = hns / 20
+
+// packetClock keeps a WASAPI stream on the wall clock. WASAPI stamps each packet with the performance-counter time of its first frame and delivers nothing while a loopback device plays nothing or while a lost device is being reopened, so the silence a stream skipped is written back in before the packet that ends it.
+// Gaps are measured from where the previous packet ended, not from the start of the stream: a device clock runs about 100 ppm off the performance counter, and measured from the start that drift passes the 50 ms jitter allowance every few minutes and puts silence into the middle of speech.
+type packetClock struct {
+	rate int   // the output rate, in frames per second
+	next int64 // where the next packet should start, in 100 ns performance-counter units
+}
+
+// silenceBefore returns how many output frames of silence belong before one packet, and moves the clock past that packet.
+// Input: the packet's performance-counter stamp, its length in source frames at srcRate, whether the device flagged the stamp as invalid (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR), and the performance counter now; times are in 100 ns units. Output: the frames of silence to write first; 0 when the packet follows on within clockJitter, and 0 for a stamp that is flagged, later than now, or earlier than the previous packet's end by more than clockJitter, in which case the packet is taken to follow on directly.
+// A trusted stamp is never later than now, so the silence written is never longer than the time that really passed.
+func (c *packetClock) silenceBefore(stamp int64, frames, srcRate int, stampBad bool, now int64) int64 {
+	length := int64(frames) * hns / int64(srcRate)
+	if stampBad || stamp > now || stamp < c.next-clockJitter {
+		c.next += length
 		return 0
 	}
-	return gap
+	gap := stamp - c.next
+	c.next = stamp + length
+	if gap < clockJitter {
+		return 0
+	}
+	return gap * int64(c.rate) / hns
 }
 
 // level is the loudness of a chunk of 16-bit little-endian PCM for the waveform: RMS scaled by three, since speech RMS sits about three times below its peak, and capped at 1.
@@ -101,6 +121,8 @@ func level(pcm []byte) float64 {
 type converter struct {
 	// block is the size of one source frame in bytes.
 	block int
+	// from is the rate of the frames the device hands over.
+	from int
 	// direct is set when the device already delivers 16-bit mono at the wanted rate, and the packet only needs copying out of device memory.
 	direct   bool
 	channels int

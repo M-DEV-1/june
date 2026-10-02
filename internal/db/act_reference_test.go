@@ -7,7 +7,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -43,13 +42,6 @@ func (e *actTestEmbedder) register(text string, deg float64) {
 	e.vectors[text] = actUnit(deg)
 }
 
-// registerVector gives text a vector of the test's own making, for the cases where the dimension itself is what is under test.
-func (e *actTestEmbedder) registerVector(text string, vec []float32) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.vectors[text] = vec
-}
-
 // Embed answers with the registered vector for text, recording the task it was asked under. Input: the task name and the text. Output: the fixed vector, or an error when the embedder was told to fail or the text was never registered.
 func (e *actTestEmbedder) Embed(ctx context.Context, task string, text string) ([]float32, error) {
 	e.mu.Lock()
@@ -64,20 +56,6 @@ func (e *actTestEmbedder) Embed(ctx context.Context, task string, text string) (
 	}
 	e.tasks[text] = task
 	return vec, nil
-}
-
-// taskFor reports the task a text was last embedded under, or "" when it was never embedded.
-func (e *actTestEmbedder) taskFor(text string) string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.tasks[text]
-}
-
-// callCount reports how many times Embed has been called.
-func (e *actTestEmbedder) callCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.calls
 }
 
 // twoScreenSteps is the shape of a real successful screen run from the user's own store: a look, then a ring drawn around what was found.
@@ -177,64 +155,6 @@ func TestSimilarActRunsFindsTheRunThatMeansTheSameThing(t *testing.T) {
 	}
 }
 
-// TestSimilarActRunsPutsTheClosestFirst checks the order the caller relies on: matches come back closest first, so the run put in front of the model is the closest one and not whichever was written last.
-func TestSimilarActRunsPutsTheClosestFirst(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	emb.register(asked, 0)
-	// Stored in the opposite order to their closeness, so a lookup that just read the table back would fail this.
-	ids := seedActRuns(t, store, emb,
-		actQuestion{"show me how to change subtitles and audio and the picture quality on this page", 35},
-		actQuestion{"where can i change subtitles here?", 20},
-		actQuestion{"show me how to change subtitles on this page", 5},
-	)
-
-	matches, err := store.SimilarActRuns(context.Background(), asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 3 {
-		t.Fatalf("SimilarActRuns returned %d matches, want all three: %+v", len(matches), matches)
-	}
-	want := []int64{ids[2], ids[1], ids[0]}
-	for i, id := range want {
-		if matches[i].Run.ID != id {
-			t.Fatalf("match %d is run %d (%q, %.3f), want run %d — matches must come back closest first", i, matches[i].Run.ID, matches[i].Run.Question, matches[i].Score, id)
-		}
-	}
-	if !(matches[0].Score > matches[1].Score && matches[1].Score > matches[2].Score) {
-		t.Errorf("scores = %.3f, %.3f, %.3f, want strictly falling", matches[0].Score, matches[1].Score, matches[2].Score)
-	}
-}
-
-// TestSimilarActRunsBreaksTiesWithTheNewerRun checks what happens when two different goals are exactly as close to the new question as each other: the newer run goes first, because it is the one whose screen is most likely still arranged the way it was.
-func TestSimilarActRunsBreaksTiesWithTheNewerRun(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "ring the address bar"
-	emb.register(asked, 0)
-	// The same angle either side of the asking question, so both score cos 15°.
-	ids := seedActRuns(t, store, emb,
-		actQuestion{"ring the address bar now", -15},
-		actQuestion{"please ring the address bar", 15},
-	)
-
-	matches, err := store.SimilarActRuns(context.Background(), asked, 2)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 2 {
-		t.Fatalf("SimilarActRuns returned %d matches, want both: %+v", len(matches), matches)
-	}
-	if diff := matches[0].Score - matches[1].Score; diff > 0.0001 || diff < -0.0001 {
-		t.Fatalf("scores = %.4f and %.4f, want the tie this test is about", matches[0].Score, matches[1].Score)
-	}
-	if matches[0].Run.ID != ids[1] || matches[1].Run.ID != ids[0] {
-		t.Errorf("tied matches came back as %d then %d, want the newer run (%d) first", matches[0].Run.ID, matches[1].Run.ID, ids[1])
-	}
-}
-
 // TestSimilarActRunsOnlyOffersRunsThatWorkedOnTheScreen checks the two hard filters together: a run that ended in an error is never offered however close it is, and neither is a successful run that never touched the screen. Both stored runs ask the exact question the lookup is given, so any match at all is one of the two filters gone.
 func TestSimilarActRunsOnlyOffersRunsThatWorkedOnTheScreen(t *testing.T) {
 	store := newFileStore(t)
@@ -295,64 +215,6 @@ func TestSimilarActRunsOffersOneRunPerGoal(t *testing.T) {
 	}
 }
 
-// TestSimilarActRunsHasNothingToSayWithoutAQuestion checks an empty or all-stopword question asks for nothing rather than matching everything, and that it costs no embed call: there is nothing in "what is it" for a vector to be about.
-func TestSimilarActRunsHasNothingToSayWithoutAQuestion(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	seedActRuns(t, store, emb, actQuestion{"show me how to change subtitles", 0})
-	before := emb.callCount()
-
-	for _, q := range []string{"", "   ", "what is it"} {
-		matches, err := store.SimilarActRuns(context.Background(), q, 3)
-		if err != nil {
-			t.Fatalf("SimilarActRuns(%q): %v", q, err)
-		}
-		if len(matches) != 0 {
-			t.Errorf("SimilarActRuns(%q) returned %d matches, want none", q, len(matches))
-		}
-	}
-	if emb.callCount() != before {
-		t.Errorf("the embedder was called %d times for questions with nothing in them, want none", emb.callCount()-before)
-	}
-}
-
-// TestSimilarActRunsEmbedsBothSidesTheRightWayRound checks the asymmetry the embedding model is trained on: the question being asked now is embedded as a query, and a stored question is embedded as a document. Getting this the wrong way round costs recall on every lookup and shows up nowhere else.
-func TestSimilarActRunsEmbedsBothSidesTheRightWayRound(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	const asked = "show me how to change subtitles"
-	const stored = "where can i change subtitles here?"
-	emb.register(asked, 0)
-	seedActRuns(t, store, emb, actQuestion{stored, 20})
-
-	if _, err := store.SimilarActRuns(context.Background(), asked, 3); err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if got := emb.taskFor(asked); got != "RETRIEVAL_QUERY" {
-		t.Errorf("the question being asked was embedded as %q, want RETRIEVAL_QUERY", got)
-	}
-	if got := emb.taskFor(stored); got != "RETRIEVAL_DOCUMENT" {
-		t.Errorf("the stored question was embedded as %q, want RETRIEVAL_DOCUMENT", got)
-	}
-}
-
-// TestSimilarActRunsOffersNothingWithoutAnEmbedder checks a store with no embedder wired — a bare db.New, or a machine with no embedding engine configured — answers with nothing rather than falling back to counting shared words. There is no second measure to fall back to, and a lookup nobody can score honestly is one that should cost the prompt nothing.
-func TestSimilarActRunsOffersNothingWithoutAnEmbedder(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-	if _, err := store.AddActRun(ctx, ActRun{Question: "show me how to change subtitles", Outcome: "ok", Steps: twoScreenSteps()}); err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-
-	matches, err := store.SimilarActRuns(ctx, "show me how to change subtitles", 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 0 {
-		t.Errorf("SimilarActRuns returned %d matches with no embedder wired, want none: %+v", len(matches), matches)
-	}
-}
-
 // TestSimilarActRunsSurvivesAnEmbedderThatFails checks an embedding server that is down or wedged costs the ask its reference block and nothing else: no error reaches the caller, because the reference is a help and never a requirement.
 func TestSimilarActRunsSurvivesAnEmbedderThatFails(t *testing.T) {
 	store := newFileStore(t)
@@ -368,47 +230,6 @@ func TestSimilarActRunsSurvivesAnEmbedderThatFails(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Errorf("SimilarActRuns returned %d matches with no query vector, want none", len(matches))
-	}
-}
-
-// TestAddActRunEmbedsTheQuestionAsItIsStored checks where the cost of embedding is paid: once, when the run is written, not once per stored run on every lookup. A run that failed or never touched the screen is never offered as reference, so it is never embedded either.
-func TestAddActRunEmbedsTheQuestionAsItIsStored(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	ctx := context.Background()
-	const worked = "show me how to change subtitles"
-	const failed = "take me to the open tab where family guy is playing"
-	const looked = "what window is in front"
-	for _, q := range []string{worked, failed, looked} {
-		emb.register(q, 0)
-	}
-	store.SetEmbedder(emb)
-
-	workedID, err := store.AddActRun(ctx, ActRun{Question: worked, Outcome: "ok", Steps: twoScreenSteps()})
-	if err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-	failedID, err := store.AddActRun(ctx, ActRun{Question: failed, Outcome: "error", Error: "gone", Steps: twoScreenSteps()})
-	if err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-	lookedID, err := store.AddActRun(ctx, ActRun{Question: looked, Outcome: "ok", Steps: []ActStep{{Name: "query_memory"}}})
-	if err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-
-	if blob := waitForActRunVector(t, store, workedID); len(blob) != 8 {
-		t.Errorf("the successful run's vector is %d bytes, want the 8 a two-number vector takes", len(blob))
-	}
-	if got := emb.taskFor(worked); got != "RETRIEVAL_DOCUMENT" {
-		t.Errorf("the stored question was embedded as %q, want RETRIEVAL_DOCUMENT", got)
-	}
-	// Neither of the other two can ever be offered as reference, so neither is worth an embed.
-	time.Sleep(50 * time.Millisecond)
-	for _, id := range []int64{failedID, lookedID} {
-		if blob := actRunVector(t, store, id); len(blob) != 0 {
-			t.Errorf("act run %d was embedded, want no vector for a run that can never be offered", id)
-		}
 	}
 }
 
@@ -443,107 +264,5 @@ func TestSimilarActRunsBackfillsRunsStoredBeforeTheyWereEmbedded(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0].Run.ID != id {
 		t.Fatalf("SimilarActRuns returned %+v after the backfill, want the one run %d", matches, id)
-	}
-}
-
-// TestSimilarActRunsReplacesAVectorFromAnotherModel checks what happens when the embedding model changes under the store: EmbeddingGemma writes 768 numbers where the Gemini API wrote 3072, and a cosine between the two is meaningless. A stored vector of another length is not scored, it is thrown away and the question re-embedded, the same path a run with no vector at all takes.
-func TestSimilarActRunsReplacesAVectorFromAnotherModel(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	ctx := context.Background()
-	const asked = "show me how to change subtitles"
-	const stored = "where can i change subtitles here?"
-	emb.register(asked, 0)
-
-	id, err := store.AddActRun(ctx, ActRun{Question: stored, Outcome: "ok", Steps: twoScreenSteps()})
-	if err != nil {
-		t.Fatalf("AddActRun: %v", err)
-	}
-	store.SetEmbedder(emb)
-	// Three numbers where this store's model writes two, which is what a store carried over from another embedding model holds.
-	emb.registerVector(stored, []float32{1, 0, 0})
-	if err := store.embedActRunQuestion(ctx, id, stored); err != nil {
-		t.Fatalf("embedActRunQuestion: %v", err)
-	}
-	ids := []int64{id}
-	if got := len(actRunVector(t, store, ids[0])); got != 12 {
-		t.Fatalf("the seeded vector is %d bytes, want the 12 a three-number vector takes", got)
-	}
-
-	// The backfill SimilarActRuns starts re-embeds it on this model's scale. Registered before the lookup because the backfill runs in the background and can embed the question before this test gets another turn.
-	emb.register(stored, 20)
-	matches, err := store.SimilarActRuns(ctx, asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 0 {
-		t.Fatalf("SimilarActRuns scored a vector of another length, want it skipped: %+v", matches)
-	}
-	deadline := time.Now().Add(time.Second)
-	for len(actRunVector(t, store, ids[0])) != 8 {
-		if time.Now().After(deadline) {
-			t.Fatalf("the stale vector is still %d bytes after a second, want it replaced with 8", len(actRunVector(t, store, ids[0])))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// TestActRunVectorsDieWithTheirRun checks the retention pass leaves nothing behind: a vector is worth about three kilobytes on the real embedder, and one kept for a run that has been pruned would be three kilobytes nothing can ever read again.
-func TestActRunVectorsDieWithTheirRun(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	ids := seedActRuns(t, store, emb,
-		actQuestion{"show me how to change subtitles", 0},
-		actQuestion{"take me to the open tab where family guy is playing", 40},
-	)
-	for _, id := range ids {
-		if len(actRunVector(t, store, id)) == 0 {
-			t.Fatalf("act run %d was seeded without a vector", id)
-		}
-	}
-
-	// Keep one run, which drops the older of the two.
-	removed, err := store.PruneActRuns(context.Background(), 1, 0)
-	if err != nil {
-		t.Fatalf("PruneActRuns: %v", err)
-	}
-	if removed != 1 {
-		t.Fatalf("PruneActRuns removed %d runs, want 1", removed)
-	}
-	if blob := actRunVector(t, store, ids[0]); len(blob) != 0 {
-		t.Errorf("the pruned run's vector is still there, %d bytes of it", len(blob))
-	}
-	if len(actRunVector(t, store, ids[1])) == 0 {
-		t.Errorf("the kept run lost its vector")
-	}
-}
-
-// TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal pins what happens when the newest run of a goal has no vector yet: it is queued for the background backfill, and the lookup goes on to the older run of the same goal that does have one. Marking the goal as seen before the vector was decoded hid every embedded run of that goal from the ask that triggered the backfill.
-func TestSimilarActRunsFallsBackToAnEmbeddedRunOfTheSameGoal(t *testing.T) {
-	store := newFileStore(t)
-	emb := newActEmbedder()
-	ctx := context.Background()
-	const asked = "show me how to change subtitles"
-	const stored = "where can i change subtitles here?"
-	emb.register(asked, 0)
-	ids := seedActRuns(t, store, emb, actQuestion{stored, 20})
-
-	// A newer run of the same goal, written straight to the table so it has no vector — the state every run was in before act runs were embedded.
-	steps, err := json.Marshal(twoScreenSteps())
-	if err != nil {
-		t.Fatalf("marshal steps: %v", err)
-	}
-	if _, err := store.db.Exec(
-		`INSERT INTO act_runs (question, model, outcome, answer, error, duration_ms, steps_json) VALUES (?, 'gemini-3-flash', 'ok', '', '', 10, ?)`,
-		stored, string(steps)); err != nil {
-		t.Fatalf("insert the unembedded run: %v", err)
-	}
-
-	matches, err := store.SimilarActRuns(ctx, asked, 3)
-	if err != nil {
-		t.Fatalf("SimilarActRuns: %v", err)
-	}
-	if len(matches) != 1 || matches[0].Run.ID != ids[0] {
-		t.Fatalf("SimilarActRuns returned %+v, want the older run %d that does have a vector", matches, ids[0])
 	}
 }

@@ -434,7 +434,7 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 		instruction = screenTaskInstruction()
 	}
 
-	recallCtx, cancelRecall := context.WithTimeout(ctx, textSendLoopRetrieveTimeout)
+	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)
 	injected, err := a.brain.RetrieveRelevant(recallCtx, question, 2)
 	cancelRecall()
 	if err != nil {

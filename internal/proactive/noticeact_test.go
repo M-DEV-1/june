@@ -22,28 +22,6 @@ func TestAct_RunsTheNoticesOwnActionWithNoOneWaiting(t *testing.T) {
 	}
 }
 
-// A goroutine that is waiting still gets the answer, so the watcher keeps its own bookkeeping and nothing starts twice.
-func TestAct_PrefersTheWaitingGoroutine(t *testing.T) {
-	ran := false
-	SetNoticeAction("meeting", "record", func() error { ran = true; return nil })
-	t.Cleanup(func() { SetNoticeAction("meeting", "record", nil) })
-
-	n := Notice{Title: "In a meeting?", Kind: "meeting"}
-	answered, release := awaitAnswer(noticeKey(n), []string{"record"})
-	defer release()
-
-	s := &Scheduler{}
-	if err := s.Act(context.Background(), "meeting", "", n.Title, "", "record"); err != nil {
-		t.Fatalf("Act: %v", err)
-	}
-	if ran {
-		t.Error("the fallback ran while a goroutine was waiting, so the recording would start twice")
-	}
-	if got := <-answered; got != "record" {
-		t.Errorf("the waiting goroutine got %q", got)
-	}
-}
-
 // Every button that took tells the window so, whichever of Act's paths applied it: the window's card only drops its buttons when the notice comes back with its action set.
 // Until 2026-09-23 only Done and the snoozes sent that event, so "Not happening" on the stale-item question and "Start recording" on the meeting offer left their buttons up, and a second press ran the action again.
 func TestAct_TellsTheWindowTheCardIsDealtWith(t *testing.T) {

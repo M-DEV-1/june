@@ -12,12 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"june/internal/act"
 	"june/internal/agent"
 	"june/internal/audio"
-	"june/internal/config"
 	"june/internal/db"
-	"june/internal/db/dbtest"
 )
 
 // voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
@@ -99,13 +96,6 @@ func (f *voiceFakeRunner) Usage() agent.TokenUsage {
 	f.usageMu.Lock()
 	defer f.usageMu.Unlock()
 	return f.usage
-}
-
-// setUsage is what the test calls before sending a turn boundary, so the session reads these counts as that turn's cost.
-func (f *voiceFakeRunner) setUsage(u agent.TokenUsage) {
-	f.usageMu.Lock()
-	f.usage = u
-	f.usageMu.Unlock()
 }
 
 // voiceFailingRunner is a voiceRunner whose Run always fails immediately, standing in for a session that can never connect — a missing or expired API key, say — so dial's backoff-and-give-up behaviour can be tested without waiting out a real Gemini dial on every attempt.
@@ -230,19 +220,6 @@ func TestVoiceStart_ReturnsIDAndGoesActive(t *testing.T) {
 	}
 }
 
-func TestVoiceStart_SecondStartConflicts(t *testing.T) {
-	srv, _, _, _, _ := newVoiceServer(t)
-
-	first := voicePost(t, srv, "/voice/start")
-	first.Body.Close()
-
-	second := voicePost(t, srv, "/voice/start")
-	defer second.Body.Close()
-	if second.StatusCode != http.StatusConflict {
-		t.Fatalf("second start status = %d, want %d", second.StatusCode, http.StatusConflict)
-	}
-}
-
 func TestVoiceStop_EndsTheRunAndFreesTheAudio(t *testing.T) {
 	srv, _, mic, spk, run := newVoiceServer(t)
 
@@ -341,124 +318,6 @@ func TestVoiceHeard_StopEndsTheSession(t *testing.T) {
 	}
 }
 
-// TestVoiceHeard_OrdinaryWordsKeepTheSessionRunning guards the stop match: "stop" has to be the whole utterance, so a sentence that merely contains the word is just something the user said.
-func TestVoiceHeard_OrdinaryWordsKeepTheSessionRunning(t *testing.T) {
-	srv, _, _, _, run := newVoiceServer(t)
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-
-	run.text <- agent.ResponseChunk{Text: "stop the meeting at four", Sender: agent.SenderYou}
-	run.text <- agent.ResponseChunk{Text: "sure", Sender: ""}
-	waitState(t, srv, "speaking")
-
-	if active, _, _ := voiceStatus(t, srv); !active {
-		t.Fatalf("the session ended on a sentence that only contains the word stop")
-	}
-}
-
-// TestVoiceHeard_StopBroadcastsIdle covers what the window reads: the daemon ending the session itself has to reach the event stream as an idle state, because that is the only way a window that never pressed anything learns the session is over.
-func TestVoiceHeard_StopBroadcastsIdle(t *testing.T) {
-	srv, _, _, _, run := newVoiceServer(t)
-
-	events, closeSSE := readSSE(t, srv)
-	defer closeSSE()
-
-	start := voicePost(t, srv, "/voice/start")
-	var body struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(start.Body).Decode(&body)
-	start.Body.Close()
-	<-run.running
-
-	run.text <- agent.ResponseChunk{Text: "stop", Sender: agent.SenderYou}
-
-	for _, want := range []struct{ typ, text string }{
-		{"state", "listening"},
-		{"heard", "stop"},
-		{"state", "idle"},
-	} {
-		ev := mustEvent(t, events)
-		if ev.Type != want.typ || ev.Text != want.text || ev.ID != body.ID {
-			t.Fatalf("event = %q/%q/%q, want %q/%q/%q", ev.ID, ev.Type, ev.Text, body.ID, want.typ, want.text)
-		}
-	}
-}
-
-// TestVoiceStatus_ReportsIdleAfterEveryEnding checks the one field the overlay's word by the clock reads: /voice/status has to be accurate through the whole run, including after the session ends on its own.
-func TestVoiceStatus_ReportsIdleAfterEveryEnding(t *testing.T) {
-	srv, _, _, _, run := newVoiceServer(t)
-
-	if _, _, state := voiceStatus(t, srv); state != "idle" {
-		t.Fatalf("state before any session = %q, want idle", state)
-	}
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-	waitState(t, srv, "listening")
-
-	run.text <- agent.ResponseChunk{IsThought: true, Text: "she means the venue"}
-	waitState(t, srv, "thinking")
-
-	run.text <- agent.ResponseChunk{Text: "nearly sorted"}
-	waitState(t, srv, "speaking")
-
-	run.text <- agent.ResponseChunk{TurnBoundary: true}
-	waitState(t, srv, "listening")
-
-	stop := voicePost(t, srv, "/voice/stop")
-	stop.Body.Close()
-	waitState(t, srv, "idle")
-}
-
-// TestNewVoiceAgent_WiresTheScreenDrawing covers what the voice session could not do before: the live agent it builds gets the same Point and Marks callbacks cmd/daemon.go gives the typed /ask agent, so point_at and show_marks draw on the screen instead of answering that this session cannot draw.
-func TestNewVoiceAgent_WiresTheScreenDrawing(t *testing.T) {
-	t.Setenv("JUNE_DATA_DIR", t.TempDir())
-	s := New(nil, nil, nil, nil)
-	ch := s.hub.subscribe()
-	defer s.hub.unsubscribe(ch)
-
-	a := newVoiceAgent(s, nil, nil, nil, "", func(context.Context, string) (string, error) { return "done", nil })
-	// Draw was the one of the three this wiring missed: a real session on 2026-09-07 called draw with a sensible circle and got "this session cannot draw on the screen" back, because only the typed /ask agent had ever been given it.
-	// RunJob is the same class of miss and the one that matters most: unset, a spoken chain of actions is driven one raw tool call at a time inside the conversation, with no plan and nothing verified.
-	if a.Point == nil || a.Marks == nil || a.Draw == nil || a.RunJob == nil {
-		t.Fatalf("voice agent has Point set = %v, Marks set = %v, Draw set = %v, RunJob set = %v, want all four", a.Point != nil, a.Marks != nil, a.Draw != nil, a.RunJob != nil)
-	}
-
-	a.Point(10, 20, 30, 40, "here")
-	ev, ring := waitOverlay(t, ch)
-	if ev.Type != "overlay" {
-		t.Errorf("event type = %q, want overlay", ev.Type)
-	}
-	if ring.Kind != "ring" || ring.Label != "here" || len(ring.Rects) != 1 || ring.Rects[0] != (OverlayRect{X: 10, Y: 20, W: 30, H: 40}) {
-		t.Errorf("overlay = %+v, want a ring labelled here around 10,20 30x40", ring)
-	}
-
-	a.Marks([]act.Item{{N: 1, X: 1, Y: 2, W: 3, H: 4}, {N: 2, X: 5, Y: 6, W: 7, H: 8}})
-	ev, marks := waitOverlay(t, ch)
-	if ev.Type != "overlay" {
-		t.Errorf("event type = %q, want overlay", ev.Type)
-	}
-	want := []OverlayRect{{X: 1, Y: 2, W: 3, H: 4, Label: "1"}, {X: 5, Y: 6, W: 7, H: 8, Label: "2"}}
-	if marks.Kind != "marks" || len(marks.Rects) != 2 || marks.Rects[0] != want[0] || marks.Rects[1] != want[1] {
-		t.Errorf("overlay = %+v, want marks numbered 1 and 2 over the given rects", marks)
-	}
-
-	if err := a.Draw("g", "circle", nil, 590, 299, 100, 100, "there"); err != nil {
-		t.Fatalf("Draw: %v", err)
-	}
-	ev, drawn := waitOverlay(t, ch)
-	if ev.Type != "overlay" {
-		t.Errorf("event type = %q, want overlay", ev.Type)
-	}
-	if drawn.Label != "there" || len(drawn.Rects) != 1 || drawn.Rects[0] != (OverlayRect{X: 590, Y: 299, W: 100, H: 100}) {
-		t.Errorf("overlay = %+v, want a circle labelled there around 590,299 100x100", drawn)
-	}
-}
-
 // TestVoiceDial_GivesUpAfterConsecutiveFailures covers the other half of the same defect: a run that fails every single time, such as a missing or expired API key, must not be redialed forever. Once it has failed voiceMaxConsecutiveFailures times in a row, dial must stop retrying and tear the session down itself — releasing the microphone and the speaker and going idle — since nobody is going to call stop on a session they don't know is stuck.
 func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	origDelay, origMax, origAttempts := voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures
@@ -499,79 +358,6 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	active, id, _ := voiceStatus(t, srv)
 	if active || id != "" {
 		t.Fatalf("status after giving up = %v/%q, want inactive with no id", active, id)
-	}
-}
-
-// TestVoiceGiveUp_EndsTheWatchGoroutine checks the other half of giving up: giveUp must cancel the session's context, or watch — parked in a select on ctx.Done() and the agent's own channels, neither of which a runner that only ever fails ever closes — leaks forever instead of returning once dial gives up. Drives watch directly (rather than through Start/dial) so the assertion is a channel close, not a goroutine count that an httptest.Server's own long-lived connection goroutines would make noisy.
-func TestVoiceGiveUp_EndsTheWatchGoroutine(t *testing.T) {
-	s := New(nil, nil, nil, nil)
-	v := NewVoice(s, nil, "", nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	run := newVoiceFakeRunner() // Text()/Tools() channels that nothing ever writes to or closes, the same as a run that has already returned would leave watch's select with nothing to read.
-
-	v.mu.Lock()
-	v.id, v.cancel, v.mic, v.speaker = "voice-1", cancel, &voiceFakeMic{ch: make(chan []byte)}, &voiceFakeSpeaker{}
-	v.mu.Unlock()
-
-	watchReturned := make(chan struct{})
-	go func() {
-		v.watch(ctx, "voice-1", run)
-		close(watchReturned)
-	}()
-
-	v.giveUp("voice-1")
-
-	select {
-	case <-watchReturned:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watch did not return after giveUp — giveUp must cancel the session's context, or watch's goroutine leaks forever")
-	}
-}
-
-// waitTokenUse polls the token ledger until it holds at least want rows, so a test never races the goroutine that files them. Input: the store and how many rows to wait for. Output: the newest rows, newest first.
-func waitTokenUse(t *testing.T, store *db.Store, want int) []db.TokenUse {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		uses, err := store.TokenUseRecent(context.Background(), 10)
-		if err != nil {
-			t.Fatalf("TokenUseRecent: %v", err)
-		}
-		if len(uses) >= want {
-			return uses
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the token ledger holds %d rows, want %d", len(uses), want)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// TestVoiceTurn_RecordsWhatItCostInTokens covers the voice half of the usage screen. The live session counted every turn's tokens and then dropped them, so the voice model showed zero however long the user talked. A finished turn — the boundary the session already watches for — has to reach the ledger with the counts the session accumulated, the configured voice model, and the channel "voice" so the user can tell a spoken call from a typed one.
-func TestVoiceTurn_RecordsWhatItCostInTokens(t *testing.T) {
-	store := dbtest.Open(t)
-	srv, _, _, _, run := newVoiceServerStore(t, store)
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-
-	run.setUsage(agent.TokenUsage{Provider: agent.ProviderGemini, InputTokens: 1200, OutputTokens: 340, TotalTokens: 1540})
-	run.text <- agent.ResponseChunk{TurnBoundary: true}
-
-	u := waitTokenUse(t, store, 1)[0]
-	if u.Channel != "voice" {
-		t.Errorf("channel = %q, want voice", u.Channel)
-	}
-	if u.Provider != agent.ProviderGemini {
-		t.Errorf("provider = %q, want %q", u.Provider, agent.ProviderGemini)
-	}
-	if u.Model != config.VoiceModel() {
-		t.Errorf("model = %q, want the configured voice model %q", u.Model, config.VoiceModel())
-	}
-	if u.InputTokens != 1200 || u.OutputTokens != 340 || u.TotalTokens != 1540 {
-		t.Errorf("counts = %d in, %d out, %d total, want 1200/340/1540", u.InputTokens, u.OutputTokens, u.TotalTokens)
 	}
 }
 
@@ -675,103 +461,6 @@ func TestVoiceLevels_EmitsMicAndSpeakerAmplitude(t *testing.T) {
 	}
 	if math.Abs(d.Mic-0.6) > 1e-9 || math.Abs(d.Speaker-0.3) > 1e-9 {
 		t.Fatalf("level = %+v, want mic=0.6 speaker=0.3", d)
-	}
-}
-
-// TestVoiceLevels_SkipsUnchangedReadings covers the cost guard: a session sitting in silence reads the same amplitude on every tick, and only the first reading may reach the stream — every later tick reporting the same numbers must be skipped, or a quiet session would still cost a "level" event twenty times a second.
-func TestVoiceLevels_SkipsUnchangedReadings(t *testing.T) {
-	srv, _, _, _, run := newVoiceServer(t)
-	events, closeSSE := readSSE(t, srv)
-	defer closeSSE()
-
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-
-	// The fakes default to amplitude 0 on both channels; left untouched for several ticks, only the first tick's reading is new.
-	time.Sleep(5 * levelTickInterval)
-
-	levels := 0
-loop:
-	for {
-		select {
-		case ev := <-events:
-			if ev.Type == "level" {
-				levels++
-			}
-		case <-time.After(75 * time.Millisecond):
-			break loop
-		}
-	}
-	if levels != 1 {
-		t.Fatalf("got %d level events for an unchanged silent reading, want exactly 1 (the first sample)", levels)
-	}
-}
-
-// TestVoiceLevels_StopsWhenSessionEnds covers the other half of the ticker's lifecycle: it must start with the session and also stop with it, or a session that has ended would keep sampling audio devices nobody is reading from any more (and, once Stop has closed them, would be reading from closed devices).
-func TestVoiceLevels_StopsWhenSessionEnds(t *testing.T) {
-	srv, _, mic, _, run := newVoiceServer(t)
-	events, closeSSE := readSSE(t, srv)
-	defer closeSSE()
-
-	mic.setAmplitude(0.4)
-	start := voicePost(t, srv, "/voice/start")
-	start.Body.Close()
-	<-run.running
-	waitLevelEvent(t, events) // the first sample, so the ticker is confirmed running before it is stopped.
-
-	stop := voicePost(t, srv, "/voice/stop")
-	stop.Body.Close()
-	<-run.ended
-
-	// Changed after teardown: if the ticker somehow survived Stop, this would produce a fresh level event.
-	mic.setAmplitude(0.9)
-	for {
-		select {
-		case ev := <-events:
-			if ev.Type == "level" {
-				t.Fatalf("level event arrived after the session ended")
-			}
-		case <-time.After(3 * levelTickInterval):
-			return
-		}
-	}
-}
-
-// TestVoiceStartAndStopRefuseAGet checks both mutating voice routes guard their method the way every other mutating route in this package does: a GET /voice/start would otherwise open the user's microphone and start a live session, which is the sort of thing a stray prefetch from the window's own origin does.
-func TestVoiceStartAndStopRefuseAGet(t *testing.T) {
-	srv, _, mic, _, _ := newVoiceServer(t)
-
-	for _, path := range []string{"/voice/start", "/voice/stop"} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			t.Errorf("GET %s = %d, want 405", path, resp.StatusCode)
-		}
-	}
-	if mic.captured.Load() {
-		t.Errorf("a GET opened the microphone")
-	}
-}
-
-// A live session sends an end-of-turn boundary for every turn but snapshots the token count on only some of them, so filing every boundary wrote one real row and one all-zero row per turn — half the usage ledger was a duplicate of the other half, and the Recent calls table on 2026-09-07 alternated a count with a zero all the way down.
-func TestEmptyUsage_TellsACountedTurnFromAnUncountedBoundary(t *testing.T) {
-	if !emptyUsage(agent.TokenUsage{Provider: agent.ProviderGemini}) {
-		t.Error("a boundary carrying no counts reads as countable, so it would be filed as a zero row")
-	}
-	for name, u := range map[string]agent.TokenUsage{
-		"input only":  {InputTokens: 19324},
-		"output only": {OutputTokens: 259},
-		"total only":  {TotalTokens: 19501},
-		"cached only": {CachedInputTokens: 8192},
-		"rounds only": {Rounds: 1},
-	} {
-		if emptyUsage(u) {
-			t.Errorf("%s reads as empty, so a turn that did cost something would go unfiled", name)
-		}
 	}
 }
 

@@ -16,7 +16,8 @@ $js = New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $js.MaxJsonLength = [int]::MaxValue
 
 $AE = [System.Windows.Automation.AutomationElement]
-$P = @{
+# PowerShell variable names ignore case, so no other variable in this script may be named $props in any case, or it overwrites this table.
+$Props = @{
     ct  = $AE::ControlTypeProperty
     n   = $AE::NameProperty
     r   = $AE::BoundingRectangleProperty
@@ -31,7 +32,7 @@ $P = @{
 }
 # One cache request fetches every property above with each step of the walk, instead of one cross-process call per property.
 $cr = New-Object System.Windows.Automation.CacheRequest
-foreach ($p in $P.Values) { $cr.Add($p) }
+foreach ($prop in $Props.Values) { $cr.Add($prop) }
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 
 # els maps a ref to the element it was read from, so acting on a listed element needs no search. It only grows between clears; a ref missing from it is found again by its runtime id (see UiaFind).
@@ -46,21 +47,21 @@ $listed = [System.Collections.Generic.HashSet[int]]::new([int[]](50000, 50002, 5
 # Properties are compared with -eq rather than cast to bool, because an unsupported property comes back as AutomationElement.NotSupported, which casts to true.
 function UiaDesc($el, $c, $hw, $vcap) {
     $m = if ($c) { 'GetCachedPropertyValue' } else { 'GetCurrentPropertyValue' }
-    $pw = $el.$m($P.pw) -eq $true
-    $v = $el.$m($P.v)
+    $pw = $el.$m($Props.pw) -eq $true
+    $v = $el.$m($Props.v)
     if ($pw -or $v -isnot [string]) { $v = '' } elseif ($v.Length -gt $vcap) { $v = $v.Substring(0, $vcap) }
     $h = @{
-        c = [int]$el.$m($P.ct).Id; n = [string]$el.$m($P.n); v = [string]$v; pw = $pw
-        off = $el.$m($P.off) -eq $true; tg = $el.$m($P.tg) -eq $true; wr = $el.$m($P.ro) -eq $false
-        f = $el.$m($P.f) -eq $true; x = 0; y = 0; w = 0; h = 0; id = ''
+        c = [int]$el.$m($Props.ct).Id; n = [string]$el.$m($Props.n); v = [string]$v; pw = $pw
+        off = $el.$m($Props.off) -eq $true; tg = $el.$m($Props.tg) -eq $true; wr = $el.$m($Props.ro) -eq $false
+        f = $el.$m($Props.f) -eq $true; x = 0; y = 0; w = 0; h = 0; id = ''
     }
     # An element with no rectangle reports Rect.Empty, whose corners are infinite and cannot travel as JSON.
-    $r = $el.$m($P.r)
+    $r = $el.$m($Props.r)
     if ($r -is [System.Windows.Rect] -and -not $r.IsEmpty -and -not [double]::IsInfinity($r.X)) {
         $h.x = [int]$r.X; $h.y = [int]$r.Y; $h.w = [int]$r.Width; $h.h = [int]$r.Height
     }
     if ($null -ne $hw) {
-        $rid = $el.$m($P.rid)
+        $rid = $el.$m($Props.rid)
         if ($rid -is [int[]]) { $h.id = [string]$hw + ':' + ($rid -join '.') }
     }
     $h
@@ -72,18 +73,21 @@ function UiaWalk($el, $d, $text, $hw) {
     if ($d -gt $maxDepth -or $S.seen -ge $maxNodes -or $S.sw.ElapsedMilliseconds -ge $S.ms) { return }
     $S.seen++
     $leaf = $false
-    if ($text -or $listed.Contains($el.GetCachedPropertyValue($P.ct).Id)) {
-        $h = UiaDesc $el $true $hw $S.vcap
-        $h.d = $d
-        if ($text -and -not $h.pw -and $el.GetCachedPropertyValue($P.tp) -eq $true) {
-            try {
-                $h.t = [string]$el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText($maxText)
-                $leaf = $true
-            } catch {}
+    # An element whose properties cannot be read, such as one that vanished during the walk, is left out rather than failing the whole read.
+    try {
+        if ($text -or $listed.Contains($el.GetCachedPropertyValue($Props.ct).Id)) {
+            $h = UiaDesc $el $true $hw $S.vcap
+            $h.d = $d
+            if ($text -and -not $h.pw -and $el.GetCachedPropertyValue($Props.tp) -eq $true) {
+                try {
+                    $h.t = [string]$el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText($maxText)
+                    $leaf = $true
+                } catch {}
+            }
+            $S.nodes.Add($h)
+            if ($h.id) { $S.els[$h.id] = $el }
         }
-        $S.nodes.Add($h)
-        if ($h.id) { $S.els[$h.id] = $el }
-    }
+    } catch {}
     if ($leaf) { return }
     $kid = $null
     try { $kid = $walker.GetFirstChild($el, $cr) } catch {}
@@ -102,7 +106,7 @@ function UiaFind($ref) {
     if ($i -lt 1) { throw "not a node ref: $ref" }
     [int[]]$ids = $ref.Substring($i + 1).Split('.')
     $root = $AE::FromHandle([IntPtr][long]$ref.Substring(0, $i))
-    $cond = [System.Windows.Automation.PropertyCondition]::new($P.rid, $ids)
+    $cond = [System.Windows.Automation.PropertyCondition]::new($Props.rid, $ids)
     $el = $root.FindFirst([System.Windows.Automation.TreeScope]::Subtree, $cond)
     if ($null -eq $el) { throw 'the element has gone' }
     $S.els[$ref] = $el

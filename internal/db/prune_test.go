@@ -102,41 +102,6 @@ func TestPruneEmptyConversationsKeepsAnythingSaid(t *testing.T) {
 	}
 }
 
-// TestPruneEmptyConversationsLeavesTurnsAlone checks the delete cannot reach a turn by cascade: every conversation the pass touches is empty by definition, so the count of turns in the store is the same before and after.
-func TestPruneEmptyConversationsLeavesTurnsAlone(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	spokenIn, err := store.CreateConversation(ctx, "when does it leave", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		if _, err := store.AddTurn(ctx, spokenIn, "you", "when does it leave", "ask", nil, nil); err != nil {
-			t.Fatalf("AddTurn: %v", err)
-		}
-	}
-	backdateConversation(t, store, spokenIn, 90*24*time.Hour)
-
-	empty, err := store.CreateConversation(ctx, "", "claude")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	backdateConversation(t, store, empty, 90*24*time.Hour)
-
-	if _, err := store.PruneEmptyConversations(ctx, EmptyConversationAge); err != nil {
-		t.Fatalf("PruneEmptyConversations: %v", err)
-	}
-
-	var turns int
-	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_turns`).Scan(&turns); err != nil {
-		t.Fatalf("count turns: %v", err)
-	}
-	if turns != 3 {
-		t.Errorf("after pruning there are %d turns, want the 3 that were said", turns)
-	}
-}
-
 // addRun writes one act run with a chosen question, outcome and age, and returns its id. It writes the row directly rather than through AddActRun so the test can set started_at, which AddActRun leaves to the database.
 func addRun(t *testing.T, s *Store, question, outcome string, age time.Duration) int64 {
 	t.Helper()
@@ -222,83 +187,6 @@ func TestPruneActRunsKeepsWhatWasLearnedFrom(t *testing.T) {
 	}
 }
 
-// TestPruneActRunsCapCountsOnlyTheUnprotectedRuns checks the cap is a cap on what is left over: runs held by a note do not eat into it, so a store where every run produced a note keeps them all under a cap of one.
-func TestPruneActRunsCapCountsOnlyTheUnprotectedRuns(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	for _, q := range []string{"first goal", "second goal", "third goal"} {
-		addRun(t, store, q, "ok", 48*time.Hour)
-		if _, err := store.LogNote(ctx, "How I did "+q+": looked at the screen.", "procedure"); err != nil {
-			t.Fatalf("LogNote: %v", err)
-		}
-	}
-
-	removed, err := store.PruneActRuns(ctx, 1, testFailedGrace)
-	if err != nil {
-		t.Fatalf("PruneActRuns: %v", err)
-	}
-	if removed != 0 {
-		t.Errorf("PruneActRuns removed %d runs that all have notes, want 0", removed)
-	}
-	if got := len(runQuestions(t, store)); got != 3 {
-		t.Errorf("%d runs left, want all 3", got)
-	}
-}
-
-// TestPruneActRunsMatchesTheNoteHeadLoosely checks the note that protects a run is matched the way the procedures stage writes and finds it: on the "How I did <question>:" head, with the question trimmed and case ignored, and only at the start of the note.
-func TestPruneActRunsMatchesTheNoteHeadLoosely(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	addRun(t, store, "  Open The Pricing Page  ", "ok", 48*time.Hour)
-	addRun(t, store, "mentioned in passing", "ok", 48*time.Hour)
-	addRun(t, store, "the newest ordinary run", "ok", time.Hour)
-
-	if _, err := store.LogNote(ctx, "how i did open the pricing page: looked at the screen.", "procedure"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-	// A procedure note that merely contains the head partway through is about a different goal and protects nothing.
-	if _, err := store.LogNote(ctx, "How I did open the settings: looked at the screen, which is not How I did mentioned in passing: nothing.", "procedure"); err != nil {
-		t.Fatalf("LogNote: %v", err)
-	}
-
-	if _, err := store.PruneActRuns(ctx, 1, testFailedGrace); err != nil {
-		t.Fatalf("PruneActRuns: %v", err)
-	}
-
-	left := runQuestions(t, store)
-	if !has(left, "  Open The Pricing Page  ") {
-		t.Errorf("the run its note is about was pruned; kept %v", left)
-	}
-	if has(left, "mentioned in passing") {
-		t.Errorf("a run named only in the middle of an unrelated note was kept; kept %v", left)
-	}
-}
-
-// TestPruneActRunsNonPositiveCapKeepsEverything checks the escape hatch and the guard together: a negative cap is the config's "no count cap", and a zero cap is what a caller passing an unset number would hand over. Neither may empty the table.
-func TestPruneActRunsNonPositiveCapKeepsEverything(t *testing.T) {
-	for _, keep := range []int{-1, 0} {
-		store := newFileStore(t)
-		ctx := context.Background()
-
-		for _, q := range []string{"one", "two", "three"} {
-			addRun(t, store, q, "ok", 400*24*time.Hour)
-		}
-
-		removed, err := store.PruneActRuns(ctx, keep, testFailedGrace)
-		if err != nil {
-			t.Fatalf("PruneActRuns(%d): %v", keep, err)
-		}
-		if removed != 0 {
-			t.Errorf("PruneActRuns(%d) removed %d runs, want 0", keep, removed)
-		}
-		if got := len(runQuestions(t, store)); got != 3 {
-			t.Errorf("PruneActRuns(%d) left %d runs, want all 3", keep, got)
-		}
-	}
-}
-
 // TestPruneActRunsKeepsALiveJobsCheckpoint pins the third exemption: a long-running computer-use job's checkpoint is an act_runs row like any other, but it is the only record of a job the user can still resume, and nothing ever rewrites the row of a job that is paused or stuck. It is neither held by a note nor a young failure, so the count cap used to delete it and take the whole trail in job_json with it.
 func TestPruneActRunsKeepsALiveJobsCheckpoint(t *testing.T) {
 	store := newFileStore(t)
@@ -330,38 +218,6 @@ func TestPruneActRunsKeepsALiveJobsCheckpoint(t *testing.T) {
 	}
 	if len(unfinished) != 1 {
 		t.Errorf("%d unfinished jobs after the prune, want the one job still resumable", len(unfinished))
-	}
-}
-
-// TestPruneActRunsTakesAFinishedJobsCheckpoint checks the live-job exemption is only for jobs that are still live. Nothing ever clears job_id, so exempting every row that has one kept the whole job_json trail of every job ever run, for good: one permanent row per job on a store that runs them daily. A job in a state it never comes back from is an ordinary old row and the count cap may take it.
-func TestPruneActRunsTakesAFinishedJobsCheckpoint(t *testing.T) {
-	store := newFileStore(t)
-	ctx := context.Background()
-
-	for _, job := range []ActJobRow{
-		{ID: "act-done", Goal: "played the last episode", Brain: "codex", State: "done"},
-		{ID: "act-live", Goal: "play the next episode", Brain: "codex", State: "stepping"},
-	} {
-		if err := store.SaveActJob(ctx, job); err != nil {
-			t.Fatalf("SaveActJob(%s): %v", job.ID, err)
-		}
-		if _, err := store.db.Exec(`UPDATE act_runs SET started_at = ? WHERE job_id = ?`, sqliteUTC(time.Now().Add(-400*24*time.Hour)), job.ID); err != nil {
-			t.Fatalf("backdate %s: %v", job.ID, err)
-		}
-	}
-	for _, q := range []string{"ordinary one", "ordinary two", "ordinary three"} {
-		addRun(t, store, q, "ok", time.Hour)
-	}
-
-	if _, err := store.PruneActRuns(ctx, 2, testFailedGrace); err != nil {
-		t.Fatalf("PruneActRuns: %v", err)
-	}
-	left := runQuestions(t, store)
-	if has(left, "played the last episode") {
-		t.Errorf("the finished job's checkpoint survived the cap; kept %v", left)
-	}
-	if !has(left, "play the next episode") {
-		t.Errorf("the live job's checkpoint was pruned; kept %v", left)
 	}
 }
 

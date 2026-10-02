@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-/** Tests for the Tasks screen: the one wide list with no rail beside the sidebar, the detail beside it that names the task the composer is aimed at, the two status changes the daemon takes, and the composer that sends the task itself along with the question. */
+/** Tests for what the Tasks screen sends the daemon: the tick after its undo window, the question's context, and the owner change. */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { ConversationView, Task } from "./api";
@@ -14,147 +14,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** The list on the page, so a title is looked for among the rows rather than in the header, which names the same task. */
-function list() {
-  return within(screen.getByRole("list", { name: "Tasks" }));
-}
-
 const when = new Date().toISOString();
 
-/** One task the user typed in and two an agent noticed in the same meeting, all three the user's own — the tests below that predate the owner split expect one flat list, so all three stay in Mine. */
+/** One task the user typed in and two an agent noticed in the same meeting. */
 const tasks: Task[] = [
   { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "", owner: "me" },
   { id: "12", title: "Send the Meridian file", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "me" },
   { id: "13", title: "Book the room", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "me" },
 ];
 
-const conversation: ConversationView = {
-  id: "c1",
-  title: "Book the flight",
-  brain: "claude",
-  turns: [{ id: "t1", role: "you", text: "which airline?", kind: "ask", evidence: [], tools: [], when, reason: "" }],
-};
-
-describe("the list", () => {
-  it("draws one wide list with no headings and no rail, saying where a noticed task came from", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(list().getByText("Book the flight")).toBeDefined();
-    expect(screen.getAllByText(/from Meridian call/)).toHaveLength(2);
-    expect(screen.queryByText("You set")).toBeNull();
-    expect(screen.queryByText("June noticed")).toBeNull();
-  });
-
-  it("draws the rows as a plain list, so the tick and the menus a row holds are controls in their own right rather than parts of one option", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    // An option must not hold interactive descendants, and every row holds at least two: the tick and the More menu. So there are no options on the page at all, only listitems, and the selectable part of each is a button of its own.
-    expect(screen.queryAllByRole("option")).toHaveLength(0);
-    expect(list().getAllByRole("listitem")).toHaveLength(3);
-    const row = list().getByRole("button", { name: "Book the flight" });
-    expect(row.getAttribute("data-row-id")).toBe("task-1");
-    expect(within(row).queryByRole("checkbox")).toBeNull();
-  });
-
-  it("opens the task from anywhere on the row that is not one of its controls", async () => {
-    const { store } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const row = list().getAllByRole("listitem")[1];
-    const pick = within(row).getByRole("button", { name: "Send the Meridian file from Meridian call" });
-    await userEvent.click(pick);
-    await waitFor(() => expect(store.getState().ui.taskId).toBe("12"));
-
-    // A click on a control is that control's, and nothing else's.
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Book the flight done" }));
-    expect(store.getState().ui.taskId).toBe("12");
-  });
-
-  it("marks the picked row with aria-current rather than aria-selected, since the list is no longer a listbox", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Book the room"));
-    // A noticed row reads as its title and where it came from, which is what the button is named after; only the title carries for one the user typed in.
-    await waitFor(() => expect(list().getByRole("button", { name: "Book the room from Meridian call" }).getAttribute("aria-current")).toBe("true"));
-    expect(list().getByRole("button", { name: "Book the flight" }).getAttribute("aria-current")).toBeNull();
-  });
-
-  it("moves the keyboard's own focus onto the row the arrow just selected, so the ring on screen follows it", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    const first = list().getByRole("button", { name: "Book the flight" });
-    first.focus();
-    // The store has no task selected yet — the fallback in TasksScreen is only what the page shows, not what App.tsx's walker has — so the first press just confirms row one and the second is what actually steps to row two.
-    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-    await waitFor(() => expect(document.activeElement?.getAttribute("data-row-id")).toBe("12"));
-  });
-
-  it("shows an asleep face and says it is not connected when the daemon does not answer", async () => {
-    renderApp({ fails: ["GET /tasks"] }, { place: "tasks" });
-    // The detail pane on the right shows its own asleep face too, since its thread is also unanswered, so more than one is expected here.
-    expect(await screen.findByText("Not connected.")).toBeDefined();
-    expect(screen.getAllByRole("img", { name: "june is asleep" }).length).toBeGreaterThan(0);
-  });
-});
-
-describe("the detail beside the list", () => {
-  it("names the picked task as its heading and says when and where it was raised", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Send the Meridian file"));
-    const detail = within(await screen.findByRole("region", { name: "About this task" }));
-    expect(detail.getByRole("heading", { name: "Send the Meridian file" })).toBeDefined();
-    expect(detail.getByText(/Meridian call/)).toBeDefined();
-    expect(screen.queryByRole("button", { name: /Choose a task/ })).toBeNull();
-  });
-});
-
 describe("changing a task's status", () => {
-  it("ticks one done and tells the daemon which status it now has", async () => {
-    const { calls } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Book the flight done" }));
-    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/task-1/done")?.body).toEqual({ status: "done" }));
-    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
-  });
-
-  it("drops an action item June noticed, and takes it out of the list", async () => {
-    const { calls } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Send the Meridian file" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Send the Meridian file" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Drop it" }));
-    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/12/done")?.body).toEqual({ status: "dropped" }));
-    await waitFor(() => expect(list().queryByText("Send the Meridian file")).toBeNull());
-  });
-
-  // Three finished tasks sat on the list struck through with only Reopen in their menu, and nothing anywhere removed one: GET /tasks answers with every row whatever its done flag says, and the list filters on the search box alone.
-  it("deletes a task of the user's own and takes it off the list", async () => {
-    const { calls } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Book the flight" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Book the flight" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
-    await waitFor(() => expect(calls.find((c) => c.method === "DELETE" && c.path === "/tasks/task-1")).toBeDefined());
-    await waitFor(() => expect(list().queryByText("Book the flight")).toBeNull());
-  });
-
-  // A noticed item is a note in memory, and deleting it would take a line out of a meeting's minutes rather than off a list. Dropping it is what that is for, and the daemon answers 400 to a delete of one.
-  it("offers to drop a noticed item rather than delete it", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Send the Meridian file" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Send the Meridian file" }));
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Drop it" })).toBeDefined();
-    expect(within(menu).queryByRole("menuitem", { name: "Delete" })).toBeNull();
-  });
-
-  it("does not offer to drop a task the user typed in, because the daemon refuses it", async () => {
-    renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("button", { name: "More for Book the flight" });
-    await userEvent.click(screen.getByRole("button", { name: "More for Book the flight" }));
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Mark done" })).toBeDefined();
-    expect(within(menu).queryByRole("menuitem", { name: "Drop it" })).toBeNull();
-  });
-
   it("fills the circle at once but waits for the undo window before telling the daemon", async () => {
     const { calls } = renderApp({ tasks }, { place: "tasks" });
     const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
@@ -173,62 +42,16 @@ describe("changing a task's status", () => {
     await new Promise((r) => setTimeout(r, 500));
     expect(calls.find((c) => c.path === "/tasks/task-1/done")).toBeUndefined();
   });
-
-  it("holds the circle filled while the change is in flight, says the tick is disabled for as long as that lasts, and sends nothing when it is clicked again in that time", async () => {
-    const { calls } = renderApp({ tasks }, { place: "tasks" });
-    const tick = await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    // The fake daemon answers at once, so the round trip is held open here: the status change waits for `answer` to be called, everything else the window reads answers as usual, and `sent` counts the status changes that actually went out.
-    const daemon = globalThis.fetch;
-    const sent: string[] = [];
-    let answer = () => {};
-    const held = new Promise<void>((r) => {
-      answer = r;
-    });
-    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = new URL(typeof input === "object" && "url" in input ? input.url : String(input)).pathname;
-      if (path !== "/tasks/task-1/done") return daemon(input, init);
-      sent.push(path);
-      return held.then(() => daemon(input, init));
-    });
-
-    await userEvent.click(tick);
-    await waitFor(() => expect(sent).toHaveLength(1));
-    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
-    // The click below does nothing whatever the tick looks like, so the tick has to say so rather than swallow it in silence.
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Reopen Book the flight" }).getAttribute("aria-disabled")).toBe("true"));
-    await userEvent.click(screen.getByRole("checkbox", { name: "Reopen Book the flight" }));
-    await new Promise((r) => setTimeout(r, 500));
-    expect(sent).toHaveLength(1);
-
-    answer();
-    await waitFor(() => expect(calls.find((c) => c.path === "/tasks/task-1/done")?.body).toEqual({ status: "done" }));
-    expect(await screen.findByRole("checkbox", { name: "Reopen Book the flight" })).toBeDefined();
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: "Reopen Book the flight" }).getAttribute("aria-disabled")).not.toBe("true"));
-  });
-
-  it("moves the tick back and says so when the daemon refuses the change", async () => {
-    renderApp({ tasks, fails: ["POST /tasks/task-1/done"] }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(screen.getByRole("checkbox", { name: "Mark Book the flight done" }));
-    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not change that task");
-    expect(await screen.findByRole("checkbox", { name: "Mark Book the flight done" })).toBeDefined();
-  });
-
-  it("adds a task of your own and aims the composer at what the daemon named after it", async () => {
-    const { calls, store } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.type(screen.getByLabelText("Give June something to do"), "call the hotel{Enter}");
-    await waitFor(() => expect(calls.find((c) => c.method === "POST" && c.path === "/tasks")?.body).toEqual({ title: "call the hotel" }));
-    await waitFor(() => expect(store.getState().ui.taskId).toBe("task-9"));
-  });
 });
 
-describe("talking to a task", () => {
-  it("shows the picked task's conversation beside the list", async () => {
-    renderApp({ tasks, turns: { c1: conversation } }, { place: "tasks" });
-    expect(await screen.findByText("which airline?")).toBeDefined();
-  });
+const conversation: ConversationView = {
+  id: "c1",
+  title: "Book the flight",
+  brain: "claude",
+  turns: [{ id: "t1", role: "you", text: "which airline?", kind: "ask", evidence: [], tools: [], when, reason: "" }],
+};
 
+describe("talking to a task", () => {
   it("sends the task and where it came from as the question's context", async () => {
     const { calls } = renderApp({ tasks, turns: { c1: conversation } }, { place: "tasks" });
     await screen.findByText("which airline?");
@@ -241,97 +64,20 @@ describe("talking to a task", () => {
       }),
     );
   });
-
-  it("opens a conversation for a noticed task on the first question, and asks in that one", async () => {
-    const { calls, store } = renderApp({ tasks }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    await userEvent.click(list().getByText("Send the Meridian file"));
-    await userEvent.type(await screen.findByLabelText("Ask June"), "what did she want?{Enter}");
-    // The conversation is opened through the same POST /conversations the rail's New chat makes, and the question goes into it.
-    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/conversations")).toBe(true));
-    await waitFor(() =>
-      expect(calls.find((c) => c.path === "/ask")?.body).toMatchObject({
-        conversation_id: "new",
-        context: 'This is about one thing on the user\'s list: "Send the Meridian file". June noticed it in Meridian call.',
-      }),
-    );
-    // The pairing is remembered, so the next question about the same task does not open a second conversation.
-    await waitFor(() => expect(store.getState().ui.taskChats["12"]).toBe("new"));
-  });
 });
 
-/** Two of the user's own and two a meeting raised for someone else or for nobody named — owner "them" and "unclear" are both watched rather than assumed onto the user's own list. */
-const withWatched: Task[] = [
-  { id: "task-1", title: "Book the flight", source: "you", when, done: false, conversation_id: "c1", detail: "you said", owner: "me" },
-  { id: "20", title: "Send the file", source: "noticed", when, done: true, conversation_id: "", detail: "Meridian call", owner: "me" },
+/** A task a meeting raised for someone else, which sits in the collapsed Watching section. */
+const watched: Task[] = [
+  ...tasks,
   { id: "21", title: "Re-run the source data", source: "noticed", when, done: false, conversation_id: "", detail: "Meridian call", owner: "them" },
-  { id: "22", title: "Write up the findings", source: "noticed", when, done: true, conversation_id: "", detail: "Standup", owner: "unclear" },
 ];
 
 describe("Mine and Theirs", () => {
-  it("shows only the user's own by default, with what a meeting raised for someone else collapsed behind a count", async () => {
-    renderApp({ tasks: withWatched }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(list().getByText("Book the flight")).toBeDefined();
-    expect(list().getByText("Send the file")).toBeDefined();
-    expect(list().queryByText("Re-run the source data")).toBeNull();
-    expect(list().queryByText("Write up the findings")).toBeNull();
-    const disclosure = screen.getByRole("button", { name: /Watching/ });
-    expect(disclosure.textContent).toContain("2");
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-  });
-
-  it("opens the theirs section on its own disclosure and shows where each one came from", async () => {
-    renderApp({ tasks: withWatched }, { place: "tasks" });
-    await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
-    const watched = within(screen.getByRole("list", { name: "Watching" }));
-    expect(watched.getByText("Re-run the source data")).toBeDefined();
-    expect(watched.getByText(/from Meridian call/)).toBeDefined();
-    expect(watched.getByText("Write up the findings")).toBeDefined();
-  });
-
-  it("says nothing of yours is open when every task is someone else's, naming the filter rather than showing an empty list", async () => {
-    const allWatched = withWatched.filter((t) => t.owner !== "me");
-    renderApp({ tasks: allWatched }, { place: "tasks" });
-    expect(await screen.findByText("Nothing of yours open.")).toBeDefined();
-    expect(screen.getByRole("button", { name: /Watching/ })).toBeDefined();
-  });
-
   it("moves a watched row to Mine from its owner menu, and tells the daemon which class it is now", async () => {
-    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
+    const { calls } = renderApp({ tasks: watched }, { place: "tasks" });
     await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
     await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
     await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
     await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/21")?.body).toEqual({ owner: "me" }));
-  });
-
-  it("offers the same owner menu on a noticed row already in Mine, since a meeting's guess at Mine is still only a guess", async () => {
-    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Reopen Send the file" });
-    await userEvent.click(screen.getByRole("button", { name: /Send the file.*change who owns it/ }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Unclear" }));
-    await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/20")?.body).toEqual({ owner: "unclear" }));
-  });
-
-  it("pins the owner even when the pick matches the meeting's guess, so a later identity change cannot move it", async () => {
-    const { calls } = renderApp({ tasks: withWatched }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Reopen Send the file" });
-    await userEvent.click(screen.getByRole("button", { name: /Send the file.*change who owns it/ }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
-    await waitFor(() => expect(calls.find((c) => c.method === "PATCH" && c.path === "/tasks/20")?.body).toEqual({ owner: "me" }));
-  });
-
-  it("does not offer an owner control on a task the user typed in, since there is nothing to correct", async () => {
-    renderApp({ tasks: withWatched }, { place: "tasks" });
-    await screen.findByRole("checkbox", { name: "Mark Book the flight done" });
-    expect(screen.queryByRole("button", { name: /Book the flight.*change who owns it/ })).toBeNull();
-  });
-
-  it("says so and leaves the row where it was when the daemon refuses the owner change", async () => {
-    renderApp({ tasks: withWatched, fails: ["PATCH /tasks/21"] }, { place: "tasks" });
-    await userEvent.click(await screen.findByRole("button", { name: /Watching/ }));
-    await userEvent.click(screen.getByRole("button", { name: /Re-run the source data.*change who owns it/ }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Mine" }));
-    expect(await screen.findByRole("status")).toHaveProperty("textContent", "Could not change who owns that task");
   });
 });

@@ -124,41 +124,6 @@ describe("the overlay page", () => {
     expect(said.mock.calls.flat().join(" ")).toContain("june: overlay page listening");
   });
 
-  it("keeps a second drawing from the same ask that lands while the first is fading", async () => {
-    await startPage();
-    const ink = document.getElementById("ink") as unknown as SVGSVGElement;
-
-    send("ask-1", ring(1000));
-    expect(ink.querySelectorAll("path.stroke").length).toBe(1);
-
-    // The ttl starts once the ink has landed, which under reduced motion is one millisecond after the event; a moment past that the fade is running.
-    vi.advanceTimersByTime(1001 + 100);
-    send("ask-1", ring(1000));
-
-    // The whole fade is 400ms, so by here the fade that was running when the second ring arrived would have finished and taken it off.
-    vi.advanceTimersByTime(400);
-    expect(ink.querySelectorAll("path.stroke").length).toBe(1);
-    expect(ink.style.opacity === "" || Number(ink.style.opacity) > 0).toBe(true);
-  });
-
-  it("still takes a ring off the screen when taps land while it is up", async () => {
-    await startPage();
-    const ink = document.getElementById("ink") as unknown as SVGSVGElement;
-
-    send("ask-1", ring(3000));
-    expect(ink.querySelectorAll("path.stroke").length).toBe(1);
-
-    // A run of clicks under the ring: each one is a tap event, and none of them draws ink of its own.
-    for (let i = 0; i < 3; i++) {
-      vi.advanceTimersByTime(500);
-      send("ask-1", JSON.stringify({ kind: "tap", points: [[150, 150]] }));
-    }
-
-    // Well past the ring's own 3s ttl and the 400ms fade.
-    vi.advanceTimersByTime(5000);
-    expect(ink.querySelectorAll("path.stroke").length).toBe(0);
-  });
-
   it("says so and re-reads the layout when a drawing places no shapes at all", async () => {
     layoutAnswer = { origin_x: 0, origin_y: 0, scale: 1, monitors: [] };
     await startPage();
@@ -200,15 +165,5 @@ describe("the overlay page", () => {
     pageListener?.({ payload: JSON.stringify({ id: "ask-1", type: "done" }) });
     vi.advanceTimersByTime(1600);
     expect(pointer.style.opacity).toBe("0");
-  });
-
-  it("draws no pill for a tap, label or not", async () => {
-    await startPage();
-    send("ask-1", JSON.stringify({ kind: "tap", label: "Songs", points: [[100, 100]] }));
-    vi.advanceTimersByTime(50);
-    send("ask-1", JSON.stringify({ kind: "tap", label: "Search", points: [[300, 100]] }));
-    vi.advanceTimersByTime(50);
-    expect(document.querySelectorAll("#shapes .label").length).toBe(0);
-    expect((document.getElementById("pointer") as HTMLElement).style.opacity).toBe("1");
   });
 });

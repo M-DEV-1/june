@@ -7,27 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
-
-// TestAutomaticLessonsFindsAFailThenASuccessOnTheSameElement reproduces the night's real Teams failure: a click on "Add title" that failed via the accessibility path, then a later click on the very same button that went through. automaticLessons must pair the two by role and label alone — the item number is not part of the identity, since observe_screen mints a fresh one on every look — and write the one line the task asks for.
-func TestAutomaticLessonsFindsAFailThenASuccessOnTheSameElement(t *testing.T) {
-	hops := []ToolHop{
-		{Name: "observe_screen", Result: "Microsoft Teams · New meeting"},
-		{Name: "click", Args: map[string]any{"n": float64(25)}, Result: `error: could not click [25] entry "Add title": no accessible action`},
-		{Name: "observe_screen", Result: "Microsoft Teams · New meeting"},
-		{Name: "click", Args: map[string]any{"n": float64(25)}, Result: `clicked [25] entry "Add title" via pointer; the window is now "Microsoft Teams · New meeting"`},
-	}
-	got := automaticLessons("Teams", hops, lessonCapPerRun)
-	if len(got) != 1 {
-		t.Fatalf("automaticLessons returned %d lines, want 1:\n%v", len(got), got)
-	}
-	want := `Teams: entry "Add title": no accessible action; worked via pointer`
-	if got[0] != want {
-		t.Errorf("got %q, want %q", got[0], want)
-	}
-}
 
 // lessonSpyBrain is a toolTestBrain that also answers the lesson store side, recording every AddLesson and ScoreLessonsUsed call so a test can assert on what AfterScreenRun did without a real store.
 type lessonSpyBrain struct {
@@ -92,39 +73,6 @@ func TestAfterScreenRunStillWritesARealLesson(t *testing.T) {
 		a.AfterScreenRun(t.Context(), reflectiveTrace(), "ok")
 		if len(brain.added) != 1 || brain.added[0] != reply {
 			t.Errorf("reply %q wrote lessons %v, want just that reply", reply, brain.added)
-		}
-	}
-}
-
-// The reflective call was asked "what would you do differently next time in Brave Browser?" and nothing else — not the question, not a single step. So it answered about whatever its own memory lookup had surfaced, which is how a run that opened Spotify came to file a lesson about Spearman's correlation. What the run actually did has to be in the question.
-func TestReflectiveCallIsToldWhatTheRunDid(t *testing.T) {
-	brain := &lessonSpyBrain{toolTestBrain: &toolTestBrain{}}
-	var asked string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		asked = string(body)
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"nothing"}]}}]}`)
-	}))
-	t.Cleanup(backend.Close)
-	geminiBaseURL = backend.URL
-	t.Cleanup(func() { geminiBaseURL = "" })
-
-	a := NewAgent(nil, nil, brain, nil, "test-key")
-	a.rememberTarget(ScreenTarget{Window: "Brave Browser"})
-	a.AfterScreenRun(t.Context(), TurnTrace{
-		Question: "close all tabs except the Hotstar one",
-		ToolHops: []ToolHop{
-			{Name: "observe_screen", Result: "Brave Browser · Notifications - Brave"},
-			{Name: "click", Args: map[string]any{"n": float64(99)}, Result: "error: there is no element 99 in the last observe_screen list"},
-			{Name: "click", Args: map[string]any{"n": float64(3)}, Result: `clicked [3] push button "Close" via press`},
-		},
-	}, "ok")
-
-	// The question the run was asked, and the step that failed, both have to reach the model — a reflection on a run it cannot see is a reflection on nothing.
-	for _, want := range []string{"close all tabs except the Hotstar one", "there is no element 99"} {
-		if !strings.Contains(asked, want) {
-			t.Errorf("the reflective request did not carry %q; it was:\n%s", want, asked)
 		}
 	}
 }

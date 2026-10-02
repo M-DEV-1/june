@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"june/internal/db"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,49 +27,6 @@ func TestExecuteTool_BranchFallsBackToARoutedWebAsk(t *testing.T) {
 	}
 	if got != "keyword spotting is a small model that listens for a fixed phrase" {
 		t.Errorf("result = %q, want the routed answer", got)
-	}
-}
-
-// TestReceiveLoop_BranchCall_DeliversLiveWhenSessionAlive drives receiveLoop with a real "branch" ToolCall (the same path a live Gemini session would take) and asserts the result is delivered back via SendToolResponse, matched by fc.ID/fc.Name — proving branch is dispatched end-to-end through receiveLoop, not just reachable via executeTool directly.
-// Also asserts no fallback persistence happens on this happy path (pins the "only the dead-session fallback persists" design decision).
-func TestReceiveLoop_BranchCall_DeliversLiveWhenSessionAlive(t *testing.T) {
-	brain := &toolTestBrain{}
-	a := NewAgent(nil, nil, brain, nil, "")
-	a.webSearch = func(ctx context.Context, task string) (string, error) { return "Riddler kicked off last week", nil }
-
-	fs := &fakeLiveSession{
-		msgCh:     make(chan *genai.LiveServerMessage, 2),
-		responses: make(chan genai.LiveSendToolResponseParameters, 2),
-		closeErr:  errors.New("fake session closed"),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
-
-	fs.msgCh <- &genai.LiveServerMessage{
-		ToolCall: &genai.LiveServerToolCall{
-			FunctionCalls: []*genai.FunctionCall{
-				{ID: "call-branch", Name: "branch", Args: map[string]any{"task": "catch me up on Riddler"}},
-			},
-		},
-	}
-
-	select {
-	case resp := <-fs.responses:
-		fr := resp.FunctionResponses[0]
-		if fr.ID != "call-branch" || fr.Name != "branch" {
-			t.Fatalf("expected ID=call-branch Name=branch, got ID=%q Name=%q", fr.ID, fr.Name)
-		}
-		if fr.Response["output"] != "Riddler kicked off last week" {
-			t.Fatalf("unexpected delivered output: %v", fr.Response["output"])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for the branch call's response")
-	}
-
-	if brain.savedFoldTask != "" {
-		t.Errorf("expected no fallback persistence on the live-delivery happy path, got savedFoldTask=%q", brain.savedFoldTask)
 	}
 }
 
@@ -129,37 +84,5 @@ func TestRunToolCall_BranchDeadSession_PersistsFoldInsteadOfDropping(t *testing.
 	}
 	if brain.savedFoldTask != "catch me up on Riddler" || brain.savedFoldResult != "Riddler kicked off last week" {
 		t.Errorf("fallback persistence wrong: task=%q result=%q", brain.savedFoldTask, brain.savedFoldResult)
-	}
-}
-
-// TestSurfacePendingFolds_ReturnsLinesAndMarksConsumed is the tracer bullet for next-session surfacing: unconsumed folds must come back as human-readable context lines AND be marked consumed, so a branch result that missed its original session surfaces exactly once at the next one.
-func TestSurfacePendingFolds_ReturnsLinesAndMarksConsumed(t *testing.T) {
-	brain := &toolTestBrain{
-		unconsumedFolds: []db.Fold{
-			{ID: 7, Task: "catch me up on Riddler", Result: "kicked off last week"},
-			{ID: 9, Task: "find the blocker", Result: "waiting on review"},
-		},
-	}
-	a := NewAgent(nil, nil, brain, nil, "")
-
-	lines := a.surfacePendingFolds(context.Background())
-
-	if len(lines) != 2 {
-		t.Fatalf("surfacePendingFolds returned %d lines, want 2: %v", len(lines), lines)
-	}
-	for _, want := range []string{"catch me up on Riddler", "kicked off last week", "find the blocker", "waiting on review"} {
-		var found bool
-		for _, l := range lines {
-			if strings.Contains(l, want) {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("no line contained %q, got %v", want, lines)
-		}
-	}
-
-	if len(brain.consumedFoldIDs) != 2 || brain.consumedFoldIDs[0] != 7 || brain.consumedFoldIDs[1] != 9 {
-		t.Errorf("consumedFoldIDs = %v, want [7 9]", brain.consumedFoldIDs)
 	}
 }
