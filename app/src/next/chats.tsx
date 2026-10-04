@@ -4,7 +4,6 @@ import {
   useBrainsQuery,
   useConversationQuery,
   useConversationsQuery,
-  useSettingsQuery,
 } from "./api";
 import {
   HEAD,
@@ -19,7 +18,7 @@ import { NoBrainPanel } from "./settings";
 import { DRAFT_CHAT, useAppSelector } from "./store";
 import { Composer } from "./chat-composer";
 import { Thread } from "./chat-turn";
-import { ChatSuggestions } from "./chat-welcome";
+import { ChatSuggestions, FIRST_DAY_HINT, useFirstDay } from "./chat-welcome";
 import { greeting } from "./format";
 
 export { Composer, Thread };
@@ -41,11 +40,12 @@ export function ChatsScreen() {
   const { currentData: view, isLoading } = useConversationQuery(shownId ?? "", {
     skip: !shownId,
   });
-  const { data: brains = [] } = useBrainsQuery();
+  const { data: brainList } = useBrainsQuery();
+  const brains = brainList?.brains ?? [];
   // Nothing typed can be answered while no brain is signed in, so the pane says so instead of showing the thread. An empty list is a daemon that said nothing, not one that has no brain: a real one always lists every brain it knows.
   const noBrain = brains.length > 0 && !brains.some((b) => b.signed_in);
-  const { data: daemon } = useSettingsQuery();
   const [wide, pane] = useWide();
+  const firstDay = useFirstDay();
 
   const current = convs.find((c) => c.id === shownId);
   // In a wide pane the rail's track is always reserved, filled or not, so the header, the thread and the composer sit at the same place in every chat: a column that moved left the moment a reply called a tool, and back when the next chat had none, read as the page jumping about (2026-09-05).
@@ -65,6 +65,7 @@ export function ChatsScreen() {
           <BrainPicker
             current={view?.brain ?? current?.brain ?? ""}
             brains={brains}
+            automatic={brainList?.automatic}
           />
         </div>
       </PageHeader>
@@ -78,7 +79,9 @@ export function ChatsScreen() {
           hint={
             shownId
               ? "Ask a question below and June answers from what it has seen and heard."
-              : "I have been keeping track. What would you like to do?"
+              : firstDay
+                ? FIRST_DAY_HINT
+                : "I have been keeping track. What would you like to do?"
           }
           action={shownId ? undefined : <ChatSuggestions />}
           run={mine}
@@ -89,7 +92,7 @@ export function ChatsScreen() {
       ) : (
         <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
           <div className={MEASURE}>
-            <NoBrainPanel dataDir={daemon?.data_dir ?? "~/.local/share/june"} />
+            <NoBrainPanel />
           </div>
         </Scroller>
       )}

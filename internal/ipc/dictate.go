@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -68,6 +69,8 @@ type Dictation struct {
 	mu     sync.Mutex
 	active *dictating
 	nextID atomic.Uint64
+	// touch tells the server a dictation began or ended (see Server.LastUse). nil tells nobody.
+	touch func()
 }
 
 // dictating is one open recording: the microphone it holds, the audio captured so far, and the cancel that stops the capture.
@@ -89,6 +92,7 @@ func NewDictation(s *Server) *Dictation {
 		transcribe: whisperText,
 		rate:       micRate,
 		max:        maxDictation,
+		touch:      s.use.touch,
 	}
 	d.prompt = func(ctx context.Context) string {
 		if s.store == nil {
@@ -141,6 +145,7 @@ func (d *Dictation) Start(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	d.active = cur
 	d.mu.Unlock()
+	d.touched()
 
 	go d.capture(cur, chunks)
 
@@ -244,6 +249,7 @@ func (c *dictating) halt() {
 
 // finish turns a finished recording into text: the buffered audio is resampled to 16 kHz, written to a temp WAV, run through whisper with the priming prompt, and the file deleted. The result is broadcast on the hub as a "dictation" event so a window that lost the HTTP response still gets its words. Input: the recording, already halted. Output: the transcript, trimmed.
 func (d *Dictation) finish(cur *dictating) (string, error) {
+	defer d.touched()
 	cur.mu.Lock()
 	raw := cur.pcm
 	cur.mu.Unlock()
@@ -278,6 +284,13 @@ func (d *Dictation) finish(cur *dictating) (string, error) {
 
 	d.hub.broadcast(Event{ID: cur.id, Type: "dictation", Text: text, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 	return text, nil
+}
+
+// touched tells the server a dictation began or ended, when there is one to tell.
+func (d *Dictation) touched() {
+	if d.touch != nil {
+		d.touch()
+	}
 }
 
 // resampleTo16k converts mono s16le PCM down to 16 kHz by interpolating linearly between neighbouring samples. Input: the raw little-endian 16-bit samples and the rate they were captured at. Output: the same audio at 16 kHz, or the input untouched when it is already there.
@@ -330,17 +343,16 @@ func writeWAV(path string, pcm []byte) error {
 	return os.WriteFile(path, append(h, pcm[:n]...), 0o600)
 }
 
-// The decoder thresholds and the model, the same ones internal/recorder passes for a meeting: whisper decodes each window at a rising temperature and keeps the first result that passes these two tests, so tightening them makes it retry a bad window instead of printing what it invented.
+// The decoder thresholds, the same ones internal/recorder passes for a meeting: whisper decodes each window at a rising temperature and keeps the first result that passes these two tests, so tightening them makes it retry a bad window instead of printing what it invented. The model is recorder.WhisperModelName's, so a dictation and a meeting always load the same one.
 const (
 	dictateEntropyThreshold = "2.20"
 	dictateLogProbThreshold = "-0.70"
 	whisperCPPBinaryName    = "whisper-cli"
-	whisperCPPModelName     = "ggml-medium.bin"
 )
 
 // whisperText runs the machine's whisper.cpp build over one WAV and returns what was said as a single line. Input: the WAV's path and the priming prompt, which biases whisper's spelling towards the words in it (pass "" for none). Output: the text with whisper's non-speech markers dropped and its lines joined by spaces.
 // The caller holds recorder.GPURun for the whole run (see finish), so this never allocates on the card beside a meeting's decode.
-// recorder.RunWhisper now asks the embedding server off the card before its first attempt, so a dictation no longer walks onto a card the embedder still holds. It asks once rather than polling the way a meeting transcription does, because somebody is waiting on a dictation.
+// recorder.RunWhisper now asks the local text server off the card before its first attempt, so a dictation no longer walks onto a card that server still holds. It asks once rather than polling the way a meeting transcription does, because somebody is waiting on a dictation.
 func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	name := whisperCPPBinaryName
 	if runtime.GOOS == "windows" {
@@ -349,15 +361,21 @@ func whisperText(ctx context.Context, wavPath, prompt string) (string, error) {
 	bin := filepath.Join(config.DataDir(), "whispercpp", name)
 	if p := os.Getenv("JUNE_WHISPER_CPP"); p != "" {
 		bin = p
+	} else if _, err := recorder.WhisperCPPBinary(config.DataDir()); err != nil {
+		// Without the override the program and its model both have to be there, the same test the meeting recorder makes: a program with no model beside it is a Set up cancelled before the model arrived, and run without -m whisper-cli fails on a default model path of its own. Settings is where it gets set up; nobody is expected to place files by hand.
+		slog.Info("dictation refused: voice typing is not set up", "error", err)
+		return "", errors.New("voice typing is not set up yet: open June → Settings → Local features and set up Voice typing & meeting transcripts")
 	}
 	if info, err := os.Stat(bin); err != nil || info.IsDir() {
-		return "", fmt.Errorf("no whisper.cpp build at %s: put %s and its model there", bin, name)
+		// Only JUNE_WHISPER_CPP gets here, so the path is a developer's; the log keeps it and the window gets the sentence a missing setup gets.
+		slog.Warn("dictation refused: JUNE_WHISPER_CPP names no program", "path", bin)
+		return "", errors.New("voice typing is not set up yet: open June → Settings → Local features and set up Voice typing & meeting transcripts")
 	}
 
 	// -nt drops the timestamps, which a dictation has no use for, so stdout is the words and nothing else.
-	args := []string{"-f", wavPath, "-np", "-nt", "-et", dictateEntropyThreshold, "-lpt", dictateLogProbThreshold}
+	args := []string{"-f", wavPath, "-nt", "-et", dictateEntropyThreshold, "-lpt", dictateLogProbThreshold}
 	// No model beside the binary means a stub, which is how a test's bare script gets run without flags it would not understand.
-	if model := filepath.Join(filepath.Dir(bin), whisperCPPModelName); util.Exists(model) {
+	if model := filepath.Join(filepath.Dir(bin), recorder.WhisperModelName()); util.Exists(model) {
 		// -l auto for the same reason internal/recorder passes it: whisper-cli defaults to -l en, and a dictation that is not in English comes back as [NON-ENGLISH SPEECH] rather than as words.
 		args = append(args, "-m", model, "-l", "auto")
 		if dev := config.LoadConfig().Transcribe.GPUDevice; dev > 0 {

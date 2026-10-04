@@ -1,7 +1,7 @@
-/** The Settings screen: how the window looks, where the hover opens, the hotkey that opens it, what the daemon is allowed to watch, which brain answers and on which model, what the daemon is running on this machine, and the token ledger. Every value is read off GET /settings, GET /brains, GET /status and GET /usage, and every control writes through the route that owns the setting, except the theme and the hover position, which the window and the hover share through localStorage rather than through the daemon (see HOVER_POSITION_KEY in src/winplace.ts). The page is a stack of grouped cards, the way a desktop settings pane is built, rather than a run of rows under grey capitals. */
+/** The Settings screen: how the window looks, where the hover opens, the hotkey that opens it, what the daemon is allowed to watch, which brain answers and on which model and the Gemini key, the local features downloaded onto this machine, what the daemon is running on it, which version of June this is, and the token ledger. Every value is read off GET /settings, GET /setup, GET /brains, GET /status, GET /components, GET /update and GET /usage, and every control writes through the route that owns the setting, except the theme and the hover position, which the window and the hover share through localStorage rather than through the daemon (see HOVER_POSITION_KEY in src/winplace.ts). The page is a stack of grouped cards, the way a desktop settings pane is built, rather than a run of rows under grey capitals. */
 
 import { Fragment, useState } from "react";
-import { Check, ChevronDown, Loader2, Play, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, Loader2, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -9,98 +9,71 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { HOVER_POSITION_KEY, storedHoverPosition, type HoverPosition } from "../winplace";
 import {
+  errorMessage,
   errorStatus,
+  errorWord,
   useBrainsQuery,
   usePickBrainMutation,
   usePreviewVoiceMutation,
+  useSaveSettingsMutation,
   useSetCaptureMutation,
-  useSetClaudeUsageFromLoginMutation,
   useSetLiveModelMutation,
   useSetVoiceMutation,
   useSettingsQuery,
+  useSetupQuery,
   useTrackerQuery,
   useUsageQuery,
   useVoicesQuery,
   SEARCH_PROVIDERS,
   type LiveModel,
   type ProviderLimits,
+  type SettingsChange,
   type SettingsView,
   type Usage,
   type UsageWindow,
   type Voice,
 } from "./api";
 import { bytes, cachedInput, compact, hhmm, hotkeyKeys, modelEffort, perQuestion, tokens, took } from "./format";
-import { Blank, Group, HEAD, PageHeader, Reading, Scroller, SectionHeading, TAIL, useWide } from "./parts";
+import { AutostartSwitch, BrainChoices, GeminiKey } from "./onboarding";
+import { FeatureList } from "./onboarding-features";
+import { Blank, BrainPicker, Group, HEAD, NO_SHORTCUT, ON_WINDOWS, PageHeader, Reading, Scroller, SectionHeading, TAIL, useHotkeyUnavailable, useWide } from "./parts";
 import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme } from "./store";
+import { UpdateStatus } from "./update";
 
 /** The keys the installer registers, drawn when the daemon reports no accelerator of its own. */
 const INSTALLED_HOTKEY = ["Ctrl", "Alt", "Space"];
 
-/** A machine value inside an otherwise plain sentence: an ALL_CAPS environment variable, a path starting with ~/ or /, or a `claude login`-style command. Three client-side rules rather than markup the daemon would have to start sending, since the steps are its own sentences read verbatim. */
-const CODE_TOKEN = /\b[A-Z][A-Z_]{3,}\b|(?:~\/|\/)\S*[^\s.,;:]|\bclaude \w+\b/g;
+/** What each brain is, in a line a person can read. The daemon's own notes are written for whoever maintains June — a command to run, a file to edit, a policy to cite — so the window says it in its own words, and says nothing for a brain it has no line for. */
+const BRAIN_NOTES: Record<string, string> = {
+  antigravity: "Answers on the Google plan you already pay for.",
+  gemini: "Answers on your Gemini key. Google's free tier allows a limited number of requests a day.",
+  codex: "Answers on your ChatGPT plan, through the Codex app's sign-in.",
+  claude: "Answers on your Claude plan, through Claude Code's sign-in.",
+  grok: "Grok offers no choice of model, so there is nothing to pick here.",
+  ollama: "Runs a model on this computer, so nothing leaves it.",
+};
 
-/** Wraps the machine-specific tokens in a sentence — an env var, a path, a command — in <code>, so a person can tell what to type apart from the sentence telling them to type it. Input: the sentence. Output: the same text, split around each match, with the match itself in a <code> element. */
-function codeSpans(text: string): React.ReactNode[] {
-  const out: React.ReactNode[] = [];
-  let last = 0;
-  let m: RegExpExecArray | null;
-  const re = new RegExp(CODE_TOKEN);
-  while ((m = re.exec(text))) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(
-      <code key={m.index} className="font-mono text-[0.92em]">
-        {m[0]}
-      </code>,
-    );
-    last = m.index + m[0].length;
-  }
-  out.push(text.slice(last));
-  return out;
-}
-
-/** What to do before June can answer at all, drawn only while the daemon still says none of the four ways of answering text is set up. Input: none — it reads GET /settings itself, so it can sit at the top of Settings and inside the empty Chats pane without either of them passing it anything. Output: the panel, or nothing once the daemon reports an empty step list. "Check again" re-reads /settings, which is what a person does after running one of the commands in another window.
- *
- * The steps are the daemon's own sentences and are shown verbatim as a real list; the window does not restate them, because then there would be two places to fix when a step changes.
- */
+/** What to do before June can answer at all, drawn only while the daemon still says none of the ways of answering text is set up. Input: none — it reads GET /settings itself, so it can sit at the top of Settings without being passed anything. Output: the panel, or nothing once the daemon reports an empty step list. The daemon's own steps say which file and which command; the panel offers the same ways first-run setup does instead, none of which needs a terminal or a text editor. */
 export function FirstRunPanel() {
-  const { data: daemon, refetch, isFetching } = useSettingsQuery();
-  const steps = daemon?.first_run?.steps ?? [];
-  if (!steps.length) return null;
-  return <SetUpCard lead="June needs a model before it can answer." ways={steps.map(codeSpans)} checking={isFetching} onCheck={() => void refetch()} />;
+  const { data: daemon } = useSettingsQuery();
+  if (!daemon?.first_run?.steps?.length) return null;
+  return <SetUpCard lead="June needs a brain before it can answer." />;
 }
 
-/** The chat page's card while GET /brains lists no brain signed in: every way June can be given one, since it works with whichever the user already has. Input: the daemon's data directory, whose env file is the one every june command reads (loadEnvFiles in cmd/root.go). Output: the card. "Check again" re-reads /brains; a key added to the env file is only read when the daemon starts, which is why that line says to restart June. */
-export function NoBrainPanel({ dataDir }: { dataDir: string }) {
-  const { refetch, isFetching } = useBrainsQuery();
-  const ways = [
-    <>Claude Code: run <code>claude</code>, then type <code>/login</code>.</>,
-    <>Codex: run <code>codex login</code>.</>,
-    <>Antigravity: run <code>agy</code> and sign in.</>,
-    <>Grok: run <code>grok</code> and sign in.</>,
-    <>Gemini: put <code>GEMINI_API_KEY=your-key</code> in <code>{`${dataDir}/env`}</code>, then restart June.</>,
-  ];
-  return <SetUpCard lead="No brain is signed in on this machine." ways={ways} checking={isFetching} onCheck={() => void refetch()} />;
+/** The chat page's card while GET /brains lists no brain signed in: the ways June can be given one, the same as first-run setup's. Input: none. Output: the card. */
+export function NoBrainPanel() {
+  return <SetUpCard lead="No brain is signed in on this computer." />;
 }
 
-/** The card both set-up panels draw. Input: the sentence under the heading, the ways to fix it, whether a re-read is in flight, and what "Check again" does. Output: the card. */
-function SetUpCard({ lead, ways, checking, onCheck }: { lead: string; ways: React.ReactNode[]; checking: boolean; onCheck: () => void }) {
+/** The card both set-up panels draw. Input: the sentence under the heading. Output: the card, with the logins June found and the Gemini key box under it. */
+function SetUpCard({ lead }: { lead: string }) {
+  const { data: setup } = useSetupQuery();
   return (
-    <Group>
-      <div className="px-4 py-3.5">
-        <h2 className="text-doc text-foreground">June cannot answer yet</h2>
-        <p className="mt-1.5 text-read text-muted-foreground">{lead} Any one of these will do.</p>
-        <ul className="mt-3 list-disc pl-5 text-read marker:text-muted-foreground [&_code]:font-mono [&_code]:text-[0.92em]">
-          {ways.map((w, i) => (
-            <li key={i} className="mt-1.5">
-              {w}
-            </li>
-          ))}
-        </ul>
-        <Button size="sm" className="mt-4" disabled={checking} onClick={onCheck}>
-          <RotateCcw /> Check again
-        </Button>
-      </div>
-    </Group>
+    <div>
+      <h2 className="text-doc text-foreground">June can't answer yet</h2>
+      <p className="mt-1.5 mb-5 text-read text-muted-foreground">{lead} The quickest is a key from Google — free to get, and it also lets you talk to June out loud.</p>
+      <BrainChoices geminiKey={setup?.gemini_key ?? false} />
+    </div>
   );
 }
 
@@ -147,7 +120,7 @@ function Machine({ s }: { s: SettingsView }) {
         <div className="divide-y">
           <Fact label="Model" hint="answers with" value={s.brain} mono />
           <Fact label="Embeddings" hint="understands meaning with" value={noEmbeddings ? "nothing — search is words only" : s.embed_model} mono={!noEmbeddings} />
-          <Fact label="Speech to text" hint="hears with" value={s.voice_model} mono />
+          <Fact label="Live voice" hint="talks through" value={s.voice_model} mono />
           <Fact label="Location" hint="everything is kept in" value={s.data_dir} mono />
           <Fact label="What it has written" value={`${bytes(s.store_bytes)} of memory · ${bytes(s.recordings_bytes)} of audio · ${bytes(s.models_bytes)} of models`} />
           <Fact label="Audio kept for" value={s.keep_audio_days < 0 ? "as long as you leave it there" : `${s.keep_audio_days} days`} />
@@ -167,8 +140,18 @@ function errorSentence(e: unknown): string {
   return line.length > 200 ? line.slice(0, 200) + "…" : line;
 }
 
-/** The voice picker: a single select showing the current voice and the trait that says how it sounds, with every one of Gemini Live's thirty prebuilt voices behind it the same way, and a play button beside it that previews whichever voice is currently picked. Input: none — it reads GET /voices itself. Output: the section. */
-function VoiceSection() {
+/** Why a voice could not be played, in words. Input: what the preview rejected with, and whether a Gemini key is saved. Output: the sentence. A 503 means no speaker or no key, and the daemon's sentence for the second names a file and a variable, so the window says both in its own words: told apart by the error word a newer daemon sends, then by the daemon's sentence, then by whether a key is saved at all. Anything else keeps the daemon's own sentence — a spent daily allowance, a line the model refused — since that is the one that says what happened. */
+function previewProblem(e: unknown, geminiKey: boolean): string {
+  const said = errorMessage(e) || errorSentence(e);
+  if (errorStatus(e) !== 503) return said || "Could not play that voice";
+  const word = errorWord(e);
+  if (word === "no_speaker" || /speaker/i.test(said)) return "This machine has no speaker to play it through";
+  if (word === "no_key" || /gemini|key/i.test(said) || !geminiKey) return "Hearing a voice needs a Gemini key. Add one under Brain.";
+  return "This machine has no speaker to play it through";
+}
+
+/** The voice picker: a single select showing the current voice and the trait that says how it sounds, with every one of Gemini Live's thirty prebuilt voices behind it the same way, and a play button beside it that previews whichever voice is currently picked. Input: whether a Gemini key is saved, undefined while that is not known. Output: the section. */
+function VoiceSection({ geminiKey }: { geminiKey?: boolean }) {
   const dispatch = useAppDispatch();
   const { data } = useVoicesQuery();
   const voices = data?.voices ?? [];
@@ -200,8 +183,7 @@ function VoiceSection() {
     try {
       await previewVoice(current.name).unwrap();
     } catch (e) {
-      // The daemon says exactly what went wrong — a spent daily allowance, a line the model refused, no speaker — and "Could not play that voice" threw all three away. It is shown as it came, with the generic line kept only for a failure that carried no words of its own.
-      dispatch(ui.noticed({ text: errorStatus(e) === 503 ? "This machine has no speaker to play it through" : errorSentence(e) || "Could not play that voice", kind: "error" }));
+      dispatch(ui.noticed({ text: previewProblem(e, geminiKey ?? true), kind: "error" }));
     }
   };
 
@@ -209,6 +191,8 @@ function VoiceSection() {
     <section className="mt-10">
       <SectionHeading>Voice</SectionHeading>
       <p className="mb-3 text-meta text-muted-foreground">Heard the next time a live voice session starts, not the one already running — the daemon reads this when it dials.</p>
+      {/* Said before the play button is pressed rather than after: with no key, talking out loud and hearing a voice you have not played before both need one. */}
+      {geminiKey === false ? <p className="mb-3 text-meta text-muted-foreground">Talking to June out loud, and hearing a voice you haven't played before, need a Gemini key. Add one under Brain.</p> : null}
       <Group>
         {models.length > 0 ? (
           <Row label="Model">
@@ -281,6 +265,11 @@ function cells(r: { calls: number; input_tokens: number; output_tokens: number; 
   );
 }
 
+/** What a ledger row calls the model a call ran on. Input: the provider and the model the daemon filed. Output: the model, or "default model" when the call named none and the daemon filed it under the provider's own name instead — an unpinned Antigravity run is filed as model "agy", which drew a model row reading exactly like the provider row above it. */
+function usageModel(provider: string, model: string): string {
+  return !model || model === provider ? "default model" : model;
+}
+
 /** One window of the ledger as a table: a row per provider with that provider's models under it. Input: the window and the line to show when nothing was spent in it. Output: the table, or that one line. */
 function UsageTable({ window: w, empty }: { window: UsageWindow; empty: string }) {
   const providers = w?.providers ?? [];
@@ -308,7 +297,7 @@ function UsageTable({ window: w, empty }: { window: UsageWindow; empty: string }
                 .filter((m) => m.provider === p.provider)
                 .map((m) => (
                   <tr key={`${p.provider}-${m.model}`} className="border-b text-muted-foreground">
-                    <td className="py-1.5 pl-4">{m.model}</td>
+                    <td className="py-1.5 pl-4">{usageModel(m.provider, m.model)}</td>
                     {cells(m)}
                   </tr>
                 ))}
@@ -470,7 +459,7 @@ export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
                     <tr key={c.id} className="border-b align-top">
                       <td className="py-1.5 tabular-nums text-muted-foreground">{hhmm(c.when)}</td>
                       <td className="break-words py-1.5">
-                        <span className="font-medium">{c.provider}</span> <span className="text-muted-foreground">{[c.model, c.channel].filter(Boolean).join(" · ")}</span>
+                        <span className="font-medium">{c.provider}</span> <span className="text-muted-foreground">{[c.model && usageModel(c.provider, c.model), c.channel].filter(Boolean).join(" · ")}</span>
                         {c.question ? <div className="text-meta text-muted-foreground">{c.question}</div> : null}
                       </td>
                       <td className="py-1.5 text-right tabular-nums">{tokens(c.input_tokens)}</td>
@@ -502,12 +491,15 @@ export function SettingsScreen() {
   const dispatch = useAppDispatch();
   const theme = useAppSelector((s) => s.settings.theme);
   const { data: daemon, isError } = useSettingsQuery();
-  const { data: brains = [] } = useBrainsQuery();
+  const { data: setup } = useSetupQuery();
+  const { data: brainList } = useBrainsQuery();
+  const brains = brainList?.brains ?? [];
   const { data: tracker } = useTrackerQuery();
   const { data: usage } = useUsageQuery();
   const [pickBrain] = usePickBrainMutation();
   const [setCapture] = useSetCaptureMutation();
-  const [setClaudeUsageFromLogin] = useSetClaudeUsageFromLoginMutation();
+  const [saveSettings] = useSaveSettingsMutation();
+  const hotkeyGone = useHotkeyUnavailable();
   const [wide, pane] = useWide();
   // Where the hover opens, kept in the localStorage key both windows share rather than on the daemon; read once on mount, same as the hover itself re-reads it on every open.
   const [hoverPosition, setHoverPosition] = useState<HoverPosition>(() => storedHoverPosition());
@@ -526,6 +518,8 @@ export function SettingsScreen() {
   const keys = live.length ? live : INSTALLED_HOTKEY;
   // /status is the live answer and /settings is what was true when the page was read, so the live one wins when it is there.
   const watching = tracker ? !tracker.paused : (daemon?.capture_enabled ?? false);
+  const pausedUntil = tracker?.paused ? (tracker.paused_until ?? "") : "";
+  const firstRun = Boolean(daemon?.first_run?.steps?.length);
 
   const watch = async (on: boolean) => {
     try {
@@ -544,9 +538,10 @@ export function SettingsScreen() {
     }
   };
 
-  const toggleClaudeUsage = async (on: boolean) => {
+  /** Writes one of the daemon's settings, and says on the rail when it did not go through; the control shows what the daemon reads back either way. */
+  const save = async (change: SettingsChange) => {
     try {
-      await setClaudeUsageFromLogin(on).unwrap();
+      await saveSettings(change).unwrap();
     } catch {
       dispatch(ui.noticed({ text: "Could not change that setting", kind: "error" }));
     }
@@ -559,8 +554,8 @@ export function SettingsScreen() {
       </PageHeader>
       <Scroller bodyClassName={`${HEAD} ${TAIL}`}>
         <Reading wide={wide}>
-          {/* Nothing else on this page matters while June cannot answer, so the steps go above the first group and disappear on their own once the daemon reports none left. */}
-          {daemon?.first_run?.steps?.length ? (
+          {/* Nothing else on this page matters while June cannot answer, so the ways to fix it go above the first group and disappear on their own once the daemon reports nothing left to set up. */}
+          {firstRun ? (
             <div className="mb-8">
               <FirstRunPanel />
             </div>
@@ -588,8 +583,9 @@ export function SettingsScreen() {
                     </TabsList>
                   </Tabs>
                 </Row>
-                <Row label="Hotkey" hint="the GNOME shortcut that opens this window">
-                  <div className="flex gap-1">
+                {/* Another program holding the keys leaves them doing nothing, so the row says so, and where June opens from instead, rather than drawing keys that will not work. */}
+                <Row label="Hotkey" hint={hotkeyGone ? NO_SHORTCUT : "the shortcut that opens this window"}>
+                  <div className={`flex gap-1 ${hotkeyGone ? "line-through opacity-60" : ""}`}>
                     {keys.map((k) => (
                       <kbd key={k} className="rounded-xs border border-hairline-strong px-1.5 py-0.5 text-micro text-muted-foreground uppercase">
                         {k}
@@ -597,28 +593,75 @@ export function SettingsScreen() {
                     ))}
                   </div>
                 </Row>
-                <Row label="Watching the screen" hint="what June sees is what it can remember">
+                {setup ? (
+                  <Row label={ON_WINDOWS ? "Start with Windows" : "Start when you log in"} hint="June opens in the background when you sign in, so it is always keeping notes">
+                    <AutostartSwitch on={setup.autostart} label={ON_WINDOWS ? "Start with Windows" : "Start when you log in"} />
+                  </Row>
+                ) : null}
+                <Row label="Watching the screen" hint={pausedUntil ? `Paused until ${hhmm(pausedUntil)} — it starts again by itself` : "what June sees is what it can remember"}>
                   <Switch checked={watching} aria-label="Watching the screen" onCheckedChange={(on) => void watch(on)} />
                 </Row>
-                <Row label="Recording meetings" hint="turned on in the config file, not from here">
-                  <span className="text-ui text-muted-foreground">{daemon?.meetings_enabled ? "On" : "Off"}</span>
-                </Row>
+                {daemon?.meetings_offer ? (
+                  // The daemon starts its call watcher only when offering was on as it started (cmd/daemon.go), and meetings_enabled says whether it is running; Ask to Off holds at once, Off to Ask only from the next start, so the row says so rather than looking as if it took.
+                  <Row
+                    label="Offer to record calls"
+                    hint={
+                      daemon.meetings_offer === "ask" && !daemon.meetings_enabled
+                        ? "June starts asking the next time it starts — after a restart, or when you next sign in"
+                        : "when another app uses the microphone for a while, June asks whether to record the call"
+                    }
+                  >
+                    <Tabs value={daemon.meetings_offer} activationMode="manual" onValueChange={(v) => void save({ meetings_offer: v === "off" ? "off" : "ask" })}>
+                      <TabsList aria-label="Offer to record calls">
+                        <TabsTrigger value="ask">Ask</TabsTrigger>
+                        <TabsTrigger value="off">Off</TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                  </Row>
+                ) : (
+                  <Row label="Recording meetings" hint="whether June offers to record your calls">
+                    <span className="text-ui text-muted-foreground">{daemon?.meetings_enabled ? "On" : "Off"}</span>
+                  </Row>
+                )}
               </div>
             </Group>
           </section>
 
-          <section className="mt-10">
+          {/* The id is where an answer that failed for want of a key or a login sends the person. */}
+          <section id="brain" className="mt-10 scroll-mt-8">
             <SectionHeading>Brain</SectionHeading>
             <Group>
+              {/* The panel at the top already holds the key box while nothing can answer, and two boxes for one key would ask which one counts. A daemon too old to answer GET /setup cannot take a key from here at all. */}
+              {setup && !firstRun ? (
+                <div className="border-b px-3.5 py-3">
+                  <GeminiKey saved={setup.gemini_key} manage />
+                </div>
+              ) : null}
               <div className="border-b">
                 <Row label="Show Claude plan usage" hint="Reads your Claude Code login's usage from an undocumented Anthropic endpoint. Turn off if you would rather it did not.">
                   <Switch
                     checked={daemon?.claude_usage_from_login ?? true}
                     aria-label="Show Claude plan usage"
-                    onCheckedChange={(on) => void toggleClaudeUsage(on)}
+                    onCheckedChange={(on) => void save({ claude_usage_from_login: on })}
                   />
                 </Row>
               </div>
+              {daemon?.allow_fallback !== undefined ? (
+                <div className="border-b">
+                  {/* The daemon reads this for background work only (agent.DutyFallbackAllowed); a question you ask is still handed on when the AI you picked is out of allowance or signed out, so the hint names what the switch covers and promises nothing about questions. */}
+                  <Row label="If your chosen AI can't answer, try my other signed-in AIs" hint="Covers June's background work: tidying its notes and writing up meetings. On, that can use up the allowance on your other plans; off, only the AI you picked does it.">
+                    <Switch checked={daemon.allow_fallback} aria-label="If your chosen AI can't answer, try my other signed-in AIs" onCheckedChange={(on) => void save({ allow_fallback: on })} />
+                  </Row>
+                </div>
+              ) : null}
+              {brains.length > 0 ? (
+                <div className="border-b">
+                  {/* The same control as the header of Chats and Tasks, so the way back to letting June pick is in Settings too and not only in a chat's header. */}
+                  <Row label="Default brain" hint="what a chat that names none is answered by">
+                    <BrainPicker current="" brains={brains} automatic={brainList?.automatic} />
+                  </Row>
+                </div>
+              ) : null}
               {brains.length === 0 ? (
                 <p className="px-3.5 py-3 text-ui text-muted-foreground">{isError ? "Not connected." : "No brains reported."}</p>
               ) : (
@@ -636,17 +679,18 @@ export function SettingsScreen() {
                           {(b.models ?? []).length === 0 ? (
                             <span className="text-meta text-muted-foreground">no model choice exposed</span>
                           ) : (
-                            b.models.map((m) => (
+                            // "" leads the row as "default model": a brain nobody pinned a model for runs on its own default, which is the chip lit for it, and pressing it is the way back to that after pinning one. Lighting the first listed model instead claimed a pin that was never made.
+                            ["", ...b.models].map((m) => (
                               <button
-                                key={m}
+                                key={m || "default"}
                                 type="button"
-                                aria-pressed={m === (b.model || b.models[0])}
+                                aria-pressed={m === b.model}
                                 onClick={() => void pickModel(b.id, m)}
-                                className={`rounded-full px-2.5 py-1 text-meta outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${m === (b.model || b.models[0]) ? "bg-primary/15 text-foreground" : "bg-muted text-muted-foreground hover:bg-hover hover:text-foreground"}`}
+                                className={`rounded-full px-2.5 py-1 text-meta outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring ${m === b.model ? "bg-primary/15 text-foreground" : "bg-muted text-muted-foreground hover:bg-hover hover:text-foreground"}`}
                               >
-                                {modelEffort(m).model}
+                                {m ? modelEffort(m).model : "default model"}
                                 {/* Antigravity has no effort setting of its own: it publishes one model id per effort, so the suffix is the dial and is drawn as its own word rather than buried in the id. */}
-                                {modelEffort(m).effort ? (
+                                {m && modelEffort(m).effort ? (
                                   <span className="ml-1 opacity-60">· {modelEffort(m).effort}</span>
                                 ) : null}
                               </button>
@@ -654,7 +698,7 @@ export function SettingsScreen() {
                           )}
                         </div>
                       ) : null}
-                      {b.note ? <p className="mt-1.5 text-meta text-muted-foreground">{b.note}</p> : null}
+                      {BRAIN_NOTES[b.id] ? <p className="mt-1.5 text-meta text-muted-foreground">{BRAIN_NOTES[b.id]}</p> : null}
                     </div>
                   ))}
                 </div>
@@ -662,9 +706,31 @@ export function SettingsScreen() {
             </Group>
           </section>
 
-          <VoiceSection />
+          <VoiceSection geminiKey={setup?.gemini_key} />
+
+          {/* The id is where the composer's "Set it up" for voice typing lands. */}
+          <section id="local-features" className="mt-10 scroll-mt-8">
+            <SectionHeading aside="run on this PC, not online">Local features</SectionHeading>
+            <FeatureList manage />
+          </section>
 
           {daemon ? <Machine s={daemon} /> : null}
+
+          <section className="mt-10">
+            <SectionHeading>About June</SectionHeading>
+            <Group>
+              <div className="divide-y">
+                <Row label="Version" hint={daemon?.update_check === false ? "automatic checks are off; Check now still asks" : "June looks for a newer one once a day"}>
+                  <UpdateStatus version={setup?.version || daemon?.version || ""} />
+                </Row>
+                {daemon?.update_check !== undefined ? (
+                  <Row label="Check for updates" hint="once a day, June asks GitHub whether a newer version is out">
+                    <Switch checked={daemon.update_check} aria-label="Check for updates" onCheckedChange={(on) => void save({ update_check: on })} />
+                  </Row>
+                ) : null}
+              </div>
+            </Group>
+          </section>
 
           {/* The ledger is the last section of this page rather than a destination of its own, and it opens on the figures and the week's bars rather than on a table. */}
           <section className="mt-10">

@@ -1,5 +1,5 @@
 # uia.ps1 is the UI Automation host June's daemon keeps running on Windows (see uia_windows.go). PowerShell runs as `-Command -`, reading statements from stdin; the daemon's first line runs this text from base64, so it is never written to disk.
-# Protocol: each later stdin line is `UiaServe '<base64 of a JSON request>'`, answered by one JSON line on stdout. Every request carries op, hwnd, ref, text and ms; a failed request answers {"err": "..."}.
+# Protocol: each later stdin line is `UiaServe '<base64 of a JSON request>'`, answered by one JSON line on stdout. Every request carries op, hwnd, ref, text and ms (how long a walk may read, or an act may take to find its element and wait for its action to return); a failed request answers {"err": "..."}.
 
 $ProgressPreference = 'SilentlyContinue'
 
@@ -11,6 +11,18 @@ try {
 } catch {}
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase, System.Web.Extensions
+
+# Classic Win32 and WinForms controls (BUTTON, STATIC, Edit, SysTreeView32 and the rest, in a Run dialog, a message box, Explorer's navigation pane) have no UI Automation provider of their own; the client-side proxies that give them one live in UIAutomationClientsideProviders, which the managed client fails to load by itself inside powershell.exe. Without them every such control read as an unnamed-role Pane, which an observe walk does not list and a capture treats as furniture, so those windows read as empty.
+# The first registration in a fresh process throws a NullReferenceException and the second succeeds (measured on Windows 11 26200), so it is tried a few times; a host that cannot register still reads every application that has its own provider.
+# A host that could not is said so on stderr, which the daemon logs (see uiaStderr in uia_windows.go): the classic windows reading empty again is otherwise indistinguishable in june.log from windows that publish nothing.
+$proxyErr = 'it was not tried'
+try {
+    Add-Type -AssemblyName UIAutomationClientsideProviders -ErrorAction Stop
+    foreach ($attempt in 1..3) {
+        try { [System.Windows.Automation.ClientSettings]::RegisterClientSideProviders([UIAutomationClientsideProviders.UIAutomationClientSideProviders]::ClientSideProviderDescriptionTable); $proxyErr = $null; break } catch { $proxyErr = $_.Exception.Message }
+    }
+} catch { $proxyErr = $_.Exception.Message }
+if ($null -ne $proxyErr) { [Console]::Error.WriteLine("the Win32 client-side providers could not be registered, so classic Win32 and WinForms windows read as empty: $proxyErr") }
 
 $js = New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $js.MaxJsonLength = [int]::MaxValue
@@ -40,6 +52,11 @@ $S = @{ els = @{}; nodes = $null; seen = 0; sw = $null; ms = 0; vcap = 500 }
 $maxDepth = 40
 $maxNodes = 4000
 $maxText = 100000
+# The least of its ms an act must have left once its element is found to be fired at all, the same floor uiaMinBudget in uia_windows.go puts on sending one: with less, an ordinary action would have too little time to return and would be answered as not returned.
+$minFireMS = 200
+# How long a walk that found a Chromium window's page empty waits before reading it again (see the walk op), and the least of its budget that must be left after the wait for the second read to be worth making.
+$pageWaitMS = 700
+$pageReadMS = 300
 # The control types an observe walk describes, the ones uiaRole in uia.go maps to an actionable role (see act.Actionable); every other element is only walked through, which keeps a large page inside the walk's time budget.
 $listed = [System.Collections.Generic.HashSet[int]]::new([int[]](50000, 50002, 50003, 50004, 50005, 50007, 50009, 50011, 50013, 50015, 50016, 50019, 50020, 50024, 50029, 50030, 50031))
 
@@ -68,15 +85,30 @@ function UiaDesc($el, $c, $hw, $vcap) {
     $h
 }
 
-# UiaWalk appends an element and its subtree to $S.nodes depth first (an observe walk only the elements of a listed control type), bounded by depth, node count and the request's time budget, so a huge tree answers with what was read in time rather than not at all. Input: the element (with the cache filled), its depth, whether this is a capture walk, and the window handle. Output: none.
+# UiaWalk appends an element and its subtree to $S.nodes depth first (an observe walk only the elements of a listed control type), bounded by depth, node count and the request's time budget, so a huge tree answers with what was read in time rather than not at all. Input: the element (with the cache filled), its depth, whether this is a capture walk, the window handle, and its parent's control type (0 for the window). Output: none.
 # A capture walk takes an element's whole TextPattern text and does not descend under it: a browser's page gives all of its text in that one call.
-function UiaWalk($el, $d, $text, $hw) {
+function UiaWalk($el, $d, $text, $hw, $pct) {
     if ($d -gt $maxDepth -or $S.seen -ge $maxNodes -or $S.sw.ElapsedMilliseconds -ge $S.ms) { return }
     $S.seen++
     $leaf = $false
+    $ct = 0
+    try { $ct = $el.GetCachedPropertyValue($Props.ct).Id } catch {}
+    # A title bar is the window's frame, not its content. A capture leaves all of it out: its value and its buttons are the window's title over again ("Minimize Calculator", "Close Calculator") and put "System Minimize Calculator Maximize Calculator Close Calculator" at the head of every capture of a store app, which is most of what a short capture's embedding was made of. An observe walk keeps the Minimize, Maximize and Close buttons, which can be pressed and which say a window publishes nothing else, but not the window menu (the menu bar named "System"), which the client-side proxies add to every classic window.
+    if ($ct -eq 50037 -and $text) { return }
+    if ($ct -eq 50010 -and $pct -eq 50037) { return }
+    # A store app's frame is not a TitleBar at all: ApplicationFrameHost draws it as a Window holding the "System" menu bar and buttons named "Minimize Calculator" and so on, so the two lines above never fire for it and every capture of a store app still opened with that caption (measured on Calculator, 2026-10-03). A capture leaves those out by name; an observe walk keeps the buttons, which can be pressed.
+    if ($text -and ($ct -eq 50010 -or $ct -eq 50000)) {
+        $nm = ''
+        try { $nm = [string]$el.GetCachedPropertyValue($Props.n) } catch {}
+        if (($ct -eq 50010 -and $nm -eq 'System') -or ($ct -eq 50000 -and $nm -match '^(Minimize|Maximize|Restore|Close) ')) { return }
+    }
+    # A tooltip is the name of whatever the pointer happens to rest on, shown again for a moment: in a listing it is a line of text that cannot be acted on, and in a capture words the window does not hold.
+    if ($ct -eq 50022) { return }
+    # A scroll bar is furniture as well. The client-side proxies give every classic one (Explorer's navigation pane, a classic list or edit) four buttons, "Back by small amount", "Back by large amount", "Forward by large amount" and "Forward by small amount", and a thumb: four lines of a listing per scroll bar that are controls, so they outlast page text at the listing's cap, for what the model's own scroll tools already do, and four phrases in every capture of the window.
+    if ($ct -eq 50014) { return }
     # An element whose properties cannot be read, such as one that vanished during the walk, is left out rather than failing the whole read.
     try {
-        if ($text -or $listed.Contains($el.GetCachedPropertyValue($Props.ct).Id)) {
+        if ($text -or $listed.Contains($ct)) {
             $h = [hashtable](UiaDesc $el $true $hw $S.vcap)
             $h.d = $d
             if ($text -and -not $h.pw -and $el.GetCachedPropertyValue($Props.tp) -eq $true) {
@@ -93,10 +125,20 @@ function UiaWalk($el, $d, $text, $hw) {
     $kid = $null
     try { $kid = $walker.GetFirstChild($el, $cr) } catch {}
     while ($null -ne $kid) {
-        UiaWalk $kid ($d + 1) $text $hw
+        UiaWalk $kid ($d + 1) $text $hw $ct
         if ($S.seen -ge $maxNodes -or $S.sw.ElapsedMilliseconds -ge $S.ms) { return }
         try { $kid = $walker.GetNextSibling($kid, $cr) } catch { $kid = $null }
     }
+}
+
+# UiaHasPage reports whether the walk in $S.nodes reached a page: a Document with text of its own or an element under it. Output: a bool.
+function UiaHasPage {
+    $n = $S.nodes
+    for ($i = 0; $i -lt $n.Count; $i++) {
+        if ($n[$i].c -ne 50030) { continue }
+        if ($n[$i].t -or ($i + 1 -lt $n.Count -and $n[$i + 1].d -gt $n[$i].d)) { return $true }
+    }
+    return $false
 }
 
 # UiaFind resolves a ref ("hwnd:runtime.id") to its element: from the table when it was listed, else by searching its window for the runtime id, which survives a restart of this host. Output: the element, or a thrown error when it has gone.
@@ -112,6 +154,14 @@ function UiaFind($ref) {
     if ($null -eq $el) { throw 'the element has gone' }
     $S.els[$ref] = $el
     return $el
+}
+
+# UiaFire calls one of a pattern's action methods (Invoke, Toggle, Select, Expand or Collapse) on a worker thread and waits up to $ms for it. Input: the pattern, the method's name and the wait. Output: $true when the call returned, $false when it is still running; a thrown error when it failed.
+# A provider whose action opens a modal dialog before returning, which the UI Automation documentation warns of for Invoke, keeps the call from returning until the dialog is closed. Called on this thread it held the host until the daemon gave up on it, killed it and pressed the control a second time with the pointer; on a worker the press goes out, this host stays free to read the dialog, and the reply says it is still running so the daemon does not press again.
+# The delegate is bound to the pattern's own .NET method rather than made from a script block, because a script block needs a runspace and a pool thread has none.
+function UiaFire($p, $verb, $ms) {
+    $t = [System.Threading.Tasks.Task]::Run([Delegate]::CreateDelegate([Action], $p, $verb))
+    return $t.Wait($ms)
 }
 
 # UiaHandle answers one request. Input: the decoded request. Output: the reply hashtable.
@@ -130,7 +180,14 @@ function UiaHandle($q) {
             if ($text) { $S.vcap = $maxText }
             $S.sw = [System.Diagnostics.Stopwatch]::StartNew()
             $root = $AE::FromHandle([IntPtr]$hw).GetUpdatedCache($cr)
-            UiaWalk $root 0 $text $hw
+            UiaWalk $root 0 $text $hw 0
+            # Chromium (Chrome, Edge and every Electron app) builds a page's accessibility tree only once a client has asked for it, and fills it in over the following second, so the first read of a window nobody had read before saw the browser's frame and toolbar and none of the page. When the page came back empty and the budget leaves room, the window is read once more after a pause.
+            if (-not (UiaHasPage) -and $S.ms - $S.sw.ElapsedMilliseconds -ge $pageWaitMS + $pageReadMS -and [string]$root.Current.ClassName -eq 'Chrome_WidgetWin_1') {
+                Start-Sleep -Milliseconds $pageWaitMS
+                $S.nodes = [System.Collections.Generic.List[object]]::new()
+                $S.seen = 0
+                UiaWalk ($AE::FromHandle([IntPtr]$hw).GetUpdatedCache($cr)) 0 $text $hw 0
+            }
             return @{ nodes = $S.nodes.ToArray() }
         }
         'desc' {
@@ -140,18 +197,25 @@ function UiaHandle($q) {
             return $h
         }
         'act' {
-            # ponytail: Invoke on a Win32 button that opens a modal dialog blocks until the dialog closes, so the daemon times out, restarts this host and falls back to a pointer click on a button that was already pressed; run Invoke on a worker thread if that double press is ever seen.
+            # The request's ms is the whole act's, finding the element included. A ref this host never listed, because it was restarted since the list was read, is searched for by runtime id, which can take seconds on a browser's tree; an act still searching when the daemon's deadline passed was killed there, and a host killed mid-act has to be reported as maybe pressed, so nothing pressed the control at all. Refusing once the time is spent answers with a plain error before anything is fired, which leaves the pointer to press it.
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $ms = [int]$q['ms']
             $el = UiaFind ([string]$q['ref'])
             $p = $null
-            if ($el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$p)) { $p.Invoke(); return @{ action = 'invoke' } }
-            if ($el.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$p)) { $p.Toggle(); return @{ action = 'toggle' } }
-            if ($el.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$p)) { $p.Select(); return @{ action = 'select' } }
-            if ($el.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$p)) {
+            $verb = $null
+            if ($el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$p)) { $verb = 'Invoke' }
+            elseif ($el.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$p)) { $verb = 'Toggle' }
+            elseif ($el.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$p)) { $verb = 'Select' }
+            elseif ($el.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$p)) {
                 $st = $p.Current.ExpandCollapseState
-                if ($st -eq [System.Windows.Automation.ExpandCollapseState]::Expanded) { $p.Collapse(); return @{ action = 'collapse' } }
-                if ($st -ne [System.Windows.Automation.ExpandCollapseState]::LeafNode) { $p.Expand(); return @{ action = 'expand' } }
+                if ($st -eq [System.Windows.Automation.ExpandCollapseState]::Expanded) { $verb = 'Collapse' }
+                elseif ($st -ne [System.Windows.Automation.ExpandCollapseState]::LeafNode) { $verb = 'Expand' }
             }
-            throw 'the element offers no Invoke, Toggle, SelectionItem or ExpandCollapse pattern to fire'
+            if ($null -eq $verb) { throw 'the element offers no Invoke, Toggle, SelectionItem or ExpandCollapse pattern to fire' }
+            $left = [int]($ms - $sw.ElapsedMilliseconds)
+            if ($left -lt $minFireMS) { throw "finding the element took the time this action had, so it was not fired" }
+            # pending says the action was fired and had not returned in what was left of the request's ms (see UiaFire).
+            return @{ action = $verb.ToLower(); pending = -not (UiaFire $p $verb $left) }
         }
         'scroll' {
             $el = UiaFind ([string]$q['ref'])
@@ -175,7 +239,15 @@ function UiaHandle($q) {
         'focus' {
             $f = $AE::FocusedElement
             if ($null -eq $f) { return @{ none = $true } }
-            $h = [hashtable](UiaDesc $f $false ([long]$q['hwnd']) 500)
+            # A read for a field_holds check (text set) takes the value whole, up to the capture's own cap, since text typed at the end of a page already longer than an observe line's 500 characters was cut off and never found. The read the stop lines make before every keystroke needs none of it and keeps the 500.
+            $text = [bool]$q['text']
+            $vcap = 500
+            if ($text) { $vcap = $maxText }
+            $h = [hashtable](UiaDesc $f $false ([long]$q['hwnd']) $vcap)
+            # A control that publishes its contents through TextPattern alone (Word, Windows Terminal, some rich edits) has no value to read, so the check reads its document text instead.
+            if ($text -and -not $h.pw -and $f.GetCurrentPropertyValue($Props.v) -isnot [string] -and $f.GetCurrentPropertyValue($Props.tp) -eq $true) {
+                try { $h.t = [string]$f.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText($maxText) } catch {}
+            }
             $h.p = [int]$f.Current.ProcessId
             if ($h.id) { $S.els[$h.id] = $f }
             return $h

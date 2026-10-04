@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "./alert-dialog";
-import { useDeleteMeetingMutation, useMeetingsQuery, useTasksQuery, type Meeting, type Task } from "./api";
+import { useDeleteMeetingMutation, useMeetingsQuery, useSettingsQuery, useTasksQuery, type Meeting, type Task } from "./api";
 import { dayHeading, groupMeetings, hhmm, keyed, meetingLength, meetingTasks, meetingWho, meetingsShown, minutesBlocks, minutesLines, type MinutesBlock } from "./format";
 import { Blank, HEAD, Outline, PageHeader, Picker, Rail, RailBlock, Reading, Scroller, TAIL, useReading, useWide } from "./parts";
 import { ui, useAppDispatch, useAppSelector } from "./store";
@@ -114,6 +114,7 @@ export function MeetingsScreen() {
   const { meetingId, query } = useAppSelector((s) => s.ui);
   const { data: meetings = [], isError, isLoading } = useMeetingsQuery();
   const { data: tasks = [] } = useTasksQuery();
+  const { data: daemon } = useSettingsQuery();
   const [asking, setAsking] = useState(false);
   const [wide, pane] = useWide();
 
@@ -153,7 +154,15 @@ export function MeetingsScreen() {
             up={!isError}
             loading={isLoading}
             empty="No meetings recorded yet."
-            hint="June writes minutes for a call once it has recorded one. Turn recording on in the config file and the next call lands here."
+            // meetings_enabled is the daemon's own "offers to record, or records" (meetings.offer, on unless turned off, or meetings.auto_record), so the hint says what will actually happen on the next call rather than asking for a setting that is already on. It names the Settings control rather than the config file, which a person should never have to open.
+            // meetings_enabled is fixed when the daemon starts, while meetings_offer is the setting as it is now: Off holds at once, and Ask only from the next start, so the setting decides "off" and the pair decides "not yet".
+            hint={
+              daemon?.meetings_offer === "off" || (daemon?.meetings_offer === undefined && daemon?.meetings_enabled === false)
+                ? "June is set not to offer to record calls. Start a recording from the tray, or set Offer to record calls back to Ask in Settings, and the minutes land here."
+                : daemon?.meetings_enabled === false
+                  ? "June starts offering to record calls the next time it starts. Until then, start a recording from the tray, and the minutes land here."
+                  : "When June notices a call it offers to record it, or start one from the tray. The minutes land here once it has written them up."
+            }
           />
         )}
       </Scroller>

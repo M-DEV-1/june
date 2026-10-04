@@ -66,7 +66,7 @@ func actionConn() (*dbus.Conn, error) {
 	return w.conn, nil
 }
 
-// DoAction fires a node's primary accessibility action, which is what a click does without moving the pointer. Input: a context and the node's Ref from act.Node. Output: the name of the action fired, or an error when the ref is malformed, the node has gone, has no actions, or the toolkit reports the action failed.
+// DoAction fires a node's primary accessibility action, which is what a click does without moving the pointer. Input: a context and the node's Ref from act.Node. Output: the name of the action fired, or an error when the ref is malformed, the node has gone, has no actions, or the toolkit reports the action failed; one wrapping ErrActionUnconfirmed when the action was sent and the deadline ran out before the toolkit answered.
 func DoAction(ctx context.Context, ref string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, actTimeout)
 	defer cancel()
@@ -88,7 +88,12 @@ func DoAction(ctx context.Context, ref string) (string, error) {
 		return "", errors.New("the element offers no action to fire")
 	}
 	var ok bool
+	sent := ctx.Err() == nil // godbus does not send a call whose context has already ended
 	if err := obj.CallWithContext(ctx, "org.a11y.atspi.Action.DoAction", 0, int32(i)).Store(&ok); err != nil {
+		// The call was on the bus when the deadline ran out, so the application may still carry it out; a caller that took this for "nothing fired" would press the element a second time.
+		if sent && ctx.Err() != nil {
+			return names[i], fmt.Errorf("%s did not answer in time: %w", names[i], ErrActionUnconfirmed)
+		}
 		return "", fmt.Errorf("%s failed: %w", names[i], err)
 	}
 	if !ok {
@@ -456,6 +461,20 @@ func Focused(ctx context.Context, ref string) (bool, error) {
 // FocusedElement reports which element of the window in front holds the keyboard. Input: a context. Output: that element's ref, role and name as an act.Node, and false when the accessibility bus is unreachable, no window is in front, or nothing in that window's tree carries STATE_FOCUSED.
 // It exists because reading the bit on one remembered element cannot say where the keyboard went when the answer is no: a click made at a point on the screen leaves no element to read at all, and a page that moved the focus into its own search box leaves the remembered field reading unfocused with nothing to name in its place. A caller about to type asks the window itself who holds the keys.
 func FocusedElement(ctx context.Context) (act.Node, bool) {
+	return focusedElement(ctx, false)
+}
+
+// FocusedContents is FocusedElement with the contents of a box to type in carried in Value, for a field_holds check (see act.Node.Value): never a password box's, and not a whole page's text for a holder that is no box at all. Input: a context. Output: the element, as FocusedElement's.
+// The stop lines ask who holds the keyboard before every type_text and press_key and need none of it, so only this read pays for the text.
+func FocusedContents(ctx context.Context) (act.Node, bool) {
+	return focusedElement(ctx, true)
+}
+
+// RefWindow is "" on Linux: a ref is the application's bus connection and an object path (see refString), and neither names the window, so two windows of one application cannot be told apart by their refs. Input: a node's Ref. Output: "".
+func RefWindow(string) string { return "" }
+
+// focusedElement is FocusedElement and FocusedContents. Input: a context, and whether a box's text is read. Output: the element.
+func focusedElement(ctx context.Context, contents bool) (act.Node, bool) {
 	w := focus()
 	if w == nil {
 		return act.Node{}, false
@@ -475,7 +494,11 @@ func FocusedElement(ctx context.Context) (act.Node, bool) {
 	if kid, kidRole, ok := editableChild(ctx, w.conn, hit, role); ok {
 		hit, role = kid, kidRole
 	}
-	return act.Node{Role: role, Label: getName(ctx, w.conn, hit), Ref: refString(hit)}, true
+	n := act.Node{Role: role, Label: getName(ctx, w.conn, hit), Ref: refString(hit)}
+	if contents && typableRoles[role] && role != "password text" {
+		n.Value = getText(ctx, w.conn, hit)
+	}
+	return n, true
 }
 
 // busFocus is the read findFocused makes over the accessibility bus. Input: a context bounding the calls and a live connection. Output: a function giving one element's focused bit and, when the bit is not set, its children — a focused element's children are never walked, so they are never read.

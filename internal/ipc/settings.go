@@ -17,16 +17,19 @@ import (
 	"june/internal/util"
 )
 
-// noVersion is reported when the build carries no injected version string (see cmd/root.go's buildIdentity: there is no ldflags version injection in this repo).
-const noVersion = "dev"
-
 // keepAudioNotConfigured is reported for keep_audio_days when the config has no such field yet, rather than inventing a retention policy that does not exist.
 const keepAudioNotConfigured = -1
 
 // noEmbedModel is reported for embed_model when no local embedder is configured: hybrid search then runs lexical-only, with no embedding model backing it at all.
 const noEmbedModel = "none"
 
-// SettingsView is GET /settings: the daemon's configuration and on-disk footprint. Every field is present; a value the daemon cannot back is a documented sentinel (KeepAudioDays -1, EmbedModel "none") rather than an invented number.
+// noVoiceKey is reported for voice_model when there is no Gemini API key: the Live model is the only thing a voice session can talk through, and without a key it cannot be dialled at all, so naming it said June could talk when it could not.
+const noVoiceKey = "off — no Gemini API key"
+
+// noBrainSignedIn is reported for brain when no brain is picked and the router has nothing to answer on: no Gemini key and no subscription signed in.
+const noBrainSignedIn = "nothing — no brain is signed in"
+
+// SettingsView is GET /settings: the daemon's configuration and on-disk footprint. Every field is present; a value the daemon cannot back is a documented sentinel (KeepAudioDays -1, EmbedModel "none", VoiceModel noVoiceKey, Brain noBrainSignedIn) rather than an invented number.
 type SettingsView struct {
 	DataDir         string       `json:"data_dir"`
 	StoreBytes      int64        `json:"store_bytes"`
@@ -44,7 +47,19 @@ type SettingsView struct {
 	FirstRun        FirstRunView `json:"first_run"`
 	// ClaudeUsageFromLogin mirrors config.JuneConfig.ClaudeUsageFromLoginEnabled: whether GET /brains is allowed to read the Claude row's usage bars from the undocumented Anthropic endpoint. POST /settings with this field set writes it back to the config.
 	ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
+	// UpdateCheck mirrors config.JuneConfig.UpdateCheckEnabled: whether June looks for a new release once a day. The updater reads the file before each check, so a POST holds from the next one.
+	UpdateCheck bool `json:"update_check"`
+	// AllowFallback mirrors config.BrainConfig.FallbackAllowed: whether background work may go to another signed-in brain when the one it was meant for fails.
+	AllowFallback bool `json:"allow_fallback"`
+	// MeetingsOffer is "ask" when June offers to record a call it notices and "off" when it says nothing (config.MeetingsConfig.Offer). The meeting watcher reads the file again each time something takes the microphone, so "off" holds at once, and so does "ask" while meetings_enabled is true. meetings_enabled false means no watcher was started with this daemon, so "ask" then holds from the next start.
+	MeetingsOffer string `json:"meetings_offer"`
 }
+
+// The two words meetings_offer takes.
+const (
+	meetingsOfferAsk = "ask"
+	meetingsOfferOff = "off"
+)
 
 // FirstRunView is SettingsView's "first_run" field: which of the ways June can answer text are already set up on this machine, and — only when none of them are — plain one-line steps to fix that. Every signal is read live off the machine (an env var, a login file, the config) rather than a stored "setup complete" flag, so a first run that was interrupted keeps asking.
 type FirstRunView struct {
@@ -60,23 +75,23 @@ func firstRun(cfg config.JuneConfig, home string) FirstRunView {
 	v := FirstRunView{
 		GeminiKey:  os.Getenv("GEMINI_API_KEY") != "",
 		CodexLogin: util.Exists(agent.CodexAuthPath(home)),
-		ClaudeCLI:  util.Exists(agent.ClaudeCredentialsPath(home)),
+		ClaudeCLI:  loggedIn("claude", home, onPath),
 		LocalModel: cfg.LocalText.Enabled(cfg),
 	}
 	v.Steps = firstRunSteps(v)
 	return v
 }
 
-// firstRunSteps names what is missing, one plain sentence per way of answering text, only when none of them works yet — June needs just one, not all four.
+// firstRunSteps names what is missing, one plain sentence per way of answering text, only when none of them works yet — June needs just one, not all four. Each names a place in the window or an app the person already has, never a file or a command.
 func firstRunSteps(v FirstRunView) []string {
 	if v.GeminiKey || v.CodexLogin || v.ClaudeCLI || v.LocalModel {
 		return []string{}
 	}
 	return []string{
-		"Set GEMINI_API_KEY in " + filepath.Join(config.DataDir(), "env") + ".",
-		"Or sign in with the Claude CLI: run claude login.",
-		"Or sign in with the Codex CLI: run codex login.",
-		"Or point june-config.json at a local model.",
+		"Add a free Gemini key in Settings → Brain.",
+		"Or sign in to Claude Code on this computer.",
+		"Or sign in to the Codex app with your ChatGPT account.",
+		"Or set up On-device summaries in Settings → Local features.",
 	}
 }
 
@@ -84,12 +99,13 @@ func firstRunSteps(v FirstRunView) []string {
 type LiveConfig struct {
 	mu   sync.Mutex
 	cfg  *config.JuneConfig
+	read func() (config.JuneConfig, error)
 	save func(config.JuneConfig) error
 }
 
-// NewLiveConfig wraps the daemon's config for use from request goroutines. Input: a pointer to the loaded config and the function that persists one to disk (config.SaveConfig in production, a stub in tests). Output: the accessor to hand Settings, and to read the config through anywhere else a request goroutine needs it.
-func NewLiveConfig(cfg *config.JuneConfig, save func(config.JuneConfig) error) *LiveConfig {
-	return &LiveConfig{cfg: cfg, save: save}
+// NewLiveConfig wraps the daemon's config for use from request goroutines. Input: a pointer to the loaded config, the function that reads the file as it is now (config.ReadConfig in production; nil in a test, which makes the daemon's own copy the base every change is made to), and the function that persists one to disk (config.SaveConfig in production, a stub in tests). The two are handed in together so a change is always read from the same file it is written to. Output: the accessor to hand Settings, and to read the config through anywhere else a request goroutine needs it.
+func NewLiveConfig(cfg *config.JuneConfig, read func() (config.JuneConfig, error), save func(config.JuneConfig) error) *LiveConfig {
+	return &LiveConfig{cfg: cfg, read: read, save: save}
 }
 
 // Get returns a copy of the config taken under the lock, so the caller reads a consistent struct rather than one another request may be part-way through writing. Input: none. Output: the config by value.
@@ -106,34 +122,57 @@ func (c *LiveConfig) ClaudeUsageEnabled() bool {
 	return c.cfg.ClaudeUsageFromLoginEnabled()
 }
 
-// SetClaudeUsage writes ClaudeUsageFromLogin and persists the whole config, both under the lock, so no reader sees the struct between the write and the copy that goes to disk. Input: the new value. Output: whatever the save function returned.
-func (c *LiveConfig) SetClaudeUsage(on bool) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cfg.ClaudeUsageFromLogin = &on
-	return c.save(*c.cfg)
-}
-
-// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool} writes that one setting, persists it so it survives a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. A POST body that does not carry the field changes nothing: the window sends the whole form back on any change, and a missing field means "not mentioned", not "off". Input: the data directory to walk for disk usage, the config accessor shared with the rest of the daemon so a POST's change is visible everywhere and no two request goroutines touch the struct at once, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), and the time the daemon started. Output: the handler.
-func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) http.HandlerFunc {
+// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool, "update_check": bool, "allow_fallback": bool, "meetings_offer": "ask"|"off"} writes the fields it carries, persists them in one save so they survive a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. A field the body does not carry changes nothing: the window sends the whole form back on any change, and a missing field means "not mentioned", not "off". A meetings_offer other than the two words is 400 and changes nothing. Input: the data directory to walk for disk usage, the config accessor shared with the rest of the daemon so a POST's change is visible everywhere and no two request goroutines touch the struct at once, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), the time the daemon started, and the usage lookup GET /brains reads (nil for none), so the brain line counts a login its provider refused as signed out exactly as the picker does. Output: the handler.
+func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeSettings(w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt)
+			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor)
 		case http.MethodPost:
 			var req struct {
-				ClaudeUsageFromLogin *bool `json:"claude_usage_from_login"`
+				ClaudeUsageFromLogin *bool   `json:"claude_usage_from_login"`
+				UpdateCheck          *bool   `json:"update_check"`
+				AllowFallback        *bool   `json:"allow_fallback"`
+				MeetingsOffer        *string `json:"meetings_offer"`
 			}
 			if !DecodeJSON(w, r, &req) {
 				return
 			}
-			if req.ClaudeUsageFromLogin != nil {
-				if err := cfg.SetClaudeUsage(*req.ClaudeUsageFromLogin); err != nil {
+			var offer *bool
+			if req.MeetingsOffer != nil {
+				switch *req.MeetingsOffer {
+				case meetingsOfferAsk:
+					offer = new(bool)
+					*offer = true
+				case meetingsOfferOff:
+					offer = new(bool)
+				default:
+					http.Error(w, `meetings_offer must be "ask" or "off"`, http.StatusBadRequest)
+					return
+				}
+			}
+			if req.ClaudeUsageFromLogin != nil || req.UpdateCheck != nil || req.AllowFallback != nil || offer != nil {
+				// One Update for all of them, so a form sent back whole is one save rather than one per field. The pointers are the request's own and never written again, so the file's copy and the daemon's sharing them is safe.
+				err := cfg.Update(func(c *config.JuneConfig) {
+					if req.ClaudeUsageFromLogin != nil {
+						c.ClaudeUsageFromLogin = req.ClaudeUsageFromLogin
+					}
+					if req.UpdateCheck != nil {
+						c.UpdateCheck = req.UpdateCheck
+					}
+					if req.AllowFallback != nil {
+						c.Brain.AllowFallback = req.AllowFallback
+					}
+					if offer != nil {
+						c.Meetings.Offer = offer
+					}
+				})
+				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 			}
-			writeSettings(w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt)
+			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -141,29 +180,49 @@ func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaus
 }
 
 // writeSettings writes SettingsView as JSON, the body both GET and POST /settings answer with.
-func writeSettings(w http.ResponseWriter, dataDir string, cfg config.JuneConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time) {
+func writeSettings(ctx context.Context, w http.ResponseWriter, dataDir string, cfg config.JuneConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits) {
 	capture := true
 	if capturePaused != nil {
 		capture = !capturePaused()
 	}
 	home, _ := os.UserHomeDir()
+	voiceModel := config.VoiceModel()
+	if os.Getenv("GEMINI_API_KEY") == "" {
+		voiceModel = noVoiceKey
+	}
+	// Worked out only while no brain is picked: each brain checked can reach its provider (Codex's login check, Claude's usage endpoint), and with a brain picked the answer is never shown.
+	auto := ""
+	if cfg.Brain.Provider == "" {
+		auto = automaticBrainID(func(id string) bool { return brainSignedIn(ctx, id, home, onPath, limitsFor) })
+	}
 	util.WriteJSON(w, SettingsView{
 		DataDir:              dataDir,
 		StoreBytes:           storeBytes(dataDir),
 		RecordingsBytes:      dirBytes(filepath.Join(dataDir, "recordings")),
 		ModelsBytes:          dirBytes(filepath.Join(dataDir, "models")),
-		VoiceModel:           config.VoiceModel(),
-		Brain:                describeBrain(cfg.Brain),
+		VoiceModel:           voiceModel,
+		Brain:                describeBrain(cfg, auto),
 		EmbedModel:           embedModelName(cfg.Embed),
 		MeetingsEnabled:      meetingsEnabled,
 		CaptureEnabled:       capture,
 		KeepAudioDays:        keepAudioNotConfigured,
 		DaemonStarted:        startedAt.Format(time.RFC3339),
-		Version:              noVersion,
+		Version:              config.Version,
 		Hotkey:               windowHotkey(),
 		FirstRun:             firstRun(cfg, home),
 		ClaudeUsageFromLogin: cfg.ClaudeUsageFromLoginEnabled(),
+		UpdateCheck:          cfg.UpdateCheckEnabled(),
+		AllowFallback:        cfg.Brain.FallbackAllowed(),
+		MeetingsOffer:        meetingsOffer(cfg.Meetings),
 	})
+}
+
+// meetingsOffer is meetings_offer's word for the config's offer switch.
+func meetingsOffer(m config.MeetingsConfig) string {
+	if m.OfferEnabled() {
+		return meetingsOfferAsk
+	}
+	return meetingsOfferOff
 }
 
 // hotkeyGOOS is runtime.GOOS, indirected so a test can exercise the non-Linux branch of windowHotkey on a Linux box.
@@ -284,10 +343,26 @@ func dirBytes(dir string) int64 {
 	return total
 }
 
-// describeBrain names the backend that answers June's one-shot text duties. Input: the brain config. Output: "<cli> <model>" for one of the CLI-backed providers (or just the CLI name when no model is pinned), otherwise the Gemini model name that will actually be called (the configured one, or config.TextModel when none is set).
-func describeBrain(cfg config.BrainConfig) string {
+// describeBrain names the backend that answers June's one-shot text duties. Input: the config, and the id of the brain the router answers on while none is picked (automaticBrainID, the same one GET /brains marks default; not read when one is). Output: the picked brain as describeProvider names it; with none picked, the brain the router lands on, marked "(automatic)", or noBrainSignedIn when it has nothing to land on. It used to name config.TextModel whenever no brain was picked, so a machine with no Gemini key read "gemini-3.5-flash" while every ask went to a subscription.
+func describeBrain(cfg config.JuneConfig, auto string) string {
+	if cfg.Brain.Provider != "" {
+		return describeProvider(cfg.Brain)
+	}
+	if auto == "" {
+		return noBrainSignedIn
+	}
+	// Gemini is called on the config's own model; every other brain is named with the model last picked for it, as its /brains row is.
+	answering := config.BrainConfig{Provider: config.BrainGeminiAPI, Model: cfg.Brain.Model}
+	if provider, ok := providerForBrainID(auto); ok && auto != "gemini" {
+		answering = config.BrainConfig{Provider: provider, Model: cfg.BrainModels[auto]}
+	}
+	return describeProvider(answering) + " (automatic)"
+}
+
+// describeProvider names one configured backend. Input: a brain config with its provider set. Output: "<provider> <model>" for every provider but the Gemini API (or just the provider name when no model is pinned), and for the Gemini API the model name that will actually be called (the configured one, or config.TextModel when none is set).
+func describeProvider(cfg config.BrainConfig) string {
 	switch cfg.Provider {
-	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI:
+	case config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI, config.BrainCodex, config.BrainOllama:
 		if cfg.Model == "" {
 			return cfg.Provider
 		}

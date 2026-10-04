@@ -25,6 +25,7 @@ import { useActOnNoticeMutation, useConversationsQuery, type ConversationSummary
 import { chatsShown, groupConversations, noticeAge, shortWhen } from "./format";
 import { useFollowSelection } from "./parts";
 import { Face, useJuneState } from "./face";
+import { PauseControl, pausedWords, usePaused } from "./pause";
 import { RunningNow } from "./running-now";
 import { conversationsUi, ui, useAppDispatch, useAppSelector, type LiveNotice, type Place } from "./store";
 
@@ -207,7 +208,8 @@ function SidebarNotice({ live, notice, now }: { live?: LiveNotice; notice?: { te
 
 /** What stands where the chat list would be when there is nothing in it. Input: whether the daemon answered, how many chats it has in total, and what is typed in the search box. Output: the one line. */
 function NoChats({ up, total, query }: { up: boolean; total: number; query: string }) {
-  const line = !up ? "Not connected." : total ? `Nothing matches “${query}”.` : "No chats yet.";
+  const refused = useAppSelector((s) => s.progress.refused);
+  const line = !up ? (refused ? "The daemon refused this window's key." : "Not connected.") : total ? `Nothing matches “${query}”.` : "No chats yet.";
   return <p className="px-4 py-8 text-ui text-muted-foreground group-data-[collapsible=icon]:hidden">{line}</p>;
 }
 
@@ -236,9 +238,12 @@ function SidebarNav({ place }: { place: Place }) {
 
 export function AppSidebar() {
   const dispatch = useAppDispatch();
-  const { place, conversationId, query, notice, liveNotice } = useAppSelector((s) => s.ui);
+  const { place, conversationId: lastOpen, chatDraft, query, notice, liveNotice } = useAppSelector((s) => s.ui);
+  // A chat draft keeps the conversation it was opened over in the store (see chatDraft in store.ts), but nothing in the list is open while it shows, so no row is lit for it.
+  const conversationId = chatDraft ? undefined : lastOpen;
   const { data: convs = [], isFetching, isLoading, isError } = useConversationsQuery();
-  const juneState = useJuneState(!isError);
+  const { paused, until } = usePaused();
+  const juneState = useJuneState(!isError, paused);
   const list = useRef<HTMLDivElement>(null);
 
   const now = new Date();
@@ -252,13 +257,19 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="gap-2 p-2">
-        {/* June itself, first: its face and what it is doing, so the rail opens on who is here rather than on a button. */}
-        <div className="flex items-center gap-2.5 px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
-          <Face state={juneState} />
-          <div className="flex min-w-0 flex-col">
+        {/* June itself, first: its face and what it is doing, so the rail opens on who is here rather than on a button. The pause sits beside it because this is where a person looks to see whether June is watching. */}
+        {/* Folded to icons the rail has no room for the face or its words, so only the pause button stays, its own icon then saying whether June watches (see PauseControl); a watching June must never look the same as a paused one. */}
+        <div className={`flex items-center gap-2.5 px-2 pt-1 pb-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 ${isError ? "group-data-[collapsible=icon]:hidden" : ""}`}>
+          <Face state={juneState} className="text-meta group-data-[collapsible=icon]:hidden" />
+          <div className="flex min-w-0 flex-col group-data-[collapsible=icon]:hidden">
             <span className="text-ui font-medium">june</span>
-            <span className="text-micro text-muted-foreground">{juneState}</span>
+            <span className="text-micro text-muted-foreground">{juneState === "paused" ? pausedWords(until) : juneState}</span>
           </div>
+          {!isError ? (
+            <div className="ml-auto group-data-[collapsible=icon]:ml-0">
+              <PauseControl paused={paused} until={until} />
+            </div>
+          ) : null}
         </div>
         <SidebarMenu>
           <SidebarMenuItem>

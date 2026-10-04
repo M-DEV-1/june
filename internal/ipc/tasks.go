@@ -126,7 +126,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	util.WriteJSON(w, map[string]any{"tasks": tasks})
 }
 
-// createTask answers POST /tasks: a task of the user's own plus a conversation named after it, so asking June about the task has somewhere to go. A blank title is 400.
+// createTask answers POST /tasks: a task of the user's own plus a conversation named after it, so asking June about the task has somewhere to go. The conversation stays off GET /conversations until something is said in it (see db.Store.ListConversations). A blank title is 400.
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title string `json:"title"`
@@ -251,7 +251,7 @@ func (s *Server) TaskOwner(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// taskDelete serves DELETE /tasks/{id}: it takes one of the user's own tasks off the list for good.
+// taskDelete serves DELETE /tasks/{id}: it takes one of the user's own tasks off the list for good, and the conversation opened alongside it too when nothing was ever said in it (see db.Store.DeleteUserTask).
 // Only a task the user typed in, or June put there for them, can be deleted. A noticed item is a note in memory carrying a "[state/priority]" prefix, and deleting it would take a line out of a meeting's minutes rather than off a list; dropping it is what that is for, through POST /tasks/{id}/done with status "dropped".
 // Input: the id from the path, in the "task-N" form GET /tasks hands out. Output: 204 and no body; 400 for a noticed item, 404 for an id that names no task of the user's own.
 func (s *Server) taskDelete(w http.ResponseWriter, r *http.Request) {

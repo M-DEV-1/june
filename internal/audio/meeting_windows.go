@@ -10,7 +10,7 @@ import (
 	"github.com/moutend/go-wca/pkg/wca"
 )
 
-// MeetingCapture is a pair of live WASAPI captures: the default communications microphone, and the loopback of the default communications playback device (everything the call plays, which is everyone else).
+// MeetingCapture is a pair of running WASAPI recordings: the default communications microphone, and the loopback of the default playback device (everything the call plays, which is everyone else).
 // MicStart and SystemStart are the wall-clock instants each stream began, so transcripts of the two files can be lined up on one clock.
 type MeetingCapture struct {
 	MicStart    time.Time
@@ -22,15 +22,16 @@ type MeetingCapture struct {
 // sampleRate16k is what whisper wants, and capturing at it avoids a resample step later.
 const sampleRate16k = 16000
 
-// StartMeetingCapture opens both streams and writes 16 kHz mono s16le samples into mic and system until Stop is called. The communications role is used for both because that is the device a call app plays to and records from when a headset is set apart from the speakers.
-// ponytail: a call routed to a device other than the default communications one records silence on the system side; Linux follows the playing stream (meetingSink), Windows would need IAudioSessionManager2 on each render endpoint to find the one with a foreign active session.
+// StartMeetingCapture opens both streams and writes 16 kHz mono s16le samples into mic and system until Stop is called. The system side records the console default, the device the Linux side's default sink corresponds to: a browser call, and anything else that does not pick a device of its own, plays there, while the communications default is only where apps that ask for it play.
+// Both are recordings, so they stay on the wall clock: the time a device was away, and the stretches the loopback delivers nothing because nothing plays, are written as silence, which keeps system.wav lined up with mic.wav and leaves it a file of silence rather than empty when the call side never made a sound.
+// ponytail: a call routed to a device other than the default console one records silence on the system side; Linux follows the playing stream (meetingSink), Windows would need IAudioSessionManager2 on each render endpoint to find the one with a foreign active session.
 // Input: two writers, one per stream. Output: a running capture, or an error if either stream could not be opened.
 func StartMeetingCapture(mic, system io.Writer) (*MeetingCapture, error) {
-	micStream, err := startWASAPI(wca.ECapture, wca.ECommunications, sampleRate16k, writeTo(mic))
+	micStream, err := startWASAPI(wca.ECapture, wca.ECommunications, sampleRate16k, false, writeTo(mic))
 	if err != nil {
 		return nil, fmt.Errorf("open microphone stream: %w", err)
 	}
-	sysStream, err := startWASAPI(wca.ERender, wca.ECommunications, sampleRate16k, writeTo(system))
+	sysStream, err := startWASAPI(wca.ERender, wca.EConsole, sampleRate16k, false, writeTo(system))
 	if err != nil {
 		micStream.Close()
 		return nil, fmt.Errorf("open loopback stream: %w", err)

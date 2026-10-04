@@ -172,6 +172,59 @@ func summarise(j Job, why string) string {
 	return out
 }
 
+// stoppedSay is what a job the user stopped says: that it stopped, and the last step it took with what that step's action answered, so a stop that came part way through typing is not reported as though nothing had reached the screen. Input: the job. Output: the sentences, shown in the window and handed back to be spoken.
+// The step is named in the words it was announced with (see Step.Text), and the answer is cut to its part for people (see forTheUser); a read's answer, a screen listing or a memory hit, is left out, being content rather than an outcome.
+func stoppedSay(j Job) string {
+	n := len(j.Steps)
+	if n == 0 {
+		return "I stopped there, before doing anything on the screen."
+	}
+	last := j.Steps[n-1]
+	steps := fmt.Sprintf("%d steps", n)
+	if n == 1 {
+		steps = "one step"
+	}
+	did := strings.TrimSuffix(strings.TrimSpace(last.Text), ".")
+	if did == "" {
+		did = last.Tool
+		if len(last.Burst) > 1 {
+			did = fmt.Sprintf("%d actions in one go, starting with %s", len(last.Burst), last.Tool)
+		}
+	}
+	out := fmt.Sprintf("I stopped there, after %s. The last one was: %s.", steps, did)
+	said := forTheUser(last.Result)
+	if said == "" || isRead(last.answeredBy()) {
+		return out
+	}
+	if len(last.Burst) > 1 && last.Tried > 0 {
+		return out + fmt.Sprintf(" Action %d of %d, %s, answered: %s.", last.Tried, len(last.Burst), last.answeredBy(), said)
+	}
+	return out + " It answered: " + said + "."
+}
+
+// modelTails open the part of a tool's result that is addressed to the model, a next move to make, rather than saying what happened (see tools.go and tools_sequence.go in internal/agent).
+var modelTails = []string{"; call ", "; check ", "; look or call ", "; use ", "; leave "}
+
+// forTheUser is the part of a tool's result a person can be told: the error marker dropped and the instructions addressed to the model cut off, at 200 runes. Input: the result. Output: the text, "" for an empty result.
+func forTheUser(result string) string {
+	said := strings.TrimPrefix(strings.TrimSpace(result), "error: ")
+	for _, tail := range modelTails {
+		if i := strings.Index(said, tail); i >= 0 {
+			said = said[:i]
+		}
+	}
+	return util.Runes(strings.TrimSuffix(strings.TrimSpace(said), "."), 200)
+}
+
+// failedWhy is what a step whose burst came back refused or with an error says in place of a check: which action it was, and what it answered. Input: the burst's actions, the one that failed, and its result. Output: the sentence.
+func failedWhy(actions []action, at int, result string) string {
+	said := strings.TrimPrefix(result, "error: ")
+	if len(actions) == 1 {
+		return "it did not go through, so nothing was checked: " + said
+	}
+	return fmt.Sprintf("action %d of %d, %s, did not go through, so the burst stopped there and nothing was checked: %s", at+1, len(actions), actions[at].Tool, said)
+}
+
 // stuckQuestion is the one plain question a job asks when three checks in a row on the same step have failed. Input: the job. Output: the question, in the model's own words for what it was trying when it has them.
 func stuckQuestion(j Job) string {
 	last := j.Steps[len(j.Steps)-1]

@@ -307,7 +307,32 @@ fn listen_for_toggle_signal(app: AppHandle) {
     });
 }
 
-/// Registers Ctrl+Alt+Space as a global shortcut that runs the same toggle the SIGHUP does on Linux. Windows delivers a global hotkey to a hidden window, so it needs no desktop keybinding or pid file. Input: the app handle. Output: nothing; a shortcut another program already holds is logged and the window runs without one.
+/// What became of registering the global shortcut: unset until register_toggle_hotkey has run, and always on Linux, where the desktop's own keybinding is the shortcut and this process never learns whether it works; Err with the reason when another program already holds it.
+static HOTKEY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+/// Whether the shortcut that opens June is missing, and why.
+#[derive(serde::Serialize)]
+struct HotkeyStatus {
+    failed: bool,
+    reason: String,
+}
+
+/// Tauri command: whether registering the global shortcut failed. The pages ask, because setup's last screen and Settings both promise the keys, and a promise of keys that do nothing reads as June being broken; with this they say to open June from the tray instead. Input: none. Output: failed true with the reason only when registration was tried and refused.
+#[tauri::command]
+fn hotkey_status() -> HotkeyStatus {
+    match HOTKEY.get() {
+        Some(Err(reason)) => HotkeyStatus {
+            failed: true,
+            reason: reason.clone(),
+        },
+        _ => HotkeyStatus {
+            failed: false,
+            reason: String::new(),
+        },
+    }
+}
+
+/// Registers Ctrl+Alt+Space as a global shortcut that runs the same toggle the SIGHUP does on Linux. Windows delivers a global hotkey to a hidden window, so it needs no desktop keybinding or pid file. Input: the app handle. Output: nothing; a shortcut another program already holds is logged, recorded for hotkey_status, and the window runs without one.
 #[cfg(windows)]
 fn register_toggle_hotkey(app: &AppHandle) {
     use tauri_plugin_global_shortcut::{
@@ -324,11 +349,17 @@ fn register_toggle_hotkey(app: &AppHandle) {
         .build();
     if let Err(e) = app.plugin(plugin) {
         eprintln!("june: could not load the global shortcut plugin: {e}");
+        let _ = HOTKEY.set(Err(e.to_string()));
         return;
     }
-    if let Err(e) = app.global_shortcut().register(hotkey) {
+    let registered = app
+        .global_shortcut()
+        .register(hotkey)
+        .map_err(|e| e.to_string());
+    if let Err(e) = &registered {
         eprintln!("june: could not register Ctrl+Alt+Space: {e}");
     }
+    let _ = HOTKEY.set(registered);
 }
 
 /// One monitor as the overlay page needs it: where its top-left corner sits on the desktop and how big it is, both in physical pixels, plus its own scale factor.
@@ -629,7 +660,8 @@ pub fn run() {
             system_theme,
             raise,
             dock_anchor,
-            overlay_layout
+            overlay_layout,
+            hotkey_status
         ])
         // Closing a window hides it instead of quitting: June keeps running under the daemon, and the same window comes back with its state when the daemon's tray asks for it again.
         .on_window_event(|window, event| {

@@ -24,6 +24,8 @@ type UsageSnapshot struct {
 	At     time.Time    `json:"at"`
 	// SignedOut says the provider refused the credential when this reading was attempted, which is the one thing a usage fetch can tell about a login that a file on disk cannot: every one of these CLIs holds a refresh token, so an expired access token is ordinary and only the provider can say the login is actually dead. Note carries what to do about it.
 	SignedOut bool `json:"signed_out,omitempty"`
+	// SignedOutAt is when SignedOut was set, so a login renewed after it can be told from the one that was refused (see agent.NoteClaudeRefused). Zero when SignedOut is false, and for a mark written before this field existed.
+	SignedOutAt time.Time `json:"signed_out_at,omitzero"`
 	// Note is a sentence about the reading itself rather than the allowance — today only that a ceiling is a default rather than an observed one — which GET /brains carries into the row's limits_note. Empty for a reading that needs no caveat.
 	Note string `json:"note,omitempty"`
 }
@@ -58,7 +60,7 @@ func (s *UsageStore) Record(provider string, limits []UsageLimit) {
 	if len(limits) > 0 {
 		snap = UsageSnapshot{Limits: limits, At: time.Now()}
 	} else if snap.SignedOut {
-		snap.SignedOut, snap.Note = false, ""
+		snap.SignedOut, snap.SignedOutAt, snap.Note = false, time.Time{}, ""
 	} else {
 		return
 	}
@@ -71,7 +73,7 @@ func (s *UsageStore) RecordSignedOut(provider, note string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap := s.snaps[provider]
-	snap.SignedOut, snap.Note = true, note
+	snap.SignedOut, snap.SignedOutAt, snap.Note = true, time.Now(), note
 	s.snaps[provider] = snap
 	s.save()
 }

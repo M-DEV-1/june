@@ -13,6 +13,7 @@ import (
 	"june/internal/config"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -45,11 +46,16 @@ type card struct {
 
 // cards is every provider an ask can be routed to, in rank order.
 var cards = []card{
-	{id: ProviderGemini, web: false, rank: 0, asks: true, ready: func() bool { return true }},
+	{id: ProviderGemini, web: false, rank: 0, asks: true, ready: geminiKeySet},
 	{id: ProviderCodex, web: false, rank: 1, asks: true, ready: codexLoggedIn},
 	{id: ProviderAgy, web: false, rank: 2, asks: true, ready: agyReady},
 	{id: ProviderGrok, web: false, rank: 3, asks: false, ready: grokReady},
 	{id: ProviderClaude, web: true, rank: 4, asks: true, ready: claudeLoggedIn},
+}
+
+// geminiKeySet reports whether the Gemini API can be called at all. Without a key every ask was routed to Gemini first and failed at client construction, which is not a failure askInOrder hands on from, so a desk signed into Claude or Codex but with no Gemini key could not answer a single question.
+func geminiKeySet() bool {
+	return strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != ""
 }
 
 // ProviderGrok is the Grok command line. It answers duties through internal/brain and has no asker here, so no ask is ever routed to it.
@@ -87,6 +93,13 @@ func SetPreferredProvider(provider string) {
 
 // RouterID is providerCard for callers outside this package: internal/brain needs it to put a duty's own configured provider at the front of the order.
 func RouterID(provider string) string { return providerCard(provider) }
+
+// PreferredProvider is the router id of the brain the user picked, "" when none is picked. internal/brain reads it to keep a duty on the brains the user chose (see brain.dutyOrder).
+func PreferredProvider() string {
+	routerState.mu.Lock()
+	defer routerState.mu.Unlock()
+	return routerState.preferred
+}
 
 // providerCard maps a config provider name to the router's own id for it. Input: the config spelling. Output: the card id, or "" when the router has no card for that provider.
 func providerCard(provider string) string {
@@ -142,6 +155,20 @@ func ProviderFailed(id string, window time.Duration) {
 	routerState.openUntil[id] = time.Now().Add(window)
 }
 
+// closeBreaker closes a provider's breaker before its window has passed, for a failure that has since been put right. Input: the provider id. Output: none.
+func closeBreaker(id string) {
+	routerState.mu.Lock()
+	defer routerState.mu.Unlock()
+	delete(routerState.openUntil, id)
+}
+
+// reviveRenewedLogins closes the breaker on a provider whose refused login has been renewed since, so a user who signs in again is not kept waiting out BreakerWindow. Today that is Claude, whose login file says when it was written. It runs before the router's lock is taken, because it reads that file and writes the usage store. Input: none. Output: none.
+func reviveRenewedLogins() {
+	if home, err := os.UserHomeDir(); err == nil {
+		reviveClaude(home)
+	}
+}
+
 // ResetRouter forgets every breaker and every pinned readiness. Meant for tests, so one does not leak into the next.
 func ResetRouter() {
 	routerState.mu.Lock()
@@ -152,13 +179,17 @@ func ResetRouter() {
 }
 
 // Route returns the providers that can answer a question needing need, best first. Input: what the question requires. Output: the provider ids to try in order, empty when none of them can serve it — which is a real answer, not an error: it means every provider is either unusable on this machine or known to be refusing.
-func Route(need Need) []string { return route(need, true) }
+func Route(need Need) []string { return route(need, true, true) }
 
 // RouteDuty is Route for an unattended duty — meeting minutes, the memory jobs — which needs a prompt answered rather than a question asked. It offers the same providers in the same order plus the ones that have a one-shot backend in internal/brain but no asker here. Input: what the duty requires. Output: the provider ids to try in order.
-func RouteDuty(need Need) []string { return route(need, false) }
+func RouteDuty(need Need) []string { return route(need, false, true) }
 
-// route is the body of both. onlyAsks drops the providers no ask can be routed to.
-func route(need Need, onlyAsks bool) []string {
+// RouteDutyIgnoringBreakers is RouteDuty as it would be with no breaker open. internal/brain reads its first entry as background work's own brain when the user has picked none and turned fallback off: RouteDuty's first moves to the next plan down for an hour after one 429, and that plan is one the user never chose (see brain.dutyOrder). Input: what the duty requires. Output: the provider ids this machine can run, in the router's order.
+func RouteDutyIgnoringBreakers(need Need) []string { return route(need, false, false) }
+
+// route is the body of all three. onlyAsks drops the providers no ask can be routed to, and skipOpen drops the ones whose breaker is open.
+func route(need Need, onlyAsks, skipOpen bool) []string {
+	reviveRenewedLogins()
 	routerState.mu.Lock()
 	defer routerState.mu.Unlock()
 
@@ -189,7 +220,7 @@ func route(need Need, onlyAsks bool) []string {
 		} else if c.ready != nil && !c.ready() {
 			continue
 		}
-		if until, open := routerState.openUntil[c.id]; open && now.Before(until) {
+		if until, open := routerState.openUntil[c.id]; skipOpen && open && now.Before(until) {
 			continue
 		}
 		out = append(out, c.id)
@@ -226,11 +257,33 @@ func ProviderSpent(err error) bool {
 	return errors.As(err, &httpErr) && httpErr.Code == http.StatusTooManyRequests
 }
 
-// errNoProvider is what askInOrder returns when the router offered nobody to ask. It is its own error because it means something different from a failure: every provider is either unusable on this machine or known to be refusing, and the caller should say so rather than report the last provider's error.
-var errNoProvider = errors.New("no provider can answer this right now: every one is either unavailable on this machine or out of allowance")
+// ErrNoAnswer is what a command-line asker returns when its run ended cleanly with nothing said: agy does this when the model reached for one of its own tools June does not grant, and asking it once more in the same session had not helped either. It is a third kind of failure another provider can fix, but unlike the other two it says nothing about the provider's next question, so it hands this one on without opening the provider's breaker.
+var ErrNoAnswer = errors.New("no answer")
+
+// ProviderUsable reports whether a provider is worth asking right now: this machine can run it and no breaker is open on it. Input: the provider id. Output: true when the router would offer it. For a caller that asks one provider directly rather than through Route, such as the job's Claude fallback, so it does not spend a call on a login the router already knows is dead.
+func ProviderUsable(id string) bool {
+	reviveRenewedLogins()
+	routerState.mu.Lock()
+	defer routerState.mu.Unlock()
+	if until, open := routerState.openUntil[id]; open && time.Now().Before(until) {
+		return false
+	}
+	if ready, pinned := routerState.readyOverride[id]; pinned {
+		return ready
+	}
+	for _, c := range cards {
+		if c.id == id {
+			return c.ready == nil || c.ready()
+		}
+	}
+	return false
+}
+
+// ErrNoProvider is what askInOrder returns when the router offered nobody to ask. It is its own error because it means something different from a failure: every provider is either unusable on this machine or known to be refusing, and the caller should say so rather than report the last provider's error. Exported so the window can say that in its own sentence: a machine with no Gemini key and no CLI signed in now gets this, where it used to get Gemini's missing-key error.
+var ErrNoProvider = errors.New("no provider can answer this right now: every one is either unavailable on this machine or out of allowance")
 
 // askInOrder tries each provider in turn until one answers. Input: the provider ids the router returned, best first, and how to ask one. Output: the first answer, or the last failure.
-// It hands on only when the failure is one another provider can fix, and only while no action has run: a read like observe_screen can be repeated on another provider and change nothing, where a click or a keystroke would happen twice. A provider that reports a spent allowance is marked so the next question skips it rather than paying the same failure again.
+// It hands on only when the failure is one another provider can fix (a spent allowance, an expired login, or ErrNoAnswer), and only while no action has run: a read like observe_screen can be repeated on another provider and change nothing, where a click or a keystroke would happen twice. A provider that reports a spent allowance is marked so the next question skips it rather than paying the same failure again.
 func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTrace, error) {
 	var tr TurnTrace
 	var err error
@@ -242,6 +295,10 @@ func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTra
 		if err == nil {
 			return tr, nil
 		}
+		if errors.Is(err, ErrNoAnswer) {
+			slog.Warn("ask: provider gave no answer, handing the question on", "provider", id, "error", err)
+			continue
+		}
 		if !ProviderSpent(err) {
 			return tr, err
 		}
@@ -249,7 +306,7 @@ func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTra
 		ProviderFailed(id, BreakerWindow)
 	}
 	if err == nil {
-		return tr, errNoProvider
+		return tr, ErrNoProvider
 	}
 	return tr, err
 }

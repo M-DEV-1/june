@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/draw"
 	"image/jpeg"
+	"math"
 )
 
 // maxLookSide is the longest side, in pixels, of an image handed to a model. Above this the picture costs more tokens without telling the model anything more: 1280 across is enough to read a face, a video frame or a game, which is what a look is for.
@@ -55,18 +56,7 @@ func encodeCapture(img image.Image, region image.Rectangle) (Capture, error) {
 		nw, nh = int(float64(w)/scale), int(float64(h)/scale)
 	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
-	if nw == w && nh == h {
-		draw.Draw(dst, dst.Bounds(), img, region.Min, draw.Src)
-	} else {
-		// ponytail: nearest-neighbour, the same as the vision tier's own downscale in jpeg.go. It aliases small text; a look is for pictures, video and games, where it does not show. Upgrade path: golang.org/x/image/draw's CatmullRom if text in a look ever has to be read.
-		for y := 0; y < nh; y++ {
-			sy := region.Min.Y + y*h/nh
-			for x := 0; x < nw; x++ {
-				dst.Set(x, y, img.At(region.Min.X+x*w/nw, sy))
-			}
-		}
-	}
+	dst := shrink(img, region, nw, nh)
 
 	var buf bytes.Buffer
 	for _, quality := range lookQualities {
@@ -79,6 +69,77 @@ func encodeCapture(img image.Image, region image.Rectangle) (Capture, error) {
 		}
 	}
 	return Capture{Data: bytes.Clone(buf.Bytes()), Mime: "image/jpeg", X: region.Min.X, Y: region.Min.Y, W: nw, H: nh, Scale: scale}, nil
+}
+
+// shrink copies region of img into a new image of nw by nh pixels, at the region's own size when that is what is asked for. Input: the image, the region of it (already inside its bounds and not empty) and the size wanted, no larger than the region. Output: the RGBA image.
+// A smaller picture is an area average: each pixel it holds is the mean of the part of the region it covers, every source pixel weighted by how much of it falls inside. The nearest-neighbour sampling this replaces kept one source pixel in every 1.5 and dropped the rest, so at the non-whole scales a 125% or 150% desktop is sent at, a one-pixel stroke of small text survived in some letters and vanished in others (an end-to-end look at Notepad read "third" as "lhird"), and look is how the model reads text that observe_screen cannot list.
+func shrink(img image.Image, region image.Rectangle, nw, nh int) *image.RGBA {
+	w, h := region.Dx(), region.Dy()
+	if nw == w && nh == h {
+		dst := image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(dst, dst.Bounds(), img, region.Min, draw.Src)
+		return dst
+	}
+	src, ok := img.(*image.RGBA)
+	if ok {
+		src = src.SubImage(region).(*image.RGBA)
+	} else {
+		// Any other image is copied into RGBA once, so the loop below reads bytes rather than paying an interface call and a colour conversion for every source pixel.
+		src = image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(src, src.Bounds(), img, region.Min, draw.Src)
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
+	cols, rows := boxSpans(w, nw), boxSpans(h, nh)
+	// acc is one output row's worth of source rows, added up with their weights and not yet narrowed; working a row at a time keeps the extra memory to one row of the region, not a copy of all of it.
+	acc := make([]float32, 4*w)
+	b := src.Bounds()
+	for y, rs := range rows {
+		clear(acc)
+		for k, wy := range rs.weights {
+			off := src.PixOffset(b.Min.X, b.Min.Y+rs.first+k)
+			row := src.Pix[off : off+len(acc)]
+			for i, v := range row {
+				acc[i] += wy * float32(v)
+			}
+		}
+		out := dst.Pix[y*dst.Stride:]
+		for x, cs := range cols {
+			var px [4]float32
+			for k, wx := range cs.weights {
+				p := acc[4*(cs.first+k):]
+				px[0] += wx * p[0]
+				px[1] += wx * p[1]
+				px[2] += wx * p[2]
+				px[3] += wx * p[3]
+			}
+			for c, v := range px {
+				out[4*x+c] = uint8(min(v+0.5, 255))
+			}
+		}
+	}
+	return dst
+}
+
+// boxSpan is the run of source pixels one output pixel covers: the first of them, and how much each from there on counts towards it.
+type boxSpan struct {
+	first   int
+	weights []float32
+}
+
+// boxSpans divides n source pixels among m output pixels, m no more than n. Output: one boxSpan per output pixel, its weights the share of each source pixel that falls inside it divided by the output pixel's width, so they add up to 1.
+func boxSpans(n, m int) []boxSpan {
+	spans := make([]boxSpan, m)
+	scale := float64(n) / float64(m)
+	for i := range spans {
+		lo, hi := float64(i)*scale, float64(i+1)*scale
+		first, last := int(lo), min(int(math.Ceil(hi)), n)
+		ws := make([]float32, 0, last-first)
+		for s := first; s < last; s++ {
+			ws = append(ws, float32((min(hi, float64(s+1))-max(lo, float64(s)))/scale))
+		}
+		spans[i] = boxSpan{first: first, weights: ws}
+	}
+	return spans
 }
 
 // screenGuard is what takes June's own hover window off the screen for the moment a picture of it is taken. The daemon wires it to a call that tells the window to conceal itself and hands back the call that puts it where it was.

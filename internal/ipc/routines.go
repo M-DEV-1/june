@@ -11,17 +11,19 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/proactive"
 	"june/internal/util"
 )
 
-// RoutineView is one routine on GET /routines. LastRun is "" until it has fired at least once.
+// RoutineView is one routine on GET /routines. LastRun is "" until it has fired at least once. ScheduleError is "" for a schedule the scheduler can read, and otherwise says why it cannot: such a routine is skipped on every tick and will never run on its own, which nothing else on the screen would show.
 type RoutineView struct {
-	ID         string `json:"id"`
-	Text       string `json:"text"`
-	Schedule   string `json:"schedule"`
-	Enabled    bool   `json:"enabled"`
-	LastRun    string `json:"last_run"`
-	LastAnswer string `json:"last_answer"`
+	ID            string `json:"id"`
+	Text          string `json:"text"`
+	Schedule      string `json:"schedule"`
+	Enabled       bool   `json:"enabled"`
+	LastRun       string `json:"last_run"`
+	LastAnswer    string `json:"last_answer"`
+	ScheduleError string `json:"schedule_error"`
 }
 
 // viewRoutine converts a stored routine to the shape GET /routines answers with.
@@ -30,15 +32,23 @@ func viewRoutine(r db.Routine) RoutineView {
 	if !r.LastRun.IsZero() {
 		lastRun = rfc3339(r.LastRun)
 	}
+	scheduleError := ""
+	if _, err := proactive.ParseSchedule(r.Schedule); err != nil {
+		scheduleError = err.Error()
+	}
 	return RoutineView{
-		ID:         strconv.FormatInt(r.ID, 10),
-		Text:       r.Text,
-		Schedule:   r.Schedule,
-		Enabled:    r.Enabled,
-		LastRun:    lastRun,
-		LastAnswer: r.LastAnswer,
+		ID:            strconv.FormatInt(r.ID, 10),
+		Text:          r.Text,
+		Schedule:      r.Schedule,
+		Enabled:       r.Enabled,
+		LastRun:       lastRun,
+		LastAnswer:    r.LastAnswer,
+		ScheduleError: scheduleError,
 	}
 }
+
+// scheduleForms is the line a refused schedule is answered with, naming the forms proactive.ParseSchedule reads.
+const scheduleForms = `try "every day at 9am", "weekdays at 18:30", "every 4 hours" or "when <something happens>"`
 
 // Routines handles /routines: GET lists every routine, newest first; POST creates one from {"text","schedule"}, both required. Any other method is 405.
 func (s *Server) Routines(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +76,7 @@ func (s *Server) listRoutines(w http.ResponseWriter, r *http.Request) {
 	util.WriteJSON(w, map[string]any{"routines": out})
 }
 
-// createRoutine answers POST /routines: a blank instruction or schedule is 400.
+// createRoutine answers POST /routines: a blank instruction or schedule is 400, and so is a schedule the scheduler cannot read, with the reason and the forms it can. Such a routine used to be stored and listed like any other and then skipped on every tick with nothing but a log line, so it simply never ran.
 func (s *Server) createRoutine(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text     string `json:"text"`
@@ -78,6 +88,10 @@ func (s *Server) createRoutine(w http.ResponseWriter, r *http.Request) {
 	text, schedule := strings.TrimSpace(req.Text), strings.TrimSpace(req.Schedule)
 	if text == "" || schedule == "" {
 		http.Error(w, "a routine needs both an instruction and a schedule", http.StatusBadRequest)
+		return
+	}
+	if _, err := proactive.ParseSchedule(schedule); err != nil {
+		http.Error(w, err.Error()+"; "+scheduleForms, http.StatusBadRequest)
 		return
 	}
 	id, err := s.store.AddRoutine(r.Context(), text, schedule)

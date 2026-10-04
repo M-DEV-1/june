@@ -22,3 +22,9 @@ type Speaker interface {
 	// returns peak amp
 	CurrentAmplitude() float64
 }
+
+// Drainer is a Speaker that can wait for what it has been given to finish playing. Play only queues, and Close and Flush both drop what is queued, so a caller that plays one line and closes has to wait in between. Both real speakers are Drainers, which each one's file checks at build time; it is kept out of Speaker so the fakes the agent and voice session tests play into do not need a method nothing there calls.
+type Drainer interface {
+	// Drain blocks until everything queued has been heard, ctx ends, or the speaker cannot play it, and returns nil only in the first case.
+	Drain(ctx context.Context) error
+}

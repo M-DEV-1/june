@@ -54,6 +54,8 @@ import {
   setToken,
   startDictation,
   stopDictation,
+  DictationRefused,
+  voiceTypingState,
   voiceStart,
   voiceStatus,
   voiceStop,
@@ -170,7 +172,11 @@ async function connect(): Promise<void> {
         }
         // The daemon's silence gate ends a dictation without being asked, and the words come back here rather than on a stop reply.
         if (ev.type === "dictation") {
-          if (ev.id === dictateId) finishDictation(ev.text ?? "");
+          // A failed one carries no words, and its text is not words to type.
+          if (ev.id === dictateId) {
+            if (ev.failed) void voiceTypingState().then((state) => failDictation(voiceTypingLine(state)));
+            else finishDictation(ev.text ?? "");
+          }
           return;
         }
         // A computer-use job's progress, tagged with its own id rather than an ask's — matched against jobId the same way an ask is matched against askId, and dropped rather than guessed at when it belongs to some other job (or beats the POST /act reply that would have told this window the id to match).
@@ -1017,12 +1023,16 @@ function beginDictation(): void {
   dictateId = undefined;
   dictateTaken = false;
   dispatch({ kind: "dictating" });
-  dictation = startDictation();
+  // The microphone opens only once GET /components has said voice typing is there at all: the daemon opens it regardless, and a person talked for up to two minutes before learning the words had nowhere to go. Only "not_installed" stops it, since a failed or downloading update can leave a whisper that works; a daemon that does not answer the read is left to try.
+  dictation = voiceTypingState().then((state) => {
+    if (state === "not_installed") throw new DictationRefused(VOICE_TYPING_MISSING);
+    return startDictation();
+  });
   dictation
     .then((id) => {
       dictateId = id;
     })
-    .catch(() => failDictation());
+    .catch(async (e) => failDictation(await dictationProblem(e)));
 }
 
 /** Whether a stop has gone to the daemon and not come back. The transcript can take minutes to arrive (whisper queues behind a meeting decode), and until it does the view still says the window is dictating — so without this a second Space would call endDictation again, and the daemon, having already closed that recording, would answer that second stop with a 404 and an empty transcript, which is then taken as the words and drops the real ones as a duplicate. */
@@ -1035,20 +1045,37 @@ async function endDictation(): Promise<void> {
   dictateStopping = true;
   try {
     finishDictation(await stopDictation(await started));
-  } catch {
-    failDictation();
+  } catch (e) {
+    failDictation(await dictationProblem(e));
   } finally {
     dictateStopping = false;
   }
 }
 
-/** Says the dictation could not be done, once, whether the microphone would not open or whisper would not transcribe. Input: none. Output: nothing. */
-function failDictation(): void {
+/** What the input says when voice typing was never set up. Talking for a minute and then reading "Dictation failed." lost the words and said nothing about why. */
+const VOICE_TYPING_MISSING = "Voice typing isn't set up. Add it in June's Settings, under Local features.";
+
+/** What voice typing's state explains about a dictation that failed. Input: the state off GET /components, "" when unknown. Output: the sentence, or "" when the state explains nothing. A failed or downloading state is said only after a failure, never to stop the microphone opening (see beginDictation). */
+function voiceTypingLine(state: string): string {
+  if (state === "not_installed") return VOICE_TYPING_MISSING;
+  if (state === "failed") return "Voice typing's set-up didn't finish. Try it again in June's Settings, under Local features.";
+  if (state === "queued" || state === "installing") return "Voice typing is still downloading. Try again once it's done.";
+  return "";
+}
+
+/** Why a dictation could not be done, in words. Input: what the start or the stop threw. Output: the daemon's own sentence when it gave one, what GET /components says about voice typing when that explains it, and otherwise "". */
+async function dictationProblem(e: unknown): Promise<string> {
+  if (e instanceof DictationRefused && e.message) return e.message;
+  return voiceTypingLine(await voiceTypingState());
+}
+
+/** Says the dictation could not be done, once, whether the microphone would not open or whisper would not transcribe. Input: why, "" when there is nothing more to say than that it failed. Output: nothing. A reason stays up long enough to be read. */
+function failDictation(reason = ""): void {
   if (dictateTaken) return;
   dictateTaken = true;
   dictation = undefined;
-  dispatch({ kind: "dictationFailed" });
-  clearHintSoon();
+  dispatch({ kind: "dictationFailed", text: reason });
+  clearHintSoon(reason ? 6000 : 1000);
 }
 
 /** Puts the words of a finished dictation into the input, once, whichever source they came from. Input: the transcript, empty when nothing was said. Output: nothing; an empty transcript leaves the input alone and shows a one-second hint instead. */
@@ -1060,16 +1087,23 @@ function finishDictation(text: string): void {
   clearHintSoon();
 }
 
-/** Takes the hint back down a second after it went up, if one did. Input: none. Output: nothing. */
-function clearHintSoon(): void {
-  if (view.hint) setTimeout(() => dispatch({ kind: "hint", text: "" }), 1000);
+/** Takes the hint back down a moment after it went up, if one did. Input: how long it stays, a second unless said otherwise. Output: nothing. */
+function clearHintSoon(ms = 1000): void {
+  if (view.hint) setTimeout(() => dispatch({ kind: "hint", text: "" }), ms);
 }
 
 /** Starts a live voice session, or ends the one already running. Input: none. Output: a promise for when the daemon has answered. */
 async function toggleVoice(): Promise<void> {
   if (!daemonUp) return;
   if (view.voice) return stopVoice();
-  const id = await voiceStart();
+  let id: string | null;
+  try {
+    id = await voiceStart();
+  } catch (e) {
+    // The daemon refused with a sentence, most often that there is no Gemini API key; shown nothing, the hotkey looked as if it had not been pressed.
+    offline(e instanceof Error ? e.message : String(e));
+    return;
+  }
   if (id) {
     dispatch({ kind: "voiceOn", id });
     clearHintSoon();

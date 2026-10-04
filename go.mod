@@ -3,7 +3,6 @@ module june
 go 1.25.1
 
 require (
-	github.com/ebitengine/oto/v3 v3.4.0
 	github.com/getlantern/systray v1.2.2
 	github.com/go-ole/go-ole v1.3.0
 	github.com/godbus/dbus/v5 v5.2.2
@@ -29,7 +28,6 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.11.0 // indirect
 	github.com/getlantern/context v0.0.0-20190109183933-c447772a6520 // indirect
 	github.com/getlantern/errors v0.0.0-20190325191628-abdb3e3e36f7 // indirect
 	github.com/getlantern/golog v0.0.0-20190830074920-4ef2e798c2d7 // indirect

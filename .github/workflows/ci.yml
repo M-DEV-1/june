@@ -1,4 +1,5 @@
 # Builds and tests the Go daemon and the Tauri window on Linux and Windows on every push, and fails on dead code in any of the three languages.
+# Every action is pinned to a commit, as in release.yml: any step here holds the token that writes the Actions cache, so an action whose tag was moved to a malicious commit could plant entries for later runs. Moving a pin means replacing the commit and its version comment together, after checking that the commit is the one that release's tag points at.
 name: ci
 
 # Push only: a pull request from a branch of this repository is already covered by the push, and both would run every job twice.
@@ -13,8 +14,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: go build ./...
@@ -34,12 +35,12 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           # The version used to write pnpm-lock.yaml. 11.28 rejects semver@6.3.1 under trustPolicy: no-downgrade.
           version: 11.1.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -51,8 +52,8 @@ jobs:
       - if: runner.os == 'Linux'
         working-directory: .
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libx11-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: app/src-tauri
       # Warnings are errors, which makes an unused function, import or variable in the Rust code fail the build.
@@ -64,8 +65,8 @@ jobs:
   deadcode:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: go mod tidy -diff
@@ -73,10 +74,10 @@ jobs:
           go install golang.org/x/tools/cmd/deadcode@v0.50.0
           go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           .github/deadcode.sh
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 11.1.2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -86,7 +87,35 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           npx --yes knip@6.38.0
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
         with:
           tool: cargo-machete@0.9.2
       - run: cargo machete app/src-tauri
+
+  # Builds the Windows installer and puts it through a silent install, an upgrade over a running June, june --quit and two uninstalls. June runs headless here, so any small program stands in for the window, which would otherwise cost a full Rust release build.
+  installer:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Build the installer
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'installer'
+          $exes = Join-Path $out 'exes'
+          New-Item -ItemType Directory -Force $exes | Out-Null
+          $env:CGO_ENABLED = '0'
+          go build -o (Join-Path $exes 'june.exe') .
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          go build -ldflags '-H windowsgui' -o (Join-Path $exes 'junew.exe') .
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Copy-Item (Join-Path $env:SystemRoot 'System32\whoami.exe') (Join-Path $exes 'june-window.exe')
+          ./packaging/windows/fetch-prereqs.ps1 -Out (Join-Path $out 'prereqs')
+          $iscc = ./packaging/windows/get-inno.ps1 -Dir (Join-Path $env:RUNNER_TEMP 'inno')
+          ./packaging/release-windows.ps1 -Stage package -Out $out -Iscc $iscc
+      - name: Install, upgrade, quit and uninstall
+        run: ./packaging/windows/smoke-test.ps1 -Installer (Join-Path $env:RUNNER_TEMP 'installer\June-Setup-x64.exe')

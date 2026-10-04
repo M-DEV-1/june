@@ -24,7 +24,6 @@ require_exec june-window
 require_exec install.sh
 require_exec uninstall.sh
 require june.desktop
-require june.service
 require "gnome-extension/june@june.local/metadata.json"
 require "gnome-extension/june@june.local/extension.js"
 # install.sh runs this before enabling the extension, and only when it is shipped executable.

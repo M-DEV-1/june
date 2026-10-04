@@ -47,7 +47,7 @@ export function TasksScreen() {
   const { taskId, query, taskChats } = useAppSelector((s) => s.ui);
   const run = useAppSelector((s) => s.progress.run);
   const { data: tasks = [], isError } = useAllTasksQuery();
-  const { data: brains = [] } = useBrainsQuery();
+  const { data: brains } = useBrainsQuery();
   const { data: meetings = [] } = useMeetingsQuery();
   const [createConversation] = useCreateConversationMutation();
   const rows = useRef<HTMLUListElement>(null);
@@ -80,7 +80,7 @@ export function TasksScreen() {
       <PageHeader full>
         <h1 className="shrink-0 text-ui font-medium">Tasks</h1>
         <div className="ml-auto">
-          <BrainPicker current={view?.brain ?? ""} brains={brains} />
+          <BrainPicker current={view?.brain ?? ""} brains={brains?.brains ?? []} automatic={brains?.automatic} />
         </div>
       </PageHeader>
 
@@ -110,7 +110,8 @@ export function TasksScreen() {
             conversationId={conversationId}
             draftKey={selected?.id}
             brain={view?.brain}
-            placeholder={selected ? "Say something about this task…" : "Pick a task first"}
+            placeholder="Say something about this task…"
+            idle="Pick a task, or add one"
             context={taskContext(selected)}
             start={selected ? startTaskChat : undefined}
           />

@@ -13,7 +13,7 @@ import (
 	"june/internal/util"
 )
 
-// Capture bounds on Windows. uiaCaptureTimeout is the whole read, the same 2.5 s the Linux capture gets; uiaCaptureWalkMS is how long the script itself walks before answering with what it has, kept well under the timeout so a slow but healthy walk returns partial text instead of having its host killed.
+// Capture bounds on Windows. uiaCaptureTimeout is the whole read, the same 2.5 s the Linux capture gets; uiaCaptureWalkMS is the longest the script itself walks before answering with what it has, kept well under the timeout so a slow but healthy walk returns partial text instead of having its host killed. uiaCall shortens it further when a cold host's start has already spent part of the timeout.
 const (
 	uiaCaptureTimeout = 2500 * time.Millisecond
 	uiaCaptureWalkMS  = 1500
@@ -41,24 +41,25 @@ func uiaWindowText(ctx context.Context, h windows.HWND) string {
 	return strings.TrimSpace(util.Runes(documentText(uiaTree(r.Nodes)), uiaMaxTextLen))
 }
 
-// extractMeetingWindow finds a call in progress anywhere on the desktop, focused or not, and reads it. Output: the owning executable's file name (the same form the tracker's GetActiveWindow reports), the window title, its text, and ok false when no open window's title or executable says it is a call (see IsMeetingWindow).
+// extractMeetingWindow finds a call in progress anywhere on the desktop, focused or not and on any virtual desktop, and reads it. Output: the owning executable's name without ".exe" (the same form the tracker's GetActiveWindow reports, so the blocklist and the activity's app match it alike), the window title, its text, and ok false when no open window's title or executable says it is a call (see IsMeetingWindow).
 func extractMeetingWindow() (app, title, text string, ok bool) {
 	for _, h := range topWindows() {
-		if !winListable(h) {
+		if !winListableAnyDesktop(h) {
 			continue
 		}
 		w := winOf(h)
-		if !IsMeetingWindow(w.exe, w.title) {
+		name := trimExe(w.exe)
+		if !IsMeetingWindow(name, w.title) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), uiaCaptureTimeout)
 		defer cancel()
-		return w.exe, w.title, uiaWindowText(ctx, h), true
+		return name, w.title, uiaWindowText(ctx, h), true
 	}
 	return "", "", "", false
 }
 
-// WindowTitleFor returns the title of an open window belonging to the named application, or "" when none is open. Input: the application's process name, such as "chrome" or "chrome.exe". Output: the longest title among the windows of every process whose executable name contains it or is contained by it, case-insensitively; the longest because a browser's short utility windows sit beside the one that names the call fully.
+// WindowTitleFor returns the title of an open window belonging to the named application, on any virtual desktop, or "" when none is open. Input: the application's process name, such as "chrome" or "chrome.exe". Output: the longest title among the windows of every process whose executable name contains it or is contained by it, case-insensitively; the longest because a browser's short utility windows sit beside the one that names the call fully.
 func WindowTitleFor(ctx context.Context, app string) string {
 	want := strings.ToLower(trimExe(app))
 	if want == "" {
@@ -66,7 +67,7 @@ func WindowTitleFor(ctx context.Context, app string) string {
 	}
 	best := ""
 	for _, h := range topWindows() {
-		if !winListable(h) {
+		if !winListableAnyDesktop(h) {
 			continue
 		}
 		w := winOf(h)

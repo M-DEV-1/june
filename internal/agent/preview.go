@@ -19,7 +19,7 @@ import (
 const previewPhrase = "This is how I sound."
 
 // SpeakPreview synthesizes the preview line in one voice and hands the audio to play. It takes no Agent, so the daemon's /voices/preview route can speak a voice with nothing but a key and a speaker, outside any live session.
-// Input: a context, the Gemini API key, the voice in any casing, and what to do with each chunk of audio. Output: an error for a name that is not a Gemini voice, a failed call, a failed playback, or a response carrying no audio at all.
+// Input: a context, the Gemini API key, the voice in any casing, and what to do with each chunk of audio. Output: an error for a name that is not a Gemini voice, ErrNoGeminiKey when the voice is not kept and there is no key, a failed call, a failed playback, or a response carrying no audio at all.
 //
 // Gemini TTS returns 24kHz mono 16-bit PCM (see config.TTSModel), the same format audio.Speaker already expects from the Live API, so the bytes play as-is with no conversion.
 func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byte) error) error {
@@ -32,13 +32,19 @@ func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byt
 	if pcm, err := os.ReadFile(previewPath(canonical)); err == nil && len(pcm) > 0 {
 		return play(pcm)
 	}
+	// Without a key the call went on to genai.NewClient, whose refusal prints its whole ClientConfig as a Go struct, and that dump was what the Settings toast showed.
+	if strings.TrimSpace(apiKey) == "" {
+		return ErrNoGeminiKey
+	}
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey:  apiKey,
 		Backend: genai.BackendGeminiAPI,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to initialize genai client: %w", err)
+		// The client's refusal can print its whole ClientConfig as a Go struct, so it goes to the log and the window gets the sentence.
+		slog.Warn("voice preview: could not start the Gemini client", "error", err)
+		return errors.New("could not start the Gemini client, so the voice cannot be previewed; the reason is in the log")
 	}
 
 	resp, err := client.Models.GenerateContent(ctx, config.TTSModel, genai.Text(previewPhrase), &genai.GenerateContentConfig{
@@ -55,7 +61,8 @@ func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byt
 		if quotaSpent(err) {
 			return fmt.Errorf("no voice previews left today: the free tier allows ten a day for the whole project, and they are kept once played so each voice costs one call ever")
 		}
-		return fmt.Errorf("voice preview request failed: %w", err)
+		slog.Warn("voice preview request failed", "voice", canonical, "error", err)
+		return fmt.Errorf("voice preview request failed: %s", previewRefusal(err))
 	}
 
 	var played bool
@@ -80,6 +87,33 @@ func SpeakPreview(ctx context.Context, apiKey, voiceName string, play func([]byt
 
 	slog.Debug("played voice preview", "voice", canonical)
 	return nil
+}
+
+// previewRefusal is the part of a failed TTS call the window can show. Input: the error GenerateContent returned. Output: Gemini's own message for an API error, cut to its first line — its Error() adds the status code and a Go dump of the details maps, which is what the Settings toast showed for a refused key; any other error's text unchanged.
+func previewRefusal(err error) string {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) || strings.TrimSpace(apiErr.Message) == "" {
+		return err.Error()
+	}
+	msg, _, _ := strings.Cut(strings.TrimSpace(apiErr.Message), "\n")
+	// A proxy can answer with a page rather than JSON, which the SDK hands back whole as the message.
+	if r := []rune(msg); len(r) > 200 {
+		msg = string(r[:200]) + "…"
+	}
+	return "Gemini said: " + msg
+}
+
+// PreviewNeedsKey reports whether SpeakPreview would have to ask Gemini for this voice and has no key to ask with, so the daemon can refuse before it opens a speaker for a line that cannot be made. Input: the API key and the voice in any casing. Output: true only for a known voice with no kept preview and a blank key; an unknown name is false, since SpeakPreview reports that itself.
+func PreviewNeedsKey(apiKey, voiceName string) bool {
+	if strings.TrimSpace(apiKey) != "" {
+		return false
+	}
+	canonical, ok := config.NormalizeVoice(voiceName)
+	if !ok {
+		return false
+	}
+	info, err := os.Stat(previewPath(canonical))
+	return err != nil || info.Size() == 0
 }
 
 // noAudioReason says why a TTS response carried no audio, so a refusal is not reported as an empty answer. Input: the response, which may be nil. Output: the safety block reason when the prompt was refused, and a plain sentence otherwise.

@@ -73,6 +73,8 @@ type Daemon struct {
 	lastCapture atomic.Int64
 	// lastSeen is the window the tick loop most recently polled, including one it went on to skip. It is atomic because a capture goroutine reads it while the loop writes it, and it is what a finished capture checks the text it just read against.
 	lastSeen atomic.Pointer[Activity]
+	// lastReal is the newest window the tick loop did not skip, written the moment the loop sees the user arrive in it, before any dwell. It is atomic because /context reads it from a request goroutine (see LastWindow).
+	lastReal atomic.Pointer[Activity]
 }
 
 // withBudget runs work and returns what it produced, or the zero value once ctx's deadline passes, whichever happens first. Input: a context carrying the deadline and a function doing the work. Output: the work's value, or the zero value when the deadline won.
@@ -160,7 +162,7 @@ func normalizeAppIdentifier(s string) string {
 	return s
 }
 
-// skipReason names why the window just polled is not the user's activity, or "" when it is one to record. The three cases: a window nothing could identify, which carries zero information and would pollute every later summary with "Unknown | Unknown" lines; June's own window, because recording the hover files the assistant as an episode and pushes the window the user came from out of the live buffer, so /context answers with June itself; and an application on the blocklist.
+// skipReason names why the window just polled is not the user's activity, or "" when it is one to record. The cases: a window nothing could identify, which carries zero information and would pollute every later summary with "Unknown | Unknown" lines; a surface of the Windows shell (see windowsShell), which the user passes through on the way to a window; June's own window, because recording the hover files the assistant as an episode and pushes the window the user came from out of the live buffer, so /context answers with June itself; and an application on the blocklist.
 // screenLocked reports whether the session's lock screen is up, giving the probe d.bounds.lock to answer. Input: none. Output: true only when the probe answered and said locked; a probe that has not answered in time reads as unlocked, because wrongly refusing to capture is the harmful direction to fail in.
 func (d *Daemon) screenLocked() bool {
 	if sessionLocked == nil {
@@ -175,6 +177,8 @@ func (d *Daemon) skipReason(act Activity) string {
 	switch {
 	case act.App == "Unknown" && act.Title == "Unknown":
 		return "unidentified"
+	case act.App == windowsShell:
+		return "shell"
 	case IsJuneWindow(act.App, act.Title):
 		return "june"
 	case MatchesBlocklist(act.App, d.blocklist):
@@ -267,6 +271,7 @@ func (d *Daemon) Start(ctx context.Context) {
 
 			if changed {
 				lastActivity = activity
+				d.lastReal.Store(&Activity{App: activity.App, Title: activity.Title})
 				pendingActivity = activity
 				pendingSince = time.Now()
 				emittedCurrent = false
@@ -359,6 +364,15 @@ func (d *Daemon) movedOn(ev Activity) bool {
 
 // noteWindow records the window the tick loop just polled, whether or not it is one worth recording. Input: the polled activity. Output: none. A window that is about to be skipped is exactly the one a capture in flight needs to know about, so this runs before skipReason.
 func (d *Daemon) noteWindow(a Activity) { d.lastSeen.Store(&a) }
+
+// LastWindow is the last window the user was in that the tick loop would record, for /context to name while June's own window, the shell or a blocked application has the focus. Input: none. Output: its app and title, with no text, and false before the loop has seen one. The compiler's buffer only learns of a window once the dwell has passed and the capture has run, so a window left a few seconds before the hotkey was pressed is in here and nowhere else.
+func (d *Daemon) LastWindow() (Activity, bool) {
+	a := d.lastReal.Load()
+	if a == nil {
+		return Activity{}, false
+	}
+	return *a, true
+}
 
 // watchMeetingWindow reads the window of a call in progress once a minute, whether or not it has focus, and emits it as an activity of its own.
 // The focused window is the wrong window during a meeting: on 2026-08-31 a thirty-nine minute standup produced twenty-seven episodes and not one was the call, because the user spent it in ClickUp and a terminal. Participant tiles and presenter labels are the only things on the machine that name who is talking, and none of them were ever captured.
@@ -494,6 +508,12 @@ func resolveCapture(lastA11yText, lastVisionText *string, a11yText string, useVi
 	return captureOut{text: shown, sight: sight, frames: frames}
 }
 
+// windowsShell is the application the Windows tracker files every surface of the shell under: the desktop, a taskbar, Start, search, the notification and quick-settings panes, the task switcher (see winShell). None of them is something the user is doing, so skipReason passes over it the way it does an unidentified window, leaving the pending activity alone. It is a name of its own rather than Unknown because it is still a definite answer: a capture in flight while Start or search is in front read that surface and not the application it was started for, and movedOn drops it only for a poll that named a different application.
+const windowsShell = "windows-shell"
+
+// IsShell reports whether app is windowsShell, the name every surface of the Windows shell is read as. Input: an activity's app. Output: true for the shell, which /context must pass over exactly as skipReason does.
+func IsShell(app string) bool { return app == windowsShell }
+
 // nonWindowApps are the desktop/compositor/shell identifiers that mean no real app is focused. Without this gate the vision tier would screenshot and describe the wallpaper on every idle tick.
 var nonWindowApps = map[string]struct{}{
 	"":                {},
@@ -505,6 +525,16 @@ var nonWindowApps = map[string]struct{}{
 	"plasmashell":     {},
 	"kwin":            {},
 	"desktop":         {},
+	// Windows, by executable without ".exe": Start, search (SearchHost on Windows 11, SearchApp and SearchUI before it), the notification and quick-settings panes, the touch keyboard and emoji panel, and the lock screen. The desktop, the taskbar and the task switcher are explorer.exe, which is File Explorer too, so the Windows tracker tells those apart by window class instead (see winShell) and reports all of them as windowsShell.
+	windowsShell:              {},
+	"startmenuexperiencehost": {},
+	"searchhost":              {},
+	"searchapp":               {},
+	"searchui":                {},
+	"shellexperiencehost":     {},
+	"shellhost":               {},
+	"textinputhost":           {},
+	"lockapp":                 {},
 }
 
 // isVisionWorthy reports whether the focused window is a real application worth describing with the vision tier (vs. the bare desktop / compositor shell).

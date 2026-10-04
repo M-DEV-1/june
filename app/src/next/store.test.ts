@@ -328,7 +328,7 @@ describe("the stream coming back", () => {
     store.dispatch(progress.askSent({ conversationId: "c1", question: "a question" }));
 
     reopen?.();
-    await vi.waitFor(() => expect(invalidate).toHaveBeenCalledWith(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalledWith(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Setup", "Component", "Update"]));
     expect(store.getState().progress.run).toBeUndefined();
     invalidate.mockRestore();
   });
@@ -351,6 +351,7 @@ describe("what the face is told", () => {
     store.dispatch(progress.eventArrived({ id: "a1", type: "error", text: "no" }));
     expect(store.getState().progress.ended).toBeUndefined();
     store.dispatch(progress.askSent({ conversationId: "c1", question: "q" }));
+    store.dispatch(progress.askAccepted({ askId: "a1", conversationId: "c1" }));
     store.dispatch(progress.eventArrived({ id: "a1", type: "error", text: "no" }));
     expect(store.getState().progress.ended?.ok).toBe(false);
   });

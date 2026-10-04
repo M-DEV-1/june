@@ -78,6 +78,27 @@ const sameTreeHint = "\n(this is the accessibility tree, which is all observe_sc
 // frameOnlyHint is appended to an observe_screen result when the window published nothing but its own frame buttons, so the model knows to fall back to look instead of reporting an empty screen.
 const frameOnlyHint = "\n(this window publishes none of its content to the accessibility tree; call look to see the page as a picture, and click_at with points from that picture)"
 
+// jobFrameOnlyHint and jobSameTreeHint are what a computer-use job is told in place of frameOnlyHint and sameTreeHint. Both of those send the model to look, and inside a job look and every click at a point are refused (see jobSeesNoPictures), so a text-only brain was told to take an action certain to be refused, and every refusal was a failed step towards the stuck question.
+const (
+	jobFrameOnlyHint = "\n(this window publishes none of its content to the accessibility tree, and this job reads that tree alone, so nothing in it can be acted on from here; if the goal needs it, say so with ask)"
+	jobSameTreeHint  = "\n(this is the accessibility tree, which is all observe_screen reads — a window that draws its own controls looks identical here whether or not it changed, so write a screen_changed check for an action whose effect this list cannot show)"
+)
+
+// frameOnlyNote and sameTreeNote are the two hints for whoever is reading the listing: a job, which cannot be shown a picture, or anything else. Input: whether the call is a job's (see inJob). Output: the hint.
+func frameOnlyNote(job bool) string {
+	if job {
+		return jobFrameOnlyHint
+	}
+	return frameOnlyHint
+}
+
+func sameTreeNote(job bool) string {
+	if job {
+		return jobSameTreeHint
+	}
+	return sameTreeHint
+}
+
 // frameOnlyLabels are the window-frame button labels that, alone, mean a window's own content never reached the accessibility bus. This happens with Chromium-family browsers run without --force-renderer-accessibility: the window manager's minimize/maximize/restore/close controls still publish, but the page itself does not.
 var frameOnlyLabels = map[string]bool{"Minimize": true, "Maximize": true, "Restore": true, "Close": true}
 
@@ -99,10 +120,10 @@ func withReviseHint(result string) string {
 	return result + reviseHint
 }
 
-// browserKeysHint is appended to an observe_screen result when the window in front is a browser. A browser's tab strip and address bar are chrome, not page content, so they are never in the listing, and a model that only knows what the listing holds reads that absence as "there is nothing here to close a tab with" and says out loud that it cannot. On 2026-09-12 that happened three times in one session — refusing to switch a tab, refusing to close tabs, refusing to open a link — with press_key available the whole time.
+// browserKeysHint is appended to an observe_screen result when the window in front is a browser. A browser's tab strip and address bar are chrome, not page content, so the Linux walk never lists them (the Windows walk lists the address bar, which is why the hint says "may not" rather than "never": a hint that contradicts the lines above it is one the model stops trusting), and a model that only knows what the listing holds reads that absence as "there is nothing here to close a tab with" and says out loud that it cannot. On 2026-09-12 that happened three times in one session — refusing to switch a tab, refusing to close tabs, refusing to open a link — with press_key available the whole time.
 //
 // It names what can be done and the key that does it, because the gap is not that the model lacks press_key; it is that nothing connects "close a tab" to "Ctrl+W". The keys are the ones the session actually needed, not every shortcut a browser has: a longer list costs every browser look more tokens to carry guesses nobody asked for.
-const browserKeysHint = "\n(this is a browser: its tabs and address bar are chrome, not page content, so they are never listed above — reach them with press_key. Ctrl+W closes the tab in front, Ctrl+Tab moves to the next tab, Ctrl+T opens a new one, Ctrl+L selects the address bar.)"
+const browserKeysHint = "\n(this is a browser: its tabs and address bar are chrome, not page content, so the list above may not show them — reach them with press_key. Ctrl+W closes the tab in front, Ctrl+Tab moves to the next tab, Ctrl+T opens a new one, Ctrl+L selects the address bar.)"
 
 // browserMarkers are the lowercase fragments that identify a browser in the app name observe reports ("Brave Browser", "Chromium", "Google Chrome", "Firefox"). Fragments rather than whole names because the same browser reports itself differently depending on how it was started — snap Brave comes through as "Brave Browser", and an X11 window activated through its mutter frame reports the frame's own name (see the note in internal/act) — and "chrom" covers Chromium and Chrome together.
 var browserMarkers = []string{"brave", "chrom", "firefox", "edge", "safari", "vivaldi", "opera"}
@@ -135,16 +156,49 @@ func frameOnly(lines []string) bool {
 	return true
 }
 
+// pageUnreadHint and jobPageUnreadHint are appended to a browser's listing that holds its own controls and nothing of the page (see pageListed). Chromium (Chrome, Edge and every Electron app) builds a page's accessibility tree only once a client asks for it and fills it in over the following second, so the first read of a window nobody had read listed the tab strip, Back, Refresh and the address bar and none of the page. The Windows walk reads such a window a second time after a pause, but the page can still be missing after it, and without a word on it the model took the toolbar for the whole page. frameOnlyHint does not fire there, because the toolbar is more than the window's frame buttons.
+const (
+	pageUnreadHint    = "\n(nothing of the page itself is in this list, only the browser's own controls: a browser can take a moment to publish a page nothing had read before, so call observe_screen once more, and if the page is still missing, call look to see it as a picture)"
+	jobPageUnreadHint = "\n(nothing of the page itself is in this list, only the browser's own controls: a browser can take a moment to publish a page nothing had read before, so call observe_screen once more, and if the page is still missing, this job cannot reach it, so say so with ask)"
+)
+
+// pageUnreadNote is the hint for a browser listing with none of the page in it, for a job or anything else (see frameOnlyNote). Input: whether the call is a job's. Output: the hint.
+func pageUnreadNote(job bool) string {
+	if job {
+		return jobPageUnreadHint
+	}
+	return pageUnreadHint
+}
+
+// pageRoles are the roles only a page lists: a browser's own tab strip, toolbar and address bar are page tabs, buttons and an entry, and a page with anything on it has a run of text or a link at the least.
+var pageRoles = map[string]bool{"text": true, "link": true, "list item": true, "table cell": true, "tree item": true, "check box": true, "radio button": true, "combo box": true, "slider": true, "spin button": true}
+
+// pageListed reports whether a listing holds anything of a page. Input: the numbered listing lines, in act.Format's `[n] role "label"` shape. Output: true when any line's role is one of pageRoles.
+func pageListed(lines []string) bool {
+	for _, line := range lines {
+		_, rest, ok := strings.Cut(line, "] ")
+		if !ok {
+			continue
+		}
+		if role, _, _ := strings.Cut(rest, ` "`); pageRoles[role] {
+			return true
+		}
+	}
+	return false
+}
+
 // maxChangedLines is how many lines may differ before a look is sent as a whole list instead of as the lines that changed. Twelve, because past that the page has moved rather than ticked over, and a model piecing a page together out of a dozen scattered corrections is worse off than one reading the page.
 const maxChangedLines = 12
 
-// observeResult renders one look at the screen against the look before it, so a page that has not moved is not paid for twice. Input: the window's app and title, the numbered lines this look produced, and the snapshot of the look before (zero value when there was none). Output: the whole numbered list for a first look, a different window, a list of a different length, or a page that changed too much to state line by line; a one-line "unchanged" answer when nothing moved; otherwise the window line and only the lines that changed.
+// observeResult renders one look at the screen against the look before it, so a page that has not moved is not paid for twice. Input: the window's app and title, the numbered lines this look produced, the snapshot of the look before (zero value when there was none), and whether a job is reading it, which picks the hints (see frameOnlyNote). Output: the whole numbered list for a first look, a different window, a list of a different length, or a page that changed too much to state line by line; a one-line "unchanged" answer when nothing moved; otherwise the window line and only the lines that changed.
 // The numbers are the same numbers either way: the shorter answers are only ever sent when the list is the same length in the same order, so a number the model already has still points at the same row.
-func observeResult(app, title string, lines []string, previous screenSnapshot) string {
+func observeResult(app, title string, lines []string, previous screenSnapshot, job bool) string {
 	window := app + " · " + title
 	full := window + "\n" + strings.Join(lines, "\n")
 	if frameOnly(lines) {
-		full += frameOnlyHint
+		full += frameOnlyNote(job)
+	} else if isBrowser(app) && !pageListed(lines) {
+		full += pageUnreadNote(job)
 	}
 	// Only on the full listing, never on the two short answers below. Those exist to save tokens on a window already described, and this hint is stable for the app, so the copy sent with that window's first full listing is still in the conversation. A window not described yet always renders full, which is where the hint is needed.
 	if isBrowser(app) {
@@ -161,7 +215,7 @@ func observeResult(app, title string, lines []string, previous screenSnapshot) s
 	}
 	switch {
 	case len(changed) == 0:
-		return fmt.Sprintf("%s\n%s the same %d items, and their numbers still stand)%s", window, unchangedScreenMarker, len(lines), sameTreeHint)
+		return fmt.Sprintf("%s\n%s the same %d items, and their numbers still stand)%s", window, unchangedScreenMarker, len(lines), sameTreeNote(job))
 	case len(changed) <= maxChangedLines:
 		return fmt.Sprintf("%s\n(the same %d items as the last look, with these changed:)\n%s", window, len(lines), strings.Join(changed, "\n"))
 	}
@@ -195,6 +249,10 @@ type askLookState struct {
 	beforeShot tracker.Capture
 	// branches is how many background searches this ask has run: a search costs a call against a monthly search allowance, not this turn's tokens.
 	branches int
+	// acted is the window the last numbered click was seen to leave in front, read straight after it, and "" once observe_screen has looked again. A click can retitle the window it lands in (a chat opening the conversation clicked), and the keys sent right after it in the same burst are going where that click put them, not into some other window (see keysWindow).
+	acted string
+	// job marks the state of a computer-use job (see NewScreenScope) rather than of an ask: its brain reads text only, so no picture can be shown to it, and its own prompt offers it branch, which an ask is not offered (see jobAllowedTools).
+	job bool
 }
 
 // maxBranchesPerAsk is how many background web searches one ask may run. The old cap went when the Gemini-subtask engine it guarded was retired, and nothing replaced it, so an agentic loop could call branch as often as it liked. It no longer spends the daily Gemini allowance, but it does spend a real search allowance — Tavily's free tier is a thousand calls a month, which one determined session could make a dent in.
@@ -259,9 +317,19 @@ func withAskLookState(ctx context.Context) context.Context {
 }
 
 // NewScreenScope gives one caller its own screen state — the numbered list observe_screen produced, the picture look took and what the pictures cost, and which control the last click focused — in place of the agent-wide state a directly driven tool call would otherwise read and write. A long-running computer-use job (internal/actjob) calls it once and makes every tool call of that job with the context it returns, so two jobs never resolve a number against each other's window or each other's pictures. Input: the job's own context. Output: a context carrying fresh screen state.
+// The state is marked as a job's (see inJob). A job's brain is text in, text out (actjob.Model), so a look it takes is a picture nobody can show it: look said "here is the picture" and then every point read off it was refused, a round apiece. Marked, look and a click at a point say at once that this brain cannot see pictures.
 func (a *Agent) NewScreenScope(ctx context.Context) context.Context {
-	return withAskLookState(ctx)
+	return context.WithValue(ctx, askLookStateKey{}, &askLookState{job: true})
 }
+
+// inJob reports whether a tool call belongs to a computer-use job, whose screen state NewScreenScope made. Input: the call's context. Output: true for a job's call, false for an ask's or a directly driven one.
+func inJob(ctx context.Context) bool {
+	s, ok := ctx.Value(askLookStateKey{}).(*askLookState)
+	return ok && s.job
+}
+
+// jobSeesNoPictures is what look and a click at a point say inside a job: the job's brain reads text only, so there is no picture it could be shown and no point it could read off one. It names the path that works, the numbered list, rather than leaving the model to look again.
+const jobSeesNoPictures = "this job's brain reads text only, so no picture can be shown to it and no point read off one; use observe_screen and act on an item by its number, and when the list shows nothing for what you need, say so with ask"
 
 // lookStateFrom reads the look state withAskLookState attached to ctx. Output: that state, or a throwaway empty one when ctx carries none, which only happens when a tool is driven directly rather than through an ask.
 func lookStateFrom(ctx context.Context) *askLookState {
@@ -292,7 +360,22 @@ func (a *Agent) rememberScreen(ctx context.Context, items []act.Item, snap scree
 	s := a.askState(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.items, s.snap, s.focusUnknown = items, snap, false
+	s.items, s.snap, s.focusUnknown, s.acted = items, snap, false, ""
+}
+
+// rememberActed records the window a numbered click was seen to leave in front, and actedIn reads it back: "" when observe_screen has looked since, or nothing was clicked. Input: the call's context and the window in "app · title" form.
+func (a *Agent) rememberActed(ctx context.Context, window string) {
+	s := a.askState(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.acted = window
+}
+
+func (a *Agent) actedIn(ctx context.Context) string {
+	s := a.askState(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acted
 }
 
 // lastScreen returns the snapshot of this ask's last observe_screen answer, the zero value when it has not observed yet.
@@ -311,19 +394,19 @@ func (a *Agent) focus(ctx context.Context) (act.Item, bool) {
 	return s.clicked, !s.focusUnknown
 }
 
-// focusHeld reports whether the control the last click focused still has the keyboard, read from the accessibility focused state. Input: the call's context and the remembered item. Output: true when nothing has been wired to read focus (the remembered click is then all there is) or when the read says the element is focused; false when the item carries no reference, when the read says it is not focused, or when the read fails — a dialog that opened over the field, or an application that moved the focus itself, has to refuse the typing rather than send it somewhere nothing checked.
-func (a *Agent) focusHeld(ctx context.Context, it act.Item) bool {
+// focusHeld reports whether the control the last click focused still has the keyboard, read from the accessibility focused state. Input: the call's context and the remembered item. Output: held, false only when the read says definitely not focused — a dialog that opened over the field, or an application that moved the focus itself — and true otherwise, including when nothing has been wired to read focus, the item carries no reference or the read fails, where the remembered click is all there is; and read, true only when the read itself said the element is focused, which is what lets keysWindow take the field's window for the one last listed without reading it again.
+func (a *Agent) focusHeld(ctx context.Context, it act.Item) (held, read bool) {
 	// Nothing has been clicked yet: there is no field to read the state on, and the zero item this stands for matches no stop-line check either, so this is the same "typing where the focus is" it has always been.
 	if a.focused == nil || it.Ref == "" {
-		return true
+		return true, false
 	}
 	held, err := a.focused(ctx, it.Ref)
 	if err != nil {
 		// The read said nothing rather than saying no: the bus timed out, the element has gone, or its toolkit does not publish the focused bit on the node the walk listed, which Chromium and Electron often do not. Refusing on that stops typing into fields that are perfectly focused, so the remembered click stands and the guard bites only on a definite not-focused.
 		slog.Warn("could not read whether the field still holds the keyboard, so typing goes ahead on the remembered click", "ref", it.Ref, "error", err)
-		return true
+		return true, false
 	}
-	return held
+	return held, held
 }
 
 // rememberClick records the item a numbered click just acted on as the control the keyboard is now pointing at. Input: the call's context and the clicked item. Output: none.
@@ -405,6 +488,9 @@ const cannotSeePictures = "I took the picture but this session cannot show it to
 
 // toScreen turns a point the model read off the last look into the point on the screen it names. Input: the point in the picture's own pixels. Output: the screen point, or a tool error when this ask has not looked or the point is outside the picture, which is the shape a guessed coordinate takes.
 func (a *Agent) toScreen(ctx context.Context, x, y int) (int, int, string) {
+	if inJob(ctx) {
+		return 0, 0, toolError(jobSeesNoPictures)
+	}
 	c, ok, blind := lookSeen(ctx)
 	if !ok {
 		if blind {
@@ -522,12 +608,28 @@ type boundInput struct {
 	ctx context.Context
 }
 
+// keysByContext is an InputDevice whose typing and key presses stop between two keys once a context ends, as *input.Session's do on every platform. boundInput hands such a device the tool call's own context, so a job or an ask that is stopped stops typing within a character rather than after the whole text has gone out; a test's device has none, and types the whole text as it always did.
+type keysByContext interface {
+	PressKeyContext(ctx context.Context, name string) error
+	TypeTextContext(ctx context.Context, text string) error
+}
+
 func (b *boundInput) PressKey(name string) error {
-	return b.r.do(b.ctx, func(d InputDevice) error { return d.PressKey(name) })
+	return b.r.do(b.ctx, func(d InputDevice) error {
+		if k, ok := d.(keysByContext); ok {
+			return k.PressKeyContext(b.ctx, name)
+		}
+		return d.PressKey(name)
+	})
 }
 
 func (b *boundInput) TypeText(text string) error {
-	return b.r.do(b.ctx, func(d InputDevice) error { return d.TypeText(text) })
+	return b.r.do(b.ctx, func(d InputDevice) error {
+		if k, ok := d.(keysByContext); ok {
+			return k.TypeTextContext(b.ctx, text)
+		}
+		return d.TypeText(text)
+	})
 }
 
 func (b *boundInput) ClickAt(x, y float64) error {
@@ -549,6 +651,19 @@ type WindowRaiser interface {
 	ByPid(ctx context.Context, pid uint32) (bool, error)
 	ByTitle(ctx context.Context, substring string) (bool, error)
 	ByWmClass(ctx context.Context, wmClass string) (bool, error)
+}
+
+// windowByWindow is a WindowRaiser that can also activate the very window List reported, as *window.Raiser can. On Windows many windows share one pid — every Store app's frame belongs to ApplicationFrameHost, every File Explorer window to explorer.exe, every browser window to its browser — so raising a matched window by its pid brought whichever of that process's windows was nearest the front: "switch to Calculator" with Settings in front raised Settings again and reported it found.
+type windowByWindow interface {
+	ByWindow(ctx context.Context, w window.Window) (bool, error)
+}
+
+// raiseListed activates one window from the raiser's List: that very window when the raiser can do it, otherwise its process's by pid, which is all a test's raiser offers. Input: the call's context and the window. Output: whether it came to the front, and the raiser's error.
+func (a *Agent) raiseListed(ctx context.Context, w window.Window) (bool, error) {
+	if r, ok := a.raiser.(windowByWindow); ok {
+		return r.ByWindow(ctx, w)
+	}
+	return a.raiser.ByPid(ctx, w.Pid)
 }
 
 // UseWindowRaiser gives this agent a way to raise another application's window through the bundled GNOME Shell extension. Input: the raiser, which switch_window asks first and falls back from when the extension is not installed, not enabled, or matched nothing.
@@ -923,9 +1038,24 @@ func mentionsWindow(question, app, title string) bool {
 	if app != "" && strings.Contains(q, strings.ToLower(app)) {
 		return true
 	}
+	return mentionsTitle(q, title, "")
+}
+
+// mentionsTitle reports whether question names a window by its title: a word of the title of at least four letters is in it, case-insensitively, leaving out the words the other title has too. Input: the question, the window's title, and the title of the window it has to be told from ("" for none). Output: true when such a word is in the question.
+// The other title's words are left out because a word two windows share names neither of them: a second Notepad window is "notes.txt - Notepad" beside "Untitled - Notepad", and "type it in notepad" names no one of the two.
+func mentionsTitle(question, title, other string) bool {
+	q := strings.ToLower(question)
+	if q == "" {
+		return false
+	}
+	trim := func(word string) string { return strings.ToLower(strings.Trim(word, ".,:;·-\"'")) }
+	shared := map[string]bool{}
+	for _, word := range strings.Fields(other) {
+		shared[trim(word)] = true
+	}
 	for _, word := range strings.Fields(title) {
-		word = strings.ToLower(strings.Trim(word, ".,:;·-\"'"))
-		if len(word) >= 4 && strings.Contains(q, word) {
+		word = trim(word)
+		if len(word) >= 4 && !shared[word] && strings.Contains(q, word) {
 			return true
 		}
 	}
@@ -980,11 +1110,22 @@ func namesApp(text, app string) bool {
 
 // frontIsApp reports whether a window reading of the form "app · title" is a window of the named application, judged on the application half alone. The title half is the document or the page, which can be named after anything at all: a Chromium window showing the Spotify web player reads as "Chromium · Spotify Premium", and reading that as Spotify is what made open_app report Spotify as already in front and start nothing. Input: the window reading and the application name. Output: whether the application half names it.
 func frontIsApp(front, app string) bool {
-	appHalf, _, _ := strings.Cut(front, windowSep)
-	return namesApp(appHalf, app)
+	return namesApp(frontApp(front), app)
 }
 
-// raiseWindow asks the GNOME Shell extension to bring the application's window forward. The pid of the process that owns a window is the most exact key there is, so List is read first and any open window whose class or title already names the app is raised by its pid; failing that (no extension, nothing in the list matched, or the pid activation itself did not land) it falls back to the looser text matches the extension does itself, WM_CLASS before title since a title is often a document name and not the app. Input: a context bounding the D-Bus calls and the application name. Output: true and the key that found it ("pid 1234", `wm_class "brave-browser"` or `title "Brave"`) when a window was raised; false and "" when there is no extension wired up, it is not loaded in the running shell, it matched nothing, or every call failed — every one of which means the keyboard path is what is left.
+// frameHost is the program that owns the window of every Store app on Windows (Calculator, Settings, Photos), which runs in a process of its own behind it. The tracker reads such a window under the app's own executable, "CalculatorApp · Calculator" or "SystemSettings · Settings", and only while the app is suspended or resuming under the frame's, "ApplicationFrameHost · Calculator"; judged on either half no Store app was ever in front, so open_app reported a Calculator it had just raised as "not Calculator".
+const frameHost = "applicationframehost"
+
+// frontApp is the application half of a window reading, or for a Store app's window the title half, which is what such a window is titled with: the Store app's own name. Which executables are Store apps is the tracker's to say (tracker.IsStoreApp), since it is the one that looked inside the frame, so this does not hang on how it names them. Input: a reading of the form "app · title". Output: the half that names the application.
+func frontApp(front string) string {
+	appHalf, title, _ := strings.Cut(front, windowSep)
+	if (strings.EqualFold(appHalf, frameHost) || tracker.IsStoreApp(appHalf)) && title != "" {
+		return title
+	}
+	return appHalf
+}
+
+// raiseWindow asks the GNOME Shell extension to bring the application's window forward. The window List reports is the most exact key there is, so List is read first and any open window whose class or title already names the app is raised itself (by its pid where the raiser can do no better, see raiseListed); failing that (no extension, nothing in the list matched, or the pid activation itself did not land) it falls back to the looser text matches the extension does itself, WM_CLASS before title since a title is often a document name and not the app. Input: a context bounding the D-Bus calls and the application name. Output: true and the key that found it ("pid 1234", `wm_class "brave-browser"` or `title "Brave"`) when a window was raised; false and "" when there is no extension wired up, it is not loaded in the running shell, it matched nothing, or every call failed — every one of which means the keyboard path is what is left.
 func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 	if a.raiser == nil {
 		return false, ""
@@ -1005,7 +1146,7 @@ func (a *Agent) raiseWindow(ctx context.Context, app string) (bool, string) {
 				if !byClass && !namesApp(w.Title, app) {
 					continue
 				}
-				if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
+				if ok, err := a.raiseListed(ctx, w); err == nil && ok {
 					return true, fmt.Sprintf("pid %d", w.Pid)
 				}
 			}
@@ -1039,9 +1180,9 @@ func (a *Agent) raiseBrowser(ctx context.Context) string {
 	if a.raiser == nil {
 		return ""
 	}
-	id := strings.TrimSuffix(defaultBrowserID(), ".desktop")
-	idWords := appWords(id)
-	if len(idWords) == 0 {
+	// Windows can name the browser two ways, its ProgId's browser and then its handler's executable (see defaultBrowserID there), and they are tried in that order, so a launcher's stem is only ever matched once the browser's own name has matched nothing.
+	ids := strings.Fields(defaultBrowserID())
+	if len(ids) == 0 {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, raiserTimeout)
@@ -1053,13 +1194,16 @@ func (a *Agent) raiseBrowser(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	for _, w := range windows {
-		classWords := appWords(w.WmClass)
-		if !slices.ContainsFunc(classWords, func(word string) bool { return len(word) > 2 && slices.Contains(idWords, word) }) {
-			continue
-		}
-		if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
-			return fmt.Sprintf("pid %d", w.Pid)
+	for _, id := range ids {
+		idWords := appWords(strings.TrimSuffix(id, ".desktop"))
+		for _, w := range windows {
+			classWords := appWords(w.WmClass)
+			if !slices.ContainsFunc(classWords, func(word string) bool { return len(word) > 2 && slices.Contains(idWords, word) }) {
+				continue
+			}
+			if ok, err := a.raiseListed(ctx, w); err == nil && ok {
+				return fmt.Sprintf("pid %d", w.Pid)
+			}
 		}
 	}
 	return ""

@@ -1,14 +1,18 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"june/internal/actjob"
+	"june/internal/agent"
 	"june/internal/brain"
 	"june/internal/config"
 	"june/internal/db"
@@ -260,6 +264,13 @@ func (l *lateRaiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
 	return false, nil
 }
 
+func (l *lateRaiser) ByWindow(ctx context.Context, w window.Window) (bool, error) {
+	if r := l.raiser.Load(); r != nil {
+		return r.ByWindow(ctx, w)
+	}
+	return false, nil
+}
+
 func (l *lateRaiser) ByTitle(ctx context.Context, substring string) (bool, error) {
 	if r := l.raiser.Load(); r != nil {
 		return r.ByTitle(ctx, substring)
@@ -347,13 +358,65 @@ func within(name string, bound time.Duration, step func()) {
 }
 
 // fallThrough answers from primary, and from fallback when primary fails for any reason. It is for a job the user started and is watching: unlike the unattended duties, which hand over only on a spent allowance, a job that cannot get a plan out of its brain is a job that has visibly died, and on 2026-09-08 three died in a row because the Codex chain was spent while Claude sat idle. Input: the two brains. Output: one brain.
+// A caller that has stopped is not handed on: the fallback would be started only to be killed, and its failure would be what the stopped job reported. When both fail the error names both, since the first is usually the one that explains the job — a failed job said only "claude -p failed (success)" while the reason sat in a warn line (2026-10-03).
 func fallThrough(primary, fallback brain.Brain) brain.Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
 		out, err := primary(ctx, prompt)
 		if err == nil {
 			return out, nil
 		}
-		slog.Warn("job: the default brain failed, asking the fallback", "error", err)
-		return fallback(ctx, prompt)
+		if ctx.Err() != nil {
+			return "", err
+		}
+		slog.Warn("the default brain failed, asking the fallback", "error", err)
+		out, fbErr := fallback(ctx, prompt)
+		if fbErr == nil {
+			return out, nil
+		}
+		return "", fmt.Errorf("the default brain failed (%w), and so did the fallback (%w)", err, fbErr)
+	}
+}
+
+// whenUsable asks b only while the router would offer provider id at all, so a fallback asked directly rather than through the router does not spend a run on a login the router already knows is dead or an allowance it knows is spent. Input: the router id and the brain. Output: the brain, failing at once with a sentence saying why when the provider is not usable.
+func whenUsable(id string, b brain.Brain) brain.Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		if !agent.ProviderUsable(id) {
+			return "", fmt.Errorf("%s is signed out, out of allowance or not installed on this machine, so it was not asked", id)
+		}
+		return b(ctx, prompt)
+	}
+}
+
+// answererKey carries, on one job round's context, the record of which provider answered it.
+type answererKey struct{}
+
+// answerer is that record: the brain name the round's cost is filed under.
+type answerer struct {
+	mu   sync.Mutex
+	name string
+}
+
+// reportAnswerer wraps b so an answer it gives names provider as the one that gave it, to a job model listening on the context (see routedJobModel). Input: the name to file the round under and the brain. Output: the brain, unchanged in what it answers.
+func reportAnswerer(provider string, b brain.Brain) brain.Brain {
+	return func(ctx context.Context, prompt string) (string, error) {
+		out, err := b(ctx, prompt)
+		if a, ok := ctx.Value(answererKey{}).(*answerer); ok && err == nil {
+			a.mu.Lock()
+			a.name = provider
+			a.mu.Unlock()
+		}
+		return out, err
+	}
+}
+
+// routedJobModel is actjob.FromPromptFunc for a brain that routes: the round's cost is filed under the provider that actually answered it, as reportAnswerer said, rather than under one name fixed when the daemon was wired. The default job brain was filed as "gemini" on a machine with no Gemini key, every round of it answered by agy (2026-10-03). Input: the name for a round nobody answered, and the brain. Output: the job model, with the same four-characters-to-the-token estimate FromPromptFunc makes.
+func routedJobModel(unanswered string, b brain.Brain) actjob.Model {
+	return func(ctx context.Context, prompt string) (string, actjob.Usage, error) {
+		who := &answerer{}
+		reply, err := b(context.WithValue(ctx, answererKey{}, who), prompt)
+		who.mu.Lock()
+		name := cmp.Or(who.name, unanswered)
+		who.mu.Unlock()
+		return reply, actjob.Usage{Model: name, Input: actjob.EstimateTokens(prompt), Output: actjob.EstimateTokens(reply)}, err
 	}
 }

@@ -89,6 +89,9 @@ func (g *GeminiSummarizer) text(ctx context.Context, job, prompt string, wantJSO
 	if backend := g.jobBackend(job); backend != nil {
 		return backend(ctx, prompt)
 	}
+	if g.client == nil {
+		return "", ErrNoGeminiKey
+	}
 	model := config.BackgroundModel(job)
 	if err := g.allow(model); err != nil {
 		return "", err
@@ -107,7 +110,14 @@ func (g *GeminiSummarizer) text(ctx context.Context, job, prompt string, wantJSO
 	return resp.Candidates[0].Content.Parts[0].Text, nil
 }
 
+// ErrNoGeminiKey is what a duty with no backend of its own fails with on a summarizer built without a key.
+var ErrNoGeminiKey = errors.New("no GEMINI_API_KEY, and no other backend is set for this duty")
+
+// NewGeminiSummarizer builds the summarizer. Input: the Gemini API key, "" for none. Output: the summarizer — with no key it has no Gemini client, and only the duties given a backend through SetJobBackend can answer, which is how a machine with a local text model and no key still derives its working state and compiles its memory.
 func NewGeminiSummarizer(apiKey string) (*GeminiSummarizer, error) {
+	if apiKey == "" {
+		return &GeminiSummarizer{}, nil
+	}
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey:  apiKey,
@@ -228,7 +238,8 @@ Be factual and concise. Present tense. Do not invent.
 
 // AnalyzeScreen sends a screenshot to the multimodal model and returns a structured moment (activity + visible chunks). Zero value on any failure so the caller can fall back to accessibility text.
 func (g *GeminiSummarizer) AnalyzeScreen(ctx context.Context, png []byte) ScreenSight {
-	if len(png) == 0 {
+	// A picture goes only to the Gemini API, so without a key there is nothing to ask.
+	if len(png) == 0 || g.client == nil {
 		return ScreenSight{}
 	}
 

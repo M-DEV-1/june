@@ -217,6 +217,61 @@ func (s *Store) nodeDomains(ctx context.Context, ids []int64) map[int64]string {
 	return out
 }
 
+// fillEpisodeOrigins names the window every episode candidate in cands was captured from, in place, with one query. Input: the fused candidates about to be returned. Output: none; an episode candidate whose app or title is empty takes them from its row, and every other candidate is left as it was.
+// Only the lexical arm reads app and title off the episodes table. A vector hit carries what its chromem metadata carries, which is domain, source, kind and created_at, and fusion only borrows the lexical arm's app and title when the same id came through both — a passage's id ("episode:42#1") never matches the row's ("episode:42"), so a hit found by meaning alone reached the memory screen with no source title at all. Reading the row here also covers the vectors already on disk, which adding app and title to the metadata would not.
+func (s *Store) fillEpisodeOrigins(ctx context.Context, cands []rrfCandidate) {
+	var ids []int64
+	for _, c := range cands {
+		if c.source != "episode" || (c.app != "" && c.title != "") {
+			continue
+		}
+		if _, refID := splitCandidateID(c.id); refID != 0 {
+			ids = append(ids, refID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	placeholders, args := inPlaceholders(ids)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, app, title FROM episodes WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		slog.Warn("hybrid search: looking up where episode hits were seen failed, they stay unnamed", "error", err)
+		return
+	}
+	defer rows.Close()
+	type origin struct{ app, title string }
+	origins := make(map[int64]origin, len(ids))
+	for rows.Next() {
+		var id int64
+		var o origin
+		if err := rows.Scan(&id, &o.app, &o.title); err != nil {
+			slog.Warn("hybrid search: reading where an episode hit was seen failed, the rest stay unnamed", "error", err)
+			break
+		}
+		origins[id] = o
+	}
+	// Whatever was read before a failure is still used: a hit named from its row is better than one left unnamed with the rest.
+	if err := rows.Err(); err != nil {
+		slog.Warn("hybrid search: reading where episode hits were seen failed partway, the rest stay unnamed", "error", err)
+	}
+	for i := range cands {
+		if cands[i].source != "episode" {
+			continue
+		}
+		_, refID := splitCandidateID(cands[i].id)
+		o, ok := origins[refID]
+		if !ok {
+			continue
+		}
+		if cands[i].app == "" {
+			cands[i].app = o.app
+		}
+		if cands[i].title == "" {
+			cands[i].title = o.title
+		}
+	}
+}
+
 // currentDomain returns the domain tag of the most recently logged episode — the store's best guess at "what domain is the user in right now", used to boost (not filter) fused results when the caller didn't pass an explicit domainFilter.
 func (s *Store) currentDomain(ctx context.Context) string {
 	var domain string
@@ -454,6 +509,7 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 	if limit > 0 && len(fused) > limit {
 		fused = fused[:limit]
 	}
+	s.fillEpisodeOrigins(ctx, fused)
 
 	s.recordVectorContribution(fused, vector)
 

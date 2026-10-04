@@ -166,21 +166,22 @@ const levelSkipQueueDepth = 1
 
 // hub fans out events from ongoing asks to every connected /events client.
 type hub struct {
-	mu      sync.Mutex
-	clients map[chan Event]struct{}
+	mu sync.Mutex
+	// clients maps each connected client's channel to the role it named when it connected (see Events), "" for one that named none.
+	clients map[chan Event]string
 	// lastSeen is when a client last joined or left, which is what tells a caller a window was here a moment ago even though none is connected right this second. See Subscribed in notice.go.
 	lastSeen time.Time
 }
 
 func newHub() *hub {
-	return &hub{clients: make(map[chan Event]struct{})}
+	return &hub{clients: make(map[chan Event]string)}
 }
 
-// subscribe registers a new client and returns its event channel.
-func (h *hub) subscribe() chan Event {
+// subscribeAs registers a new client under role and returns its event channel. Input: the role the client named on /events, "" for none. Output: the channel every broadcast is queued on.
+func (h *hub) subscribeAs(role string) chan Event {
 	ch := make(chan Event, clientBufferSize)
 	h.mu.Lock()
-	h.clients[ch] = struct{}{}
+	h.clients[ch] = role
 	h.lastSeen = time.Now()
 	h.mu.Unlock()
 	return ch
@@ -231,11 +232,16 @@ func (h *hub) broadcast(ev Event) {
 	}
 }
 
-// clientCount is how many clients are subscribed to the hub right now. Input: none. Output: that count, which is zero when no window is reading the event stream and whatever is broadcast next reaches nobody.
-func (h *hub) clientCount() int {
+// clientCounts is how many clients are subscribed to the hub right now, in all and under one role. Input: the role to count. Output: every subscribed client, which is zero when whatever is broadcast next reaches nobody, and the ones that named role when they connected.
+func (h *hub) clientCounts(role string) (all, named int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.clients)
+	for _, r := range h.clients {
+		if r == role {
+			named++
+		}
+	}
+	return len(h.clients), named
 }
 
 // Server holds the state every route shares: the asker that answers questions, the hub that broadcasts their progress, the store the read-only screens are drawn from, the tracker's live activity buffer, and a synchronous read of the window in focus right now.
@@ -246,20 +252,27 @@ type Server struct {
 	store   *db.Store
 	screen  func() []tracker.Activity
 	focused func(context.Context) (tracker.Activity, bool)
-	hub     *hub
-	nextID  atomic.Uint64
+	// lastWindow is the tracker's own record of the last window the user was in that is theirs, nil until the daemon wires it (see SetLastWindow). It is what /context names while June, the shell or a blocked application has the focus.
+	lastWindow func() (tracker.Activity, bool)
+	hub        *hub
+	nextID     atomic.Uint64
 	// askMu guards asking.
 	askMu sync.Mutex
 	// say delivers a notice the way the scheduler's own moments go out: the window's card when a window is reading the event stream, and the desktop notification when none is. Nil until the daemon wires it (see SetSay), which is why sayNotice falls back to the plain broadcast.
 	say func(Notice)
 	// asking holds the id of every ask running right now. The daemon wires one shared agent's point_at and show_marks to Ring and Marks (see cmd/daemon.go), and that agent's drawing callbacks say nothing about which question is being answered, so this is what DrawingAsk reads to stamp a drawing with the ask that caused it.
 	asking map[string]struct{}
+	// use is when the person last started or finished something with June (see LastUse).
+	use lastUse
 }
 
-// New builds a Server for every route this package serves. Input: the asker that answers /ask, the store the read routes query, screen, which returns the tracker's live activity buffer (the same one /buffer serves) and may be nil when no tracker is wired, and focused, which reads the window in focus at the moment it is called (rather than the last sampled one), takes the request's context so a caller that has given up stops waiting on it, and may also be nil. Output: the server; register its methods on a mux (see cmd/daemon.go for the route names). /context tries focused first, falls back to screen, then to the newest stored episode.
+// New builds a Server for every route this package serves. Input: the asker that answers /ask, the store the read routes query, screen, which returns the tracker's live activity buffer (the same one /buffer serves) and may be nil when no tracker is wired, and focused, which reads the window in focus at the moment it is called (rather than the last sampled one), takes the request's context so a caller that has given up stops waiting on it, and may also be nil. Output: the server; register its methods on a mux (see cmd/daemon.go for the route names). /context tries focused first, falls back to the tracker's last window when one is wired (see SetLastWindow), then to screen, then to the newest stored episode.
 func New(asker Asker, store *db.Store, screen func() []tracker.Activity, focused func(context.Context) (tracker.Activity, bool)) *Server {
 	return &Server{asker: asker, store: store, screen: screen, focused: focused, hub: newHub(), brains: map[string]Asker{}, asking: map[string]struct{}{}}
 }
+
+// SetLastWindow wires the read /context falls back to when the window in focus is not the user's own: June's window, the Windows shell, or a blocked application. Input: a function answering the last window the tracker's loop saw that it did not skip, and false when it has seen none (tracker.Daemon.LastWindow). Output: none. Left unset, /context falls back to the compiler's buffer alone, which only holds a window once the tracker has dwelt on it, so the window the user left a few seconds before raising June is never in it.
+func (s *Server) SetLastWindow(last func() (tracker.Activity, bool)) { s.lastWindow = last }
 
 // SetSay wires the one surface a notice this package raises should go to. Input: a function that delivers one notice, which the daemon fills in with the scheduler's own say (see proactive.Scheduler.Say) so a moment falls back to a desktop notification when no window is listening. Output: none. Left unset, sayNotice broadcasts on the event stream and a notice raised while no window is there is simply lost.
 func (s *Server) SetSay(say func(Notice)) { s.say = say }
@@ -299,6 +312,7 @@ func (s *Server) startAsk(id string) {
 	s.askMu.Lock()
 	s.asking[id] = struct{}{}
 	s.askMu.Unlock()
+	s.use.touch()
 }
 
 // endAsk records that the ask with this id has finished.
@@ -306,6 +320,7 @@ func (s *Server) endAsk(id string) {
 	s.askMu.Lock()
 	delete(s.asking, id)
 	s.askMu.Unlock()
+	s.use.touch()
 }
 
 // DrawingAsk names the ask a drawing made right now belongs to, which is what a caller wiring an agent's point_at and show_marks to Ring and Marks stamps the drawing with (see cmd/daemon.go). Input: none. Output: the id of the one ask running, or overlayNoAsk when none is running — nothing asked for this drawing — and also when more than one is, since the shared agent's callbacks carry nothing that would say which of them drew it, and naming the wrong question is worse than naming none.
@@ -342,7 +357,7 @@ func evidenceFor(trace agent.TurnTrace) []EvidenceItem {
 	return items
 }
 
-// Ask handles POST /ask. Input: JSON body {"question": string, "context": string, "conversation_id": string, "brain": string, "go": bool}, everything but the question optional. go carries the user's explicit go-ahead for the one guarded step (a send, a delete, a purchase — see agent.WithGo) this exact question is asking for; it applies to this turn only. Output: 202 with JSON {"id": string, "conversation_id": string} written immediately; the question then runs in the background and its progress and answer arrive on /events tagged with that id. A conversation_id appends this question and its answer to that conversation; without one a conversation is opened, titled from the question's first eight words, and its id comes back in the body. A body that fails to decode as JSON gets 400, and so does one naming a brain this daemon has no asker for — the message names the brains it does have — because a question meant for one model answered by another, under the other's name, is not something the window or an eval can see. An empty brain field is not a name and always means the default asker.
+// Ask handles POST /ask. Input: JSON body {"question": string, "context": string, "conversation_id": string, "brain": string, "go": bool}, everything but the question optional. go carries the user's explicit go-ahead for the one guarded step (a send, a delete, a purchase — see agent.WithGo) this exact question is asking for; it applies to this turn only. Output: 202 with JSON {"id": string, "conversation_id": string} written immediately; the question then runs in the background and its progress and answer arrive on /events tagged with that id. A conversation_id appends this question and its answer to that conversation; without one a conversation is opened, titled from the question's first eight words, and its id comes back in the body. A body that fails to decode as JSON gets 400, and so does a blank question, and so does one naming a brain this daemon has no asker for — the message names the brains it does have — because a question meant for one model answered by another, under the other's name, is not something the window or an eval can see. An empty brain field is not a name and always means the default asker.
 func (s *Server) Ask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Question       string `json:"question"`
@@ -352,6 +367,12 @@ func (s *Server) Ask(w http.ResponseWriter, r *http.Request) {
 		Go             bool   `json:"go"`
 	}
 	if !DecodeJSON(w, r, &req) {
+		return
+	}
+
+	// Refused before anything is opened or stored: a blank question opened a "New conversation" holding one empty turn and was then put to the model, which a working brain bills for and answers with a guess at what was meant.
+	if strings.TrimSpace(req.Question) == "" {
+		http.Error(w, "a question is required", http.StatusBadRequest)
 		return
 	}
 
@@ -443,10 +464,12 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 	defer s.endAsk(id)
 
 	s.hub.broadcast(Event{ID: id, Type: "status", Text: "Checking.", Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
+	// A command-line brain installed since June started is on Windows' Path but not on this process's, and the router would skip it or fail to run it.
+	freshPath()
 
 	q := question
 	if screenContext != "" {
-		q = fmt.Sprintf("On screen: %s\n\n%s", screenContext, question)
+		q = db.ScreenAsk(screenContext, question)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
@@ -519,7 +542,7 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 	s.hub.broadcast(Event{ID: id, Type: "done", Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 }
 
-// Events handles GET /events: a Server-Sent Events stream of every event from every /ask call, one JSON object per "data:" line, flushed as soon as it is sent. Each connection gets its own buffered queue (see clientBufferSize); a client that falls behind is dropped so it never stalls the others.
+// Events handles GET /events: a Server-Sent Events stream of every event from every /ask call, one JSON object per "data:" line, flushed as soon as it is sent. Each connection gets its own buffered queue (see clientBufferSize); a client that falls behind is dropped so it never stalls the others. A "role" query parameter says what the client is, which only matters for overlayRole: the drawing layer connects with ?role=overlay, and that is the client a drawing is reported as having reached (see draw).
 func (s *Server) Events(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -536,7 +559,7 @@ func (s *Server) Events(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, streamPreamble)
 	flusher.Flush()
 
-	ch := s.hub.subscribe()
+	ch := s.hub.subscribeAs(r.URL.Query().Get("role"))
 	defer s.hub.unsubscribe(ch)
 
 	// A comment line every so often keeps the connection warm and gives a reader that is still buffering something to push the first real event through.

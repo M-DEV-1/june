@@ -1,7 +1,10 @@
 package ipc
 
 import (
+	"maps"
 	"net/http"
+	"slices"
+	"strings"
 )
 
 // The desktop window is the daemon's child (see cmd/window.go), and the tray lives in the daemon, so a tray click reaches the window through the event stream the window is already reading rather than through a second channel of its own.
@@ -16,7 +19,8 @@ const windowEventID = "window"
 func (s *Server) Window(w http.ResponseWriter, r *http.Request) {
 	action := r.URL.Query().Get("action")
 	if !windowActions[action] {
-		http.Error(w, "unknown window action "+action+"; this daemon knows open and toggle", http.StatusBadRequest)
+		// Read off windowActions itself, so the list cannot fall behind it again: it said "open and toggle" long after conceal and reveal were added.
+		http.Error(w, "unknown window action "+action+"; this daemon knows "+strings.Join(slices.Sorted(maps.Keys(windowActions)), ", "), http.StatusBadRequest)
 		return
 	}
 	s.hub.broadcast(Event{ID: windowEventID, Type: "window", Text: action, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})

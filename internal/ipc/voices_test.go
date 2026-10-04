@@ -15,7 +15,7 @@ import (
 func savedConfig(t *testing.T) (*LiveConfig, *config.JuneConfig) {
 	t.Helper()
 	cfg := &config.JuneConfig{}
-	return NewLiveConfig(cfg, func(config.JuneConfig) error { return nil }), cfg
+	return NewLiveConfig(cfg, nil, func(config.JuneConfig) error { return nil }), cfg
 }
 
 // GET /voices is the whole roster with the one in use marked, since the picker draws every voice and has to show which is current without a second call.

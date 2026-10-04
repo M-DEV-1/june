@@ -37,6 +37,39 @@ func (s *Store) AddActionItems(ctx context.Context, items []memory.ActionItem) (
 	return added, nil
 }
 
+// DeleteMeetingActionItems removes the action items one meeting's minutes filed that are still open, for a meeting whose write-up the user has deleted. Input: the minutes as they were filed (without the duration marker) and when the meeting started. Output: how many items were removed.
+// An item is this meeting's when its work, its meeting's name and the day it was raised all match what liftActionItems filed from these minutes: the name alone is shared by every instance of a recurring meeting, and the work alone by a later meeting that raised the same thing again, which AddActionItems never filed a second row for. Only open items go. One the user ticked, or one later writing closed, is something they acted on, and stays.
+// They are deleted rather than dropped because the minutes were rejected, not the work: a dropped row still holds its key, so a second attempt at the same recording's minutes could never file the item again even when it really was agreed.
+func (s *Store) DeleteMeetingActionItems(ctx context.Context, minutes string, startedAt time.Time) (int, error) {
+	label := memory.MinutesLabel(minutes)
+	filed := memory.ParseMinutesActions(minutes, label, startedAt)
+	if len(filed) == 0 {
+		return 0, nil
+	}
+	keys := make(map[string]bool, len(filed))
+	for _, a := range filed {
+		keys[actionKey(a)] = true
+	}
+	// The raised day is read back with time.Parse, so it is midnight UTC on the day the note names; it is compared as that string, and the meeting's own start as the local day liftActionItems wrote.
+	day := startedAt.Local().Format(raisedDayFormat)
+
+	all, err := s.actionItems(ctx)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, a := range all {
+		if a.Status != memory.StatusOpen || a.Source != label || a.Raised.IsZero() || a.Raised.Format(raisedDayFormat) != day || !keys[actionKey(a)] {
+			continue
+		}
+		if err := s.DeleteNote(ctx, a.NoteID); err != nil {
+			return removed, fmt.Errorf("delete a meeting's action item: %w", err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 // OpenActionItems returns the action items still owed by the user, oldest first. Deliberately unwindowed: an owed task does not stop being owed because the meeting that raised it was a while ago, which is the whole reason action items live outside the minutes that mention them.
 // Only the user's own work: an item owed by a named other person, and an item nobody was named for, are both on file and both readable through ActionItemsByOwner, but neither is a task of his.
 func (s *Store) OpenActionItems(ctx context.Context) ([]memory.ActionItem, error) {

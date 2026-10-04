@@ -3,6 +3,20 @@
 set -euo pipefail
 
 repo="M-DEV-1/june"
+
+# Git Bash and WSL users on Windows reach this script too; Git Bash would fetch a Linux build that cannot run there.
+case "$(uname -s)" in
+Linux) ;;
+MINGW* | MSYS* | CYGWIN*)
+	echo "This installer is for Linux. On Windows, download https://github.com/$repo/releases/latest/download/June-Setup-x64.exe, or in PowerShell run: irm https://raw.githubusercontent.com/$repo/main/install.ps1 | iex" >&2
+	exit 1
+	;;
+*)
+	echo "June has no build for $(uname -s) yet; it runs on Linux and Windows." >&2
+	exit 1
+	;;
+esac
+
 archive="june-linux-$(uname -m).tar.gz"
 base="https://github.com/$repo/releases/latest/download"
 

@@ -1,0 +1,15 @@
+What June keeps, and what it sends where
+
+June keeps its memory on this computer, in %LOCALAPPDATA%\june. June's developers receive nothing: no analytics, no telemetry, no June account.
+
+- Once you finish setup in June's window, June notes the app and window you are using and the text on screen, and now and then takes a screenshot. Common password managers are skipped. Pause it any time from June's tray icon.
+- Meetings are recorded only when you say so, and are transcribed on this computer.
+- Your questions, and the parts of your memory needed to answer them, go to the AI you pick in setup (Claude Code, Codex, Antigravity or Gemini), under your own account and that service's privacy terms. If that AI is out of allowance or signed out, June asks another of these AIs you are signed in to here. A task June carries out on your screen that your AI cannot finish goes on to Claude Code, if you are signed in to it.
+- Meeting minutes, the morning brief, the evening close and overnight notes go to the AI you pick too, even once on-device models are added.
+- Turning what June sees into memory (summaries, threads and notes) goes to Google's Gemini API whenever a Gemini API key is set, whichever AI you pick. Without a key it runs on this computer once you add on-device models, and otherwise is not done.
+- If the AI doing background work cannot answer, June hands it to another AI you are signed in to here, unless you turn that off in setup or in Settings. That switch covers background work only: it does not stop a question going to another AI, or a task going on to Claude Code. Grok (xAI) is only used if you choose it yourself.
+- With a Gemini API key, a voice conversation sends your microphone, and the parts of your memory needed to answer, to Google while it is open, and screenshots June cannot read as text are described by Gemini. With an Exa or Tavily key, web searches go to that service.
+- Once a day June asks GitHub whether a newer June is out; untick "Check for updates" below to stop it. Local models download from GitHub and Hugging Face only when you ask for them.
+
+To remove June, use Settings > Apps; it asks whether to delete your June data too.
+The full statement: https://github.com/M-DEV-1/june#privacy

@@ -49,7 +49,7 @@ To take several actions in one go, add "then": [{"tool":"click","args":{"n":7}},
   plan    the whole task in a sentence or two, written once on the first round and left alone after
   estimate on the first round only, roughly how many steps the whole task will take. Count everything: every look at the screen, every window you switch to, every check. You get twice what you say, so guess at what it would take going well rather than padding it. Nobody sets a limit for you, and if you spend it all without finishing you will be asked whether to carry on.
   next    what this one action is, in plain words
-  tool    one of: click, scroll_to, type_text, press_key, click_at, switch_window, open_app, open_url, observe_screen, look, point_at, branch, query_memory, recall
+  tool    one of: click, scroll_to, type_text, press_key, open_app, open_url, observe_screen, point_at, branch, query_memory, recall
   then    the rest of a burst, up to seven more actions after the first. Use it when you already know the whole sequence: WHAT YOU DID LAST TIME above is showing you a run that worked, or the list in front of you makes the next few taps certain, or the UI will not survive a pause (a menu that shuts when focus moves, a hover card, a toast). One round buys the whole burst, so a sequence you have done before costs one step instead of five, and the steps you save are yours to spend where the task is actually uncertain.
           Do not burst a guess. Nothing is read between the actions, so each one after the first lands on a screen you are predicting rather than looking at, and if the check at the end fails you will not know which of them went wrong — take the next ones one at a time and find out. A burst stops at its first refusal or error, so the rest of it does not land on a screen that has already gone somewhere else.
   args    that tool's own arguments; click and scroll_to take {"n": <the number from the list>}
@@ -58,7 +58,7 @@ To take several actions in one go, add "then": [{"tool":"click","args":{"n":7}},
           query_memory {"query":"..."} and recall {"subject":"..."} read what you already know about this user — use them when the goal turns on something only they have told you
           these three change nothing on the screen, so they take no expect: reply with the tool and its args and leave expect out
           press_key {"keys":"Enter"} is for the keys nothing in the list offers, and lands wherever the keyboard focus is, so click the field first
-          click_at {"x":..,"y":..} is for what the list has no element or no working action for, and only in a round after a look, in that picture's own coordinates
+          you work from the numbered list alone: you are never shown a picture of the screen, so there is nothing to click at a point; when the list has nothing for what you need, say so with ask
   expect  the change the action should produce, as kind and value:
             ` + act.TitleContains + `  the window title will contain this text
             ` + act.ItemPresent + `    an item with this label will be showing
@@ -70,7 +70,7 @@ When the goal is reached, reply {"done":true,"say":"..."} with one or two plain 
 When you cannot get further without knowing something only the user knows, reply {"ask":"..."} with one plain question.
 Never claim something worked because a tool returned; the check is what says it worked.
 Write a check that can only become true after the action: the title of the page you are opening, an item that will appear, the item you are removing being gone. A check that was already true before you acted proves nothing, is not counted as a step that checked out, and the job cannot end on one, so if you are staying in a window that is already called what your check names, check for something on the screen that is about to change instead.
-Work in the window already in front unless the goal needs another. A goal that needs an application (music, a chat, settings, a document) is done in that application: open_app {"app":"Spotify"} starts it or brings it forward, and open_url is only for a web page nothing installed is for. switch_window {"app":...} brings forward one already running, and observe_screen right after either. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
+Work in the window already in front unless the goal needs another. A goal that needs an application (music, a chat, settings, a document) is done in that application: open_app {"app":"Spotify"} starts it or brings forward the one already running, and open_url is only for a web page nothing installed is for; observe_screen right after either, since keys are not sent to a window you have not looked at. ` + "Never click anything that sends, pays, deletes or submits unless they have just said \"go\"."
 
 // BuildPrompt renders one round's prompt. Input: the job as it stands. Output: the whole prompt, which stays about the same size whether the job is on its first step or its fortieth.
 func BuildPrompt(j Job) string {
@@ -131,12 +131,19 @@ func BuildPrompt(j Job) string {
 	return b.String()
 }
 
-// outcomePhrase is how a step's outcome reads in a sentence. Input: the step. Output: "passed", "failed", or for a check that was already true before the action, a phrase saying so rather than one claiming the step worked.
+// outcomePhrase is how a step's outcome reads in a sentence. Input: the step. Output: "passed", "failed", or for a check that was already true before the action, a phrase saying so rather than one claiming the step worked; a read and a step the user stopped, which were never checked, say that.
 func outcomePhrase(s Step) string {
-	if s.Outcome == "pass" && s.HeldBefore {
+	switch {
+	case s.Outcome == "pass" && s.HeldBefore:
 		return "checked out on something that was already true before it"
+	case s.Outcome == "pass":
+		return "passed"
+	case s.Outcome == "read":
+		return "was a read"
+	case s.Outcome == "stopped":
+		return "was stopped part way"
 	}
-	return s.Outcome + "ed"
+	return "failed"
 }
 
 // progressLine says how far the job has got, in the two numbers that matter: steps taken and steps that checked out.

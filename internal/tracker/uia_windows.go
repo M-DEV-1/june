@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"june/internal/util"
 )
 
 // uiaScript is the UI Automation host script. It reaches PowerShell over stdin, never as a file.
@@ -33,11 +36,22 @@ var uiaScript string
 // uiaRequest is one request line to the host script. Every field is always sent, so the script never has to ask whether a key is present.
 type uiaRequest struct {
 	Op   string `json:"op"`   // walk, desc, act, scroll, focused or focus
-	Hwnd int64  `json:"hwnd"` // the window a walk or focus read is for
+	Hwnd int64  `json:"hwnd"` // the window a walk or focus read is for; a desc, act, scroll or focused request carries the window its ref was read from as well, only so that uiaCall can refuse a hung one, and the script reads it for walk and focus alone
 	Ref  string `json:"ref"`  // the element a desc, act, scroll or focused request is for
-	Text bool   `json:"text"` // whether a walk is a capture walk, which reads TextPattern text
-	MS   int    `json:"ms"`   // how long a walk may take before it answers with what it has
+	Text bool   `json:"text"` // whether a walk is a capture walk, which reads TextPattern text; for a focus read, whether the element's contents are read whole (see FocusedContents)
+	MS   int    `json:"ms"`   // how long a walk may take before it answers with what it has, or an act may take to find its element and wait for its action to return; uiaCall cuts it to what the deadline leaves
 }
+
+// uiaReplyMargin is how much of a request's deadline is kept back from the time the host is told it may spend, for it to stop, serialize its answer and for this side to read it. A walk of a 560-element Electron window told 1500 ms answered after 1582 ms on this desktop, serialization included.
+const uiaReplyMargin = 500 * time.Millisecond
+
+// uiaMinBudget is the least time worth sending a walk or an act with. Less than this after the margin means the deadline was spent waiting for a turn or for a cold host to start, and the request is not sent at all.
+const uiaMinBudget = 200 * time.Millisecond
+
+// uiaSent marks an error that came after a request reached the host: it was killed for not answering in time, it died, or it answered something unreadable. Whatever the request asked for may already have happened, which is what DoAction needs to know before anything presses the element a second time.
+type uiaSent struct{ error }
+
+func (e uiaSent) Unwrap() error { return e.error }
 
 // uiaHost is one running copy of the host script: its process, the pipe requests go into, and the lines it answers with, which is closed when its output ends.
 type uiaHost struct {
@@ -97,6 +111,17 @@ func uiaCall(ctx context.Context, req uiaRequest) (uiaReply, error) {
 		}
 	}
 
+	// The time the host may spend comes out of what is left of the caller's deadline, never more than the caller asked for. Waiting for a turn and a cold host's start (0.5 to 2 s) come out of that same deadline, so a fixed budget sent after a slow start overran it, the host was killed for that, and the next call started cold and overran again.
+	if req.MS > 0 {
+		if dl, ok := ctx.Deadline(); ok {
+			left := time.Until(dl) - uiaReplyMargin
+			if left < uiaMinBudget {
+				// Nothing has been sent, so the host stays, ready for the next call.
+				return uiaReply{}, fmt.Errorf("no time was left to ask UI Automation once its host was ready: %w", context.DeadlineExceeded)
+			}
+			req.MS = min(req.MS, int(left/time.Millisecond))
+		}
+	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		return uiaReply{}, err
@@ -109,13 +134,13 @@ func uiaCall(ctx context.Context, req uiaRequest) (uiaReply, error) {
 	case line, ok := <-h.lines:
 		if !ok {
 			uiaLive = nil
-			return uiaReply{}, errors.New("the UI Automation host exited during a request")
+			return uiaReply{}, uiaSent{errors.New("the UI Automation host exited during a request")}
 		}
 		var r uiaReply
 		if err := json.Unmarshal(uiaJSON(line), &r); err != nil {
 			// A line that is not a reply means the script and this side no longer agree on which answer is whose.
 			h.kill()
-			return uiaReply{}, fmt.Errorf("the UI Automation host answered something unreadable: %w", err)
+			return uiaReply{}, uiaSent{fmt.Errorf("the UI Automation host answered something unreadable: %w", err)}
 		}
 		if r.Err != "" {
 			return r, errors.New(r.Err)
@@ -123,7 +148,7 @@ func uiaCall(ctx context.Context, req uiaRequest) (uiaReply, error) {
 		return r, nil
 	case <-ctx.Done():
 		h.kill()
-		return uiaReply{}, fmt.Errorf("UI Automation did not answer in time, so its host was restarted: %w", ctx.Err())
+		return uiaReply{}, uiaSent{fmt.Errorf("UI Automation did not answer in time, so its host was restarted: %w", ctx.Err())}
 	}
 }
 
@@ -164,6 +189,8 @@ func startUIAHost() (*uiaHost, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// Windows has no parent-death signal, and a host blocked in a UI Automation call into a hung application never reads the end of its stdin, so without the daemon's kill-on-close job it outlived a crashed daemon.
+	util.KillWithDaemon(cmd)
 	h := &uiaHost{proc: cmd.Process, stdin: stdin, lines: make(chan []byte), started: time.Now()}
 	// The script line is some kilobytes, more than a pipe holds before PowerShell starts reading, so it is written on its own goroutine and the caller's context governs the wait for the ready line instead.
 	go func() {
@@ -205,7 +232,7 @@ func uiaJSON(line []byte) []byte {
 	return nil
 }
 
-// winRef is one top-level window: its handle, the file name of the executable that owns it (such as "chrome.exe"), its title and its process id.
+// winRef is one top-level window: its handle, the file name of the executable of the application it shows (such as "chrome.exe"; for a store app the one hosted in its frame, see winPid), its title and that executable's process id.
 type winRef struct {
 	hwnd  windows.HWND
 	exe   string
@@ -218,14 +245,24 @@ var (
 	procWinText     = uiaUser32.NewProc("GetWindowTextW")
 	procWinLong     = uiaUser32.NewProc("GetWindowLongW")
 	procIsHung      = uiaUser32.NewProc("IsHungAppWindow")
+	procIsIconic    = uiaUser32.NewProc("IsIconic")
+	procFindChild   = uiaUser32.NewProc("FindWindowExW")
+	procGetWindow   = uiaUser32.NewProc("GetWindow")
+	gwlStyle        = int32(-16)
 	gwlExStyle      = int32(-20)
+	gwOwner         = uintptr(4)
+	wsCaption       = uint32(0x00C00000)
+	wsExTopmost     = uint32(0x8)
 	wsExToolWindow  = uint32(0x80)
+	wsExNoActivate  = uint32(0x08000000)
 	winEnumMu       sync.Mutex
 	winEnumOut      []windows.HWND
 	winEnumCallback = windows.NewCallback(func(h windows.HWND, _ uintptr) uintptr {
 		winEnumOut = append(winEnumOut, h)
 		return 1
 	})
+	// coreWindowClass is the class of the window a store app draws in, a child of its ApplicationFrameWindow frame.
+	coreWindowClass, _ = windows.UTF16PtrFromString("Windows.UI.Core.CoreWindow")
 )
 
 // topWindows lists every top-level window, front to back in z-order. The EnumWindows callback is made once for the process, because Windows allows only a limited number of them.
@@ -244,34 +281,175 @@ func winTitle(h windows.HWND) string {
 	return strings.TrimSpace(windows.UTF16ToString(buf[:n]))
 }
 
-// winOf reads who owns a window and what it is called. Input: the window handle. Output: its winRef; exe is "" when the process cannot be opened, such as an elevated one.
-func winOf(h windows.HWND) winRef {
-	w := winRef{hwnd: h, title: winTitle(h)}
-	windows.GetWindowThreadProcessId(h, &w.pid) //nolint:errcheck
-	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, w.pid)
+// winClass reads a window's class name. Output: the name, "" when the window has gone.
+func winClass(h windows.HWND) string {
+	buf := make([]uint16, 256)
+	n, err := windows.GetClassName(h, &buf[0], int32(len(buf)))
 	if err != nil {
-		return w
+		return ""
+	}
+	return windows.UTF16ToString(buf[:n])
+}
+
+// winPid reads the id of the process whose application a window shows. Input: the window handle. Output: the pid, 0 when the window has gone, and whether it is a store app's, found inside the window's frame.
+// Every store app's top-level window is an ApplicationFrameWindow belonging to ApplicationFrameHost.exe, so the frame's own process names Calculator, Settings and the rest alike; the app runs in the process of the CoreWindow hosted inside the frame, and that is the pid returned. A suspended app's CoreWindow leaves its frame, and the frame's own pid is all there is then.
+func winPid(h windows.HWND) (uint32, bool) {
+	var pid uint32
+	windows.GetWindowThreadProcessId(h, &pid) //nolint:errcheck
+	if winClass(h) != "ApplicationFrameWindow" {
+		return pid, false
+	}
+	for c := winCoreChild(h, 0); c != 0; c = winCoreChild(h, c) {
+		var app uint32
+		windows.GetWindowThreadProcessId(c, &app) //nolint:errcheck
+		if app != 0 && app != pid {
+			return app, true
+		}
+	}
+	return pid, false
+}
+
+// winCoreChild finds the next CoreWindow directly inside a frame. Input: the frame and the child to search after, 0 to start. Output: the child, 0 when there are no more.
+func winCoreChild(frame, after windows.HWND) windows.HWND {
+	c, _, _ := procFindChild.Call(uintptr(frame), uintptr(after), uintptr(unsafe.Pointer(coreWindowClass)), 0)
+	return windows.HWND(c)
+}
+
+// exeOf reads the file name of a process's executable, such as "chrome.exe". Input: the pid. Output: the name, "" when the process cannot be opened, such as an elevated one.
+func exeOf(pid uint32) string {
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return ""
 	}
 	defer windows.CloseHandle(p) //nolint:errcheck
 	buf := make([]uint16, 1024)
 	size := uint32(len(buf))
-	if windows.QueryFullProcessImageName(p, 0, &buf[0], &size) == nil {
-		w.exe = filepath.Base(windows.UTF16ToString(buf[:size]))
+	if windows.QueryFullProcessImageName(p, 0, &buf[0], &size) != nil {
+		return ""
+	}
+	return filepath.Base(windows.UTF16ToString(buf[:size]))
+}
+
+// winOf reads whose a window is and what it is called. Input: the window handle. Output: its winRef; exe is "" when the process cannot be opened, such as an elevated one.
+func winOf(h windows.HWND) winRef {
+	pid, framed := winPid(h)
+	w := winRef{hwnd: h, title: winTitle(h), pid: pid}
+	w.exe = exeOf(w.pid)
+	if framed && w.exe != "" {
+		storeApps.Store(strings.ToLower(trimExe(w.exe)), struct{}{})
 	}
 	return w
 }
 
 // winListable reports whether a window is one a person would call open: visible, titled, not cloaked (a window on another virtual desktop, or a suspended store app) and not a tool window.
-func winListable(h windows.HWND) bool {
-	if h == 0 || !windows.IsWindowVisible(h) || winTitle(h) == "" {
+func winListable(h windows.HWND) bool { return winOpen(h, false) }
+
+// winListableAnyDesktop is winListable with windows on the other virtual desktops let in. The meeting reads use it: a call left running on another desktop is still the call.
+func winListableAnyDesktop(h windows.HWND) bool { return winOpen(h, true) }
+
+// winOpen is winListable and winListableAnyDesktop. Input: the window, and whether a window on another virtual desktop counts. Output: whether it is open.
+func winOpen(h windows.HWND, otherDesktops bool) bool {
+	if h == 0 || !windows.IsWindowVisible(h) || winTitle(h) == "" || winExStyle(h)&wsExToolWindow != 0 {
 		return false
 	}
 	var cloaked uint32
 	if windows.DwmGetWindowAttribute(h, windows.DWMWA_CLOAKED, unsafe.Pointer(&cloaked), 4) == nil && cloaked != 0 {
+		return otherDesktops && cloaked == dwmCloakedShell && winOnOtherDesktop(h)
+	}
+	return true
+}
+
+// winExStyle reads a window's extended style bits.
+func winExStyle(h windows.HWND) uint32 {
+	ex, _, _ := procWinLong.Call(uintptr(h), uintptr(gwlExStyle))
+	return uint32(ex)
+}
+
+// winPopup reports whether a window is a transient surface floating over an application rather than a window the user works in: one that never takes activation (a WinUI "Pop-upHost" holding a KeyTip or a tooltip, a flyout), or an owned, captionless window smaller than minLookSide (a menu, a dropdown). Input: the window. Output: true for such a popup.
+// An owned window always sits directly above its owner in the z-order, so the scan in frontWindow met the popup first and read or pictured a 170x73 KeyTip host in place of the window under it. A dialog the user works in has a caption or is a window's size, so it is still picked.
+func winPopup(h windows.HWND) bool {
+	if winExStyle(h)&wsExNoActivate != 0 || popupClasses[winClass(h)] {
+		return true
+	}
+	if owner, _, _ := procGetWindow.Call(uintptr(h), gwOwner); owner == 0 {
 		return false
 	}
-	ex, _, _ := procWinLong.Call(uintptr(h), uintptr(gwlExStyle))
-	return uint32(ex)&wsExToolWindow == 0
+	if style, _, _ := procWinLong.Call(uintptr(h), uintptr(gwlStyle)); uint32(style)&wsCaption == wsCaption {
+		return false
+	}
+	frame, ok := windowFrame(h)
+	return ok && (frame.Dx() < minLookSide || frame.Dy() < minLookSide)
+}
+
+// popupClasses are the window classes XAML hosts a windowed popup in: PopupWindowSiteBridge for WinUI 3 (titled "Pop-upHost", Win11 Notepad's KeyTips among them) and Xaml_WindowedPopupClass for UWP and the shell's own XAML (titled "PopupHost"). The one measured here carries WS_EX_NOACTIVATE as well; the class is checked too so that a popup whose style says otherwise is still never taken for the window under it.
+// Win11 Notepad 11.2607 names the WinUI 3 one in full, Microsoft.UI.Content.PopupWindowSiteBridge, so both spellings are kept.
+var popupClasses = map[string]bool{"PopupWindowSiteBridge": true, "Microsoft.UI.Content.PopupWindowSiteBridge": true, "Xaml_WindowedPopupClass": true}
+
+// winIconic reports whether a window is minimised.
+func winIconic(h windows.HWND) bool {
+	r, _, _ := procIsIconic.Call(uintptr(h))
+	return r != 0
+}
+
+// dwmCloakedShell is DWM_CLOAKED_SHELL, the DWMWA_CLOAKED value of a window the shell hid: one on another virtual desktop, and also a suspended store app's frame.
+const dwmCloakedShell = 2
+
+var (
+	ole32            = windows.NewLazySystemDLL("ole32.dll")
+	procCoCreateInst = ole32.NewProc("CoCreateInstance")
+	// CLSID_VirtualDesktopManager and IID_IVirtualDesktopManager, from shobjidl_core.h.
+	clsidVirtualDesktopManager = windows.GUID{Data1: 0xAA509086, Data2: 0x5CA9, Data3: 0x4C25, Data4: [8]byte{0x8F, 0x95, 0x58, 0x9D, 0x3C, 0x07, 0xB4, 0x8A}}
+	iidVirtualDesktopManager   = windows.GUID{Data1: 0xA5CD92FF, Data2: 0x29BE, Data3: 0x454C, Data4: [8]byte{0x8D, 0x04, 0xD8, 0x28, 0x79, 0xFB, 0x3F, 0x1B}}
+)
+
+// virtualDesktopManager is an IVirtualDesktopManager: IUnknown's three methods, then IsWindowOnCurrentVirtualDesktop, GetWindowDesktopId and MoveWindowToDesktop.
+type virtualDesktopManager struct{ vtbl *[6]uintptr }
+
+// winOnOtherDesktop reports whether a shell-cloaked window is cloaked because it sits on another virtual desktop rather than because it is hidden. Input: the window. Output: true only when IVirtualDesktopManager says it is not on the current desktop and names the desktop it is on.
+// Both halves are needed, measured on Windows 11 build 26200: a window moved to another desktop read DWMWA_CLOAKED 2, not on the current desktop, on that desktop's id; a suspended store app's frame (Settings) reads the same cloak but on the current desktop and on no desktop id, as does a hidden window.
+func winOnOtherDesktop(h windows.HWND) bool {
+	// COM is set up per thread, so the goroutine stays on this one until the object is released.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	switch err := windows.CoInitializeEx(0, windows.COINIT_MULTITHREADED); err {
+	case nil, windows.Errno(windows.S_FALSE): // S_FALSE is a thread that already had COM, and it too is balanced by CoUninitialize
+		defer windows.CoUninitialize()
+	case windows.Errno(windows.RPC_E_CHANGED_MODE): // the thread already has COM as a single-threaded apartment, which serves as well
+	default:
+		return false
+	}
+	var m *virtualDesktopManager
+	if r, _, _ := procCoCreateInst.Call(uintptr(unsafe.Pointer(&clsidVirtualDesktopManager)), 0, windows.CLSCTX_INPROC_SERVER|windows.CLSCTX_LOCAL_SERVER, uintptr(unsafe.Pointer(&iidVirtualDesktopManager)), uintptr(unsafe.Pointer(&m))); r != 0 || m == nil {
+		return false
+	}
+	defer syscall.SyscallN(m.vtbl[2], uintptr(unsafe.Pointer(m))) //nolint:errcheck // Release
+	var current int32
+	if r, _, _ := syscall.SyscallN(m.vtbl[3], uintptr(unsafe.Pointer(m)), uintptr(h), uintptr(unsafe.Pointer(&current))); r != 0 || current != 0 {
+		return false
+	}
+	var desk windows.GUID
+	r, _, _ := syscall.SyscallN(m.vtbl[4], uintptr(unsafe.Pointer(m)), uintptr(h), uintptr(unsafe.Pointer(&desk)))
+	return r == 0 && desk != windows.GUID{}
+}
+
+// shellClasses are the window classes of the shell's own surfaces that belong to explorer.exe: the desktop, the taskbars, the tray's overflow, and the Alt-Tab and Task View switchers (MultitaskingViewFrame before Windows 11, XamlExplorerHostIslandWindow since). File Explorer is explorer.exe too, as CabinetWClass, so these are told apart by class.
+var shellClasses = map[string]bool{
+	"Progman": true, "WorkerW": true,
+	"Shell_TrayWnd": true, "Shell_SecondaryTrayWnd": true,
+	"NotifyIconOverflowWindow": true, "TopLevelWindowForOverflowXamlIsland": true,
+	"MultitaskingViewFrame": true, "XamlExplorerHostIslandWindow": true, "ForegroundStaging": true,
+}
+
+// winShell reports whether a window is a surface of the Windows shell rather than an application: the desktop, a taskbar, Start, search, the notification and quick-settings panes, the task switcher, the lock screen. They take the foreground like any window and none of them is something the user is doing. Input: the window, its application's name without ".exe" and its title. Output: true for a shell surface.
+func winShell(h windows.HWND, app, title string) bool {
+	if _, shell := nonWindowApps[strings.ToLower(app)]; shell && app != "" {
+		return true
+	}
+	if shellClasses[winClass(h)] {
+		return true
+	}
+	// The taskbar's buttons and the switchers' transient windows are explorer's with no title at all; a File Explorer window always has one.
+	return strings.EqualFold(app, "explorer") && strings.TrimSpace(title) == ""
 }
 
 // winHung reports whether Windows considers a window hung: it has not answered messages for several seconds.
@@ -288,22 +466,36 @@ func trimExe(s string) string {
 	return s
 }
 
-// frontWindow picks the window the user is working in: the foreground window, or, when that is June's own or not a listable window, the first listable window behind it that is not June's. Output: the window and true, false when there is none.
+// frontWindow picks the window the user is working in: the foreground window, or, when that is June's own or not a listable window, the one the user was in before it. Output: the window and true, false when there is none.
+// Windows raises a window to the top of its band of the z-order when it is activated, so the one used last before June's is the first ordinary window below it. Topmost windows sit above that band however long ago they were used — a picture-in-picture video, a meeting's mini window, an overlay — so one is taken only when no ordinary window is open; a minimised window keeps its place in the z-order but is not on the screen to be looked at; and a popup (see winPopup) sits above the window it belongs to without ever having been the one in use.
 func frontWindow() (winRef, bool) {
 	pick := func(h windows.HWND) (winRef, bool) {
-		if !winListable(h) {
+		if !winListable(h) || winIconic(h) {
 			return winRef{}, false
 		}
 		w := winOf(h)
 		return w, !IsJuneWindow(trimExe(w.exe), w.title)
 	}
-	if w, ok := pick(windows.GetForegroundWindow()); ok {
+	fg := windows.GetForegroundWindow()
+	if w, ok := pick(fg); ok {
 		return w, true
 	}
+	var topmost winRef
+	found := false
 	for _, h := range topWindows() {
-		if w, ok := pick(h); ok {
+		if h == fg {
+			continue
+		}
+		w, ok := pick(h)
+		if !ok || winPopup(h) {
+			continue
+		}
+		if winExStyle(h)&wsExTopmost == 0 {
 			return w, true
 		}
+		if !found {
+			topmost, found = w, true
+		}
 	}
-	return winRef{}, false
+	return topmost, found
 }

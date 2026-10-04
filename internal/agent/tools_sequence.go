@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"june/internal/act"
+	"june/internal/tracker"
 )
 
 const (
@@ -45,7 +47,8 @@ func (a *Agent) clickSequence(ctx context.Context, args map[string]any) string {
 		}
 		resolved, errText := a.resolveStep(ctx, step)
 		if errText != "" {
-			return fmt.Sprintf("Stopped before any tap fired: step %d, %s", i+1, strings.TrimPrefix(errText, "error: "))
+			// A step that names nothing is an error the model can mend, not a stop line: a refusal opening "Stopped before" is put to the user as a job's one question (see internal/actjob), and a bad number or a point with no picture behind it is nothing the user can answer.
+			return toolError(fmt.Sprintf("no tap fired: step %d, %s", i+1, strings.TrimPrefix(errText, "error: ")))
 		}
 		if stop := a.guardPoint(ctx, resolved.x, resolved.y, window); stop != "" {
 			return fmt.Sprintf("Stopped before any tap fired: step %d, %s", i+1, stop)
@@ -202,6 +205,9 @@ func (a *Agent) clickNumbered(ctx context.Context, args map[string]any) string {
 	cx, cy := fx+fw/2, fy+fh/2
 	a.tapAt(cx, cy, it.Label)
 	action, err := a.doAction(ctx, it.Ref)
+	if errors.Is(err, tracker.ErrActionUnconfirmed) {
+		return a.unconfirmedPress(ctx, it, window, action)
+	}
 	if err != nil {
 		// An element with no accessibility action to fire is clicked where it sits instead: the real pointer moves to the centre of its rectangle, which is in the same picture pixels click_at uses. The tap already flew there above, so this branch does not tap again.
 		if it.W <= 0 || it.H <= 0 {
@@ -215,7 +221,7 @@ func (a *Agent) clickNumbered(ctx context.Context, args map[string]any) string {
 		if perr := dev.ClickAt(float64(cx), float64(cy)); perr != nil {
 			return toolError(fmt.Sprintf("could not click [%d] %s %q: %v; pointer: %v", it.N, it.Role, it.Label, err, perr))
 		}
-		if missed := a.pressCheck(ctx, before, cx, cy); missed != "" {
+		if missed := a.pressCheck(ctx, before, cx, cy); missed != "" && !a.tookTheKeyboard(ctx, it) {
 			return missed
 		}
 		action = "pointer"
@@ -224,11 +230,45 @@ func (a *Agent) clickNumbered(ctx context.Context, args map[string]any) string {
 	a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: window})
 	clicked := fmt.Sprintf("clicked [%d] %s %q via %s", it.N, it.Role, it.Label, action)
 	// Read the front window's title fresh, the same call observe_screen opens with, so the result says what the click actually did rather than what the stale pre-click list said. A click can resume, play or navigate to something other than what was asked, and the title is where that shows up first.
-	_, title, _, err := a.observe(ctx)
+	app, title, _, err := a.observe(ctx)
+	if err == nil && app != "" {
+		// The keys sent straight after this click go where it left things, whatever it retitled the window to (see keysWindow).
+		acted := app
+		if title != "" {
+			acted = app + " · " + title
+		}
+		a.rememberActed(ctx, acted)
+	}
 	if err != nil || title == "" {
 		return clicked + "; call observe_screen to see the result"
 	}
 	return fmt.Sprintf("%s; the window is now %q; check it matches what was asked, then call observe_screen if you need the list", clicked, title)
+}
+
+// tookTheKeyboard reports whether a pointer click into a box to type in is borne out by that box holding the keyboard. Clicking into an empty text area that already has the focus changes no pixel — the caret stays where it was — so the press check called a click that had done all it was for a miss, and the type_text the same burst carried after it was dropped. Input: the call's context and the clicked item. Output: true only on a definite yes from the focused read on a place to type; false for any other role, when nothing reads focus, and on a failed read or a no.
+func (a *Agent) tookTheKeyboard(ctx context.Context, it act.Item) bool {
+	if !typingPlaces[it.Role] || a.focused == nil || it.Ref == "" {
+		return false
+	}
+	held, err := a.focused(ctx, it.Ref)
+	return err == nil && held
+}
+
+// unconfirmedPress reports a press whose accessibility action went out but did not report back in time, which is what a control whose action opens a modal dialog can do: its Invoke may return only once the dialog is closed. The element is not clicked again with the pointer, because that pressed it a second time or clicked into the dialog it had opened. Input: the call's context, the item pressed, the window it was in and the action fired ("" when the reader was lost and whether anything fired is not known). Output: the result line, naming what is in front now.
+func (a *Agent) unconfirmedPress(ctx context.Context, it act.Item, window, action string) string {
+	// Whatever the press opened has the keyboard now, if anything does, and this session cannot name it until the screen is read again.
+	a.focusLost(ctx)
+	a.rememberTarget(ScreenTarget{Label: it.Label, Role: it.Role, Window: window})
+	// With no action named, the accessibility reader was lost after the press was sent to it, which can be before it was fired as well as after.
+	pressed := fmt.Sprintf("sent the press to [%d] %s %q, but the accessibility reader was lost before it answered, so whether it went through is not known; it was not pressed again", it.N, it.Role, it.Label)
+	if action != "" {
+		pressed = fmt.Sprintf("pressed [%d] %s %q via %s, but it has not reported back, which usually means it opened a dialog that is waiting for an answer; it was not pressed again", it.N, it.Role, it.Label, action)
+	}
+	_, title, _, err := a.observe(ctx)
+	if err != nil || title == "" {
+		return pressed + "; call observe_screen to see what is in front now"
+	}
+	return fmt.Sprintf("%s; the window in front is now %q; call observe_screen before acting on it", pressed, title)
 }
 
 // clickPoint clicks a bare point on the screen with the real pointer, for anything the accessibility walk never listed: a canvas, a video, a custom widget. Input: the tool arguments, which must carry x and y in the last look's picture coordinates. Output: what was clicked and where it landed, or the reason it was refused.

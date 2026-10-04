@@ -51,7 +51,7 @@ func transcribeWAV(ctx context.Context, bin, path, speaker, prompt string, offse
 	}
 	// The model flags mean a real whisper.cpp run, which decodes on the GPU, where only one run fits at a time.
 	gpu := whisperCPPArgs(bin)
-	unprimed := []string{"-f", path, "-np", "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(whisperThreads(gpu != nil))}
+	unprimed := []string{"-f", path, "-et", entropyThreshold, "-lpt", logProbThreshold, "-mc", whisperMaxContext, "-t", strconv.Itoa(whisperThreads(gpu != nil))}
 	unprimed = append(unprimed, gpu...)
 	// The prompt goes on the end and nowhere else, because dropping it again for the unprimed redo below is done by running the arguments without it. Appending anything after it took the model flags away from that redo instead.
 	args := unprimed
@@ -171,20 +171,25 @@ func transcribeThreads() int {
 	return 1
 }
 
-// run executes one command and returns its stdout and stderr separately, so a tool that reports failure on stderr while exiting 0 can still be caught.
-func run(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
+// runChild starts cmd tied to the daemon's lifetime, waits for it, and returns its stdout and stderr separately, so a tool that reports failure on stderr while exiting 0 can still be caught. Input: a cmd not yet started, with its context, directory and environment already set. Output: its stdout, its stderr, and the start or exit error.
+// whisper-cli and the diarizer run for minutes holding the GPU or every core, and the context only stops them on a shutdown the daemon gets to run; a daemon that crashed or was killed left them decoding for nobody. ChildProcAttr's parent-death signal ends them with the daemon on Linux and KillWithDaemon's job does on Windows, which is what the llama-server children already had.
+func runChild(cmd *exec.Cmd) (stdout, stderr string, err error) {
 	var out, errOut strings.Builder
-	cmd := exec.CommandContext(ctx, name, args...)
-	util.HideConsole(cmd)
+	cmd.SysProcAttr = util.ChildProcAttr()
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
-	err = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", "", err
+	}
+	util.KillWithDaemon(cmd)
+	err = cmd.Wait()
 	return out.String(), errOut.String(), err
 }
 
-// runWithLibPath is run with libDir added to the shared-library search path, for a tool whose libraries sit beside it rather than on the system path. The sherpa-onnx build ships its own ONNX Runtime that way.
+// runWithLibPath runs name through runChild with libDir added to the shared-library search path, for a tool whose libraries sit beside it rather than on the system path. The sherpa-onnx build ships its own ONNX Runtime that way.
 // libDir is prepended to whatever LD_LIBRARY_PATH the daemon inherited rather than replacing it: a machine running under Nix, Conda or a wrapped snap sets that variable for its own system libraries, and dropping it would leave the tool unable to link anything it does not ship itself.
-func runWithLibPath(ctx context.Context, name string, args []string, libDir string) (stdout, stderr string, err error) {
+// dir is the directory the tool starts in, "" for the daemon's own; childPaths says when it is not.
+func runWithLibPath(ctx context.Context, dir, name string, args []string, libDir string) (stdout, stderr string, err error) {
 	// Windows looks for a program's DLLs on PATH, not LD_LIBRARY_PATH.
 	pathVar := "LD_LIBRARY_PATH"
 	if runtime.GOOS == "windows" {
@@ -194,14 +199,10 @@ func runWithLibPath(ctx context.Context, name string, args []string, libDir stri
 	if inherited := os.Getenv(pathVar); inherited != "" {
 		path = libDir + string(os.PathListSeparator) + inherited
 	}
-	var out, errOut strings.Builder
 	cmd := exec.CommandContext(ctx, name, args...)
-	util.HideConsole(cmd)
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), pathVar+"="+path)
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-	err = cmd.Run()
-	return out.String(), errOut.String(), err
+	return runChild(cmd)
 }
 
 // segmentLine matches whisper's per-segment stdout line, e.g. "[00:00:07.640 --> 00:00:17.840]   text here".

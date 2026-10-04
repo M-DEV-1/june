@@ -67,6 +67,11 @@ func (r *Raiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
 	return r.call(ctx, "ActivateByPid", pid)
 }
 
+// ByWindow activates a window List reported. The extension activates by pid and has no call that takes a window's id, so this is ByPid on the window's pid, which raises the one the shell finds first when the process has several. Input: a window from List. Output: as ByPid.
+func (r *Raiser) ByWindow(ctx context.Context, w Window) (bool, error) {
+	return r.ByPid(ctx, w.Pid)
+}
+
 // ByTitle asks the extension to activate a window whose title contains substring. Input: the substring to match. Output: true if a matching window was found and activated, false if none matched, or an error if the D-Bus call itself failed.
 func (r *Raiser) ByTitle(ctx context.Context, substring string) (bool, error) {
 	return r.call(ctx, "ActivateByTitle", substring)

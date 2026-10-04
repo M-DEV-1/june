@@ -14,6 +14,9 @@ func (e *Relabelled) Error() string {
 	return fmt.Sprintf("it is now labelled %q, not %q", e.Now, e.Was)
 }
 
+// ErrActionUnconfirmed is what DoAction wraps when the action was sent and may well have happened, but did not report back in time. A control whose action opens a modal dialog may not return until the dialog is closed, so a caller that took this for "nothing fired" and clicked the element with the pointer pressed it twice, or clicked into the dialog it had opened.
+var ErrActionUnconfirmed = errors.New("the action was sent but did not report back in time")
+
 // VerifyAgainst compares what an element is now with what observe_screen recorded for it. Input: the role and label read from the element just now, then the role and label the numbered list showed. Output: nil when they still describe the same element, a *Relabelled when only the name changed, or an error naming what else changed; an empty label in the list means the list held none, and a content role's label is not compared at all.
 // Exported so an end-to-end test can put a fake accessibility read through the same decision the bus-backed one makes, rather than a second copy of the rule that can drift from it.
 func VerifyAgainst(nowRole, nowLabel string, role, label string) error {

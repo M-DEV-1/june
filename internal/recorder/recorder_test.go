@@ -9,7 +9,7 @@ import (
 
 	"os"
 	"path/filepath"
-
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -141,6 +141,7 @@ func newTestRecorder(t *testing.T, store *fakeStore) (*Recorder, *fakeCapture, *
 		return "# Minutes\n\n- ship friday", nil
 	}
 	r.notify = func(title, body string) { notes = append(notes, title+": "+body) }
+	r.notifyAt = func(title, body, place, id string) { notes = append(notes, title+": "+body+" @"+place+"/"+id) }
 	return r, cap, &notes
 }
 
@@ -226,8 +227,9 @@ func TestRecorder_Pipeline(t *testing.T) {
 			t.Errorf("%s should be kept while keepAudio is on: %v", name, err)
 		}
 	}
-	if len(*notes) == 0 {
-		t.Error("the user should be notified when the minutes are ready")
+	// The notice opens the meeting it announces, under the id the minutes were filed as, rather than naming a file path.
+	if !slices.ContainsFunc(*notes, func(n string) bool { return strings.HasSuffix(n, "@meetings/1") }) {
+		t.Errorf("the user should be notified when the minutes are ready, by a notice that opens the meeting; got %v", *notes)
 	}
 }
 

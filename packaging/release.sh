@@ -4,9 +4,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' app/src-tauri/tauri.conf.json | head -1)"
-if [ -z "$version" ]; then
-	echo "could not read a version from app/src-tauri/tauri.conf.json" >&2
+# check-version.sh fails unless tauri.conf.json, Cargo.toml, Cargo.lock and package.json agree, and prints the version they agree on.
+version="$(bash packaging/check-version.sh)"
+# VERSION (the release workflow passes the tag's) must be the tree's: the window takes its version from tauri.conf.json at compile time, so building any other number would ship two programs that disagree about which June they are.
+if [ -n "${VERSION:-}" ] && [ "${VERSION#v}" != "$version" ]; then
+	echo "VERSION is $VERSION but the tree says $version; run packaging/bump-version.sh ${VERSION#v} first" >&2
 	exit 1
 fi
 dist="$root/dist/june-$version"
@@ -16,14 +18,15 @@ rm -rf "$dist"
 mkdir -p "$dist"
 
 echo "building the daemon..."
-CGO_ENABLED=0 go build -o "$dist/june" .
+# -X stamps the version GET /settings, GET /setup and the updater report; a build without it calls itself "dev". -trimpath keeps this machine's paths out of the binary.
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X june/internal/config.Version=$version" -o "$dist/june" .
 
 echo "building the desktop window..."
 if [ ! -d app/node_modules ]; then
 	( cd app && pnpm install --frozen-lockfile )
 fi
 ( cd app && pnpm build )
-( cd app/src-tauri && cargo build --release )
+( cd app/src-tauri && cargo build --release --locked )
 install -m 0755 app/src-tauri/target/release/june "$dist/june-window"
 
 echo "generating icons..."
@@ -34,7 +37,6 @@ for size in 16 32 48 64 128 256; do
 done
 
 cp packaging/june.desktop "$dist/june.desktop"
-cp packaging/june.service "$dist/june.service"
 install -m 0755 packaging/install.sh "$dist/install.sh"
 install -m 0755 packaging/uninstall.sh "$dist/uninstall.sh"
 mkdir -p "$dist/gnome-extension/june@june.local"

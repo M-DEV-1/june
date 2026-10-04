@@ -29,7 +29,7 @@ func NewMic() (Microphone, error) {
 	return &winMic{}, nil
 }
 
-// StartCapture opens the default capture device and returns a channel of 24 kHz mono s16le chunks of about 20 ms. The channel closes once ctx is cancelled, Close is called, or the device is lost and no default device comes back. A chunk the consumer is not ready for is dropped rather than blocking the capture thread.
+// StartCapture opens the default capture device and returns a channel of 24 kHz mono s16le chunks of about 20 ms. The channel closes only once ctx is cancelled or Close is called, the same as on Linux: a lost device is reopened on whatever becomes the default, and until one does nothing arrives. The voice session reads one channel across every redial, so a channel that closed with the device would fail each redial at once and leave the session listening to nothing. A chunk the consumer is not ready for is dropped rather than blocking the capture thread.
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.mu.Lock()
 	if m.isCapturing {
@@ -40,7 +40,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.mu.Unlock()
 
 	micChan := make(chan []byte, 100)
-	stream, err := startWASAPI(wca.ECapture, wca.EConsole, micRate, func(pcm []byte) error {
+	stream, err := startWASAPI(wca.ECapture, wca.EConsole, micRate, true, func(pcm []byte) error {
 		m.currentAmp.Store(math.Float64bits(level(pcm)))
 		select {
 		case micChan <- pcm:
@@ -60,12 +60,7 @@ func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.cancel = cancel
 	m.mu.Unlock()
 	go func() {
-		// A stream that ended on its own (its device went and none came back) closes micChan too, so the consumer sees the microphone end instead of waiting on a channel that never sends again.
-		select {
-		case <-captureCtx.Done():
-		case <-stream.done:
-			cancel()
-		}
+		<-captureCtx.Done()
 		// Close waits for the capture thread, so nothing sends on micChan after it is closed.
 		stream.Close()
 		close(micChan)

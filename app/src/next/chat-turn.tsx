@@ -2,9 +2,10 @@
 
 import { Fragment } from "react";
 
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ConversationView, Turn } from "./api";
-import { dayHeading, sourcedTurns, turnText } from "./format";
+import { dayHeading, sourcedTurns, stepDetail, turnText } from "./format";
 import {
   Blank,
   HEAD,
@@ -12,6 +13,7 @@ import {
   Reading,
   Scroller,
   TAIL,
+  useOpenSettingsAt,
   useReading,
 } from "./parts";
 import type { JobRun, Run } from "./store";
@@ -38,7 +40,11 @@ function Working({ run }: { run: Run }) {
               {/* A face only where one means something: a step the daemon marked failed. A face on every row would be a bullet point wearing a face, which is the thing to avoid. */}
               {s.failed ? <Face state="refused" className="text-micro" /> : null}
               <span className="font-medium text-foreground">{s.name}</span>
-              {s.detail ? <span className="ml-2">{s.detail}</span> : null}
+              {s.detail ? (
+                <span className="ml-2" title={s.detail}>
+                  {stepDetail(s.detail, s.name)}
+                </span>
+              ) : null}
             </li>
           ))}
         </ol>
@@ -105,8 +111,14 @@ function DayLine({ heading }: { heading: string }) {
   );
 }
 
+/** Whether a failed answer is one Settings → Brain fixes: no key, a refused key, an expired login, no brain at all, or a spent allowance another brain could cover. Input: the sentence the turn shows. Output: the answer. */
+function brainTrouble(text: string): boolean {
+  return /\b(key|brain|sign in|login|allowance)\b/i.test(text);
+}
+
 /** One turn as it reads in the thread: the user's own words in a bubble, or June's reply as prose with the grey line under it. Input: the turn, and whether what the reply read is folded under it rather than shown in the rail beside the thread. Output: the turn. */
 function ThreadTurn({ turn, folded }: { turn: Turn; folded: boolean }) {
+  const openSettingsAt = useOpenSettingsAt();
   if (turn.role === "you") return <Said text={turn.text} />;
   return (
     <div id={`turn-${turn.id}`} className={turn.kind === "error" ? "border-l-2 border-destructive/40 pl-4" : ""}>
@@ -117,6 +129,12 @@ function ThreadTurn({ turn, folded }: { turn: Turn; folded: boolean }) {
         </div>
       ) : null}
       <ReplyMarkdown text={turnText(turn)} />
+      {/* A failure the person can fix carries the way to fix it, so the sentence never has to send anyone to a terminal or a file. */}
+      {turn.kind === "error" && brainTrouble(turnText(turn)) ? (
+        <Button variant="outline" size="sm" className="mt-2" onClick={() => openSettingsAt("brain")}>
+          Open Brain settings
+        </Button>
+      ) : null}
       <ReplyMeta turn={turn} folded={folded} />
     </div>
   );

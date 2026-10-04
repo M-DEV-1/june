@@ -24,6 +24,8 @@ func TestMain(m *testing.M) {
 	if os.Getenv("JUNE_FAKE_CLI") == "1" {
 		fakeCLIMain()
 	}
+	// The routing tests hand duties on, which the user's own allow_fallback setting can forbid; they test the router, not the config of the machine running them.
+	dutyFallbackAllowed = func() bool { return true }
 	os.Exit(m.Run())
 }
 
@@ -83,8 +85,9 @@ func TestCLIBrains(t *testing.T) {
 		{name: "a run that outlives the timeout is killed", brain: claude, sleep: "5s", timeout: 1, wantErr: "timed out"},
 		// On 2026-09-08 a meeting's minutes were lost to "claude timed out after 5m0s" with the answer already printed: the CLI had written its result and not exited. The answer is complete once stdout holds one whole JSON value, and that is when the runner returns.
 		{name: "a run that prints its result and then lingers is not waited for", brain: claude, out: `{"is_error":false,"subtype":"success","result":"done"}`, sleep: "5s", timeout: 2, want: "done"},
-		{name: "agy's response field is the answer", brain: agy, out: `{"status":"SUCCESS","response":"ok"}`, want: "ok"},
-		{name: "an agy status other than SUCCESS is an error", brain: agy, out: `{"status":"ERROR","response":""}`, wantErr: "ERROR"},
+		// agy takes the prompt on stdin as a stream-json turn, opened with the line telling it to use no tools, and prints stream-json back, so its answer is the result event's response field.
+		{name: "agy's response field is the answer", brain: agy, out: "{\"event\":\"init\"}\n{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"ok\"}}\n{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\\n\"}}\n", want: "ok", wantStdin: agyTurn(agyTextOnly + "summarise this")},
+		{name: "an agy status other than SUCCESS is an error", brain: agy, out: "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"response\":\"\"}}\n", wantErr: "ERROR"},
 		{name: "grok's text field is the answer", brain: grok, out: `{"text":"ok\n","stopReason":"end_turn"}`, want: "ok"},
 		{name: "empty grok text is an error, not an empty answer", brain: grok, out: `{"text":"","stopReason":"refusal"}`, wantErr: "no text"},
 	}

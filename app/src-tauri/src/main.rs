@@ -15,7 +15,26 @@ fn prefer_x11_backend() {
     }
 }
 
+/// Gives this process the same AppUserModelID the installer's Start menu and desktop shortcuts carry (packaging/windows/june.iss). The window that shows on the taskbar belongs to june-window.exe, which the daemon starts itself, so no shortcut's ID reaches it: without this, pinning June's taskbar button pinned june-window.exe, which on its own opens nothing and grabs the hotkey. With the ID set, the taskbar groups the window under the shortcut and a pin relaunches junew.exe through it. It has to run before any window exists, because the taskbar reads the ID when a window first appears. Input: none. Output: nothing; a failure leaves the taskbar on its old exe-based grouping, which is no worse than before.
+#[cfg(windows)]
+fn set_app_user_model_id() {
+    // Declared here rather than through the windows crate: one call does not justify a new dependency in a lockfile CI checks with --locked.
+    #[allow(non_snake_case)]
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
+    }
+    let id: Vec<u16> = "M-DEV-1.June"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: id is a NUL-terminated UTF-16 string that outlives the call, and shell32 copies it.
+    let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+}
+
 fn main() {
+    #[cfg(windows)]
+    set_app_user_model_id();
     #[cfg(target_os = "linux")]
     prefer_x11_backend();
     june_lib::run()

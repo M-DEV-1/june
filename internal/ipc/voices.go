@@ -3,8 +3,10 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
+	"june/internal/agent"
 	"june/internal/config"
 	"june/internal/util"
 )
@@ -72,7 +74,7 @@ func Voices(cfg *LiveConfig, _ VoicePreviewer) http.HandlerFunc {
 	}
 }
 
-// VoicePreview builds the /voices/preview handler. POST {"name": string} speaks one fixed line in that voice through this machine's speaker and answers 200 once it has played; it never changes which voice is configured, which is the whole point of hearing one first. An unknown name is 400, a daemon with no speaker is 503, and a synthesis or playback failure is 500 — a preview that answers 200 and stays silent leaves the user waiting for a sound that is never coming. Input: the config accessor and the previewer, which may be nil. Output: the handler.
+// VoicePreview builds the /voices/preview handler. POST {"name": string} speaks one fixed line in that voice through this machine's speaker and answers 200 once it has played; it never changes which voice is configured, which is the whole point of hearing one first. An unknown name is 400, a daemon with no speaker is 503, so is one with no Gemini API key asked for a voice it has never kept, and a synthesis or playback failure is 500 — a preview that answers 200 and stays silent leaves the user waiting for a sound that is never coming. Input: the config accessor and the previewer, which may be nil. Output: the handler.
 func VoicePreview(cfg *LiveConfig, preview VoicePreviewer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -95,6 +97,12 @@ func VoicePreview(cfg *LiveConfig, preview VoicePreviewer) http.HandlerFunc {
 			return
 		}
 		if err := preview(r.Context(), canonical); err != nil {
+			// No key is this machine being unable to synthesise at all, the same kind of answer as having no speaker, not a preview that broke.
+			if errors.Is(err, agent.ErrNoGeminiKey) {
+				markNoKey(w)
+				http.Error(w, "Hearing a voice for the first time needs a free Gemini key. Add one in Settings → Brain.", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

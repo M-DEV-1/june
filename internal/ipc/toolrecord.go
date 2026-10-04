@@ -13,6 +13,9 @@ import (
 // toolRecordTimeout bounds one row's write. The ask that produced the record has usually moved on by the time it lands, so the write cannot borrow the ask's context — it would be cancelled the moment the answer was spoken — and it cannot wait for ever either.
 const toolRecordTimeout = 5 * time.Second
 
+// JobToolRecorder is the recorder a computer-use job's tool calls are filed under: path "act", no conversation. A job's context is made by the job runner rather than by a route of this package, so the daemon hangs this on it (see actjob.Runner.UseJobContext). Input: the store, nil filing nothing. Output: the recorder.
+func JobToolRecorder(store *db.Store) agent.ToolRecorder { return toolRecorder(store, "act", 0) }
+
 // toolRecorder builds the recorder one loop's tool calls are filed under. Input: the store (nil files nothing), the name of the loop running them — "ask", "voice", "act" or "subtask" — and the conversation the calls belong to, 0 when they belong to none. Output: the recorder to hang on the ask's context, or nil when there is no store to write to.
 // A failed write is logged and swallowed: the record exists to be read later, and losing a row is a smaller harm than failing the tool call that produced it in front of the user.
 func toolRecorder(store *db.Store, path string, convID int64) agent.ToolRecorder {

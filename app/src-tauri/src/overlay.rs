@@ -147,9 +147,10 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
         .parse()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad daemon address"))?;
     let mut socket = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)?;
+    // role=overlay is what tells the daemon this stream is the one that draws: it reports a drawing as made only while a client connected this way is listening (overlayRole in internal/ipc/overlay.go).
     write!(
         socket,
-        "GET /events HTTP/1.1\r\nHost: {address}\r\nX-June-Token: {token}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /events?role=overlay HTTP/1.1\r\nHost: {address}\r\nX-June-Token: {token}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
     )?;
     socket.flush()?;
 

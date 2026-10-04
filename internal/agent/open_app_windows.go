@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"june/internal/util"
 
@@ -83,16 +85,62 @@ func patchAccessibility(string) bool { return false }
 // treelessNote is empty on Windows, where a Chromium-based application started plain still exposes its tree.
 func (a *Agent) treelessNote(string, string, bool) string { return "" }
 
-// defaultBrowserID is the default https handler's executable stem ("brave", "chrome", "msedge", "firefox"), read from the ProgId Windows records for the user's choice, or "" when it cannot say. A variable so a test can name one without the registry.
+// defaultBrowserID names the default https handler, or "" when it cannot say: the browser its ProgId stands for ("comet", "opera", "msedge"), then its executable's stem when that differs, space-separated, the order raiseBrowser tries them in. The shell is asked which ProgId and which program open https, the same resolution a link click goes through; the ProgId in the registry is the fallback for when it will not say. A variable so a test can name one without the shell.
+// The shell is asked first because the registry key alone is not where Windows 11 keeps the choice: on this desk https\UserChoice still named Edge while UserChoiceLatest named Comet and every link opened in Comet, so open_url raised whatever Edge window was open and left the page behind it. The executable's stem is what the raiser names a window's program by (its WmClass), so the two meet without a table of browsers, except for a browser whose handler is a launcher: Opera registers ...\Opera\launcher.exe for https while its windows belong to opera.exe, which is why the ProgId's browser is tried first.
 var defaultBrowserID = func() string {
-	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`, registry.QUERY_VALUE)
+	exe := assocString("https", assocStrExecutable)
+	if progID := assocString("https", assocStrProgID); progID != "" || exe != "" {
+		ids := []string{}
+		if id := browserFromProgID(progID); id != "" {
+			ids = append(ids, id)
+		}
+		if stem := strings.ToLower(strings.TrimSuffix(filepath.Base(exe), filepath.Ext(exe))); exe != "" && !slices.Contains(ids, stem) {
+			ids = append(ids, stem)
+		}
+		return strings.Join(ids, " ")
+	}
+	for _, key := range []string{`https\UserChoiceLatest\ProgId`, `https\UserChoice`} {
+		k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\Shell\Associations\UrlAssociations\`+key, registry.QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		progID, _, err := k.GetStringValue("ProgId")
+		k.Close()
+		if err == nil && progID != "" {
+			return browserFromProgID(progID)
+		}
+	}
+	return ""
+}
+
+var procAssocQueryString = windows.NewLazySystemDLL("shlwapi.dll").NewProc("AssocQueryStringW")
+
+// What AssocQueryStringW is asked for: ASSOCSTR_EXECUTABLE, the path of the program a verb on an association runs, and ASSOCSTR_PROGID, the ProgId the association resolves to.
+const (
+	assocStrExecutable = 2
+	assocStrProgID     = 20
+)
+
+// assocString asks the shell about a URL scheme's association, through AssocQueryStringW for the open verb, the one a link click runs; measured on Windows 11 26200, it answers Comet's comet.exe and CometHTM.<id> where https\UserChoice still names Edge, the choice the shell itself follows. Input: the scheme, such as "https", and what to ask for. Output: the answer, or "" when the shell has none or the call fails.
+func assocString(scheme string, what uintptr) string {
+	assoc, err := windows.UTF16PtrFromString(scheme)
 	if err != nil {
 		return ""
 	}
-	defer k.Close()
-	progID, _, err := k.GetStringValue("ProgId")
-	if err != nil {
+	verb, _ := windows.UTF16PtrFromString("open")
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n := uint32(len(buf))
+	if hr, _, _ := procAssocQueryString.Call(0, what, uintptr(unsafe.Pointer(assoc)), uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n))); hr != 0 {
 		return ""
 	}
-	return browserFromProgID(progID)
+	return windows.UTF16ToString(buf)
+}
+
+// shellPid is the pid of the process that owns the desktop, the shell's explorer.exe. The raiser leaves the desktop out of its List, so windowPids would miss this process though it is on screen before any launch; and a shell:AppsFolder launch is handed to it, so a window it opens on the way (the File Explorer window shown for an AppID that no longer resolves) would be taken for the launched application's. Output: the pid, 0 when there is no shell.
+func shellPid() uint32 {
+	var pid uint32
+	if h := windows.GetShellWindow(); h != 0 {
+		windows.GetWindowThreadProcessId(h, &pid) //nolint:errcheck
+	}
+	return pid
 }

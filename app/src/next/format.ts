@@ -182,7 +182,7 @@ export function dayCounts(d: DaySummary): string {
   return parts.join(" · ");
 }
 
-/** Reads a GNOME accelerator as the keys to draw. Input: a binding such as "<Control><Alt>space", or "". Output: ["Ctrl", "Alt", "Space"], or an empty list when nothing is bound. */
+/** Reads a hotkey as the keys to draw. Input: a GNOME accelerator such as "<Control><Alt>space", the "Ctrl+Alt+Space" GET /setup spells, or "". Output: ["Ctrl", "Alt", "Space"], or an empty list when nothing is bound. */
 export function hotkeyKeys(accel: string): string[] {
   const names: Record<string, string> = {
     control: "Ctrl",
@@ -195,13 +195,24 @@ export function hotkeyKeys(accel: string): string[] {
     space: "Space",
   };
   return String(accel ?? "")
-    .replace(/[<>]/g, " ")
+    .replace(/[<>+]/g, " ")
     .trim()
     .split(/\s+/)
     .filter(Boolean)
     .map(
       (k) => names[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k),
     );
+}
+
+/** How far a download has got, as one line a person can read. Input: the bytes fetched so far, the bytes in all, and the rate in bytes a second (0 when not known yet). Output: "1.2 GB of 2.1 GB · 6.3 MB/s · about 3 min left", dropping whichever part there is nothing to say about yet. */
+export function downloadLine(done: number, total: number, bps: number): string {
+  const parts = [total > 0 ? `${bytes(done)} of ${bytes(total)}` : done > 0 ? bytes(done) : ""];
+  if (bps > 0) parts.push(`${bytes(bps)}/s`);
+  if (bps > 0 && total > done) {
+    const mins = Math.ceil((total - done) / bps / 60);
+    parts.push(mins <= 1 ? "under a minute left" : mins < 90 ? `about ${mins} min left` : `about ${Math.round(mins / 60)} hr left`);
+  }
+  return parts.filter(Boolean).join(" · ");
 }
 
 /** What one of June's turns reads as. Input: the turn. Output: its text, replaced for a failed ask by the daemon's own plain sentence, or by one line of the provider's error when the daemon sent none. */
@@ -571,6 +582,30 @@ export function stepLine(job: JobRun): string {
   if (job.steps.length === 0) return "";
   const step = `step ${job.steps.length}`;
   return job.estimate ? `${step} of about ${job.estimate}` : step;
+}
+
+/** An RFC3339 moment inside a tool step's line, which is how recall's window comes through ("since 2026-10-03T05:00:00+05:30 until …"). */
+const STEP_MOMENT = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/;
+
+/** One Go-quoted argument inside a tool step's line, which is how the daemon quotes what a call was given (quoteArg in internal/agent/tools.go): a SQL query, a note, a path. */
+const STEP_QUOTED = /"(?:[^"\\]|\\.)*"/;
+
+/** A quoted argument, or a moment outside one, matched as one pattern so a moment inside an argument is part of the argument: a timestamp in a query_store WHERE clause keeps its date and zone, since a clock time in its place would change what the query shown asks for. */
+const STEP_PART = new RegExp(`${STEP_QUOTED.source}|${STEP_MOMENT.source}`, "g");
+
+/** The tools whose step line the daemon writes itself (toolActivitySummary and resultSummary in internal/agent/tools.go), quoting what the call was given or found with Go's %q. Every other tool's line is plain words ("done", "3 hits", "element 4") or raw text off the screen — observe_screen's window line, click_at's and scroll_at's own result — whose quotes, backslashes and dates belong to a window title and are shown as they are: read as %q, a title "C:\new" lost its "\n" to a space. */
+const QUOTING_STEPS = new Set(["query_memory", "recall", "read_file", "list_files", "open_url", "save_note", "revise", "personal_context", "branch", "do", "query_store", "switch_window", "open_app", "type_text", "click", "draw"]);
+
+/** What one step of a question in flight reads as in the thread. Input: the step's line as the daemon sent it — what the call was given, or what it found — the tool it belongs to, and the moment its dates are read against. Output: for a tool whose line the daemon writes itself, the same line with each RFC3339 moment outside a quoted argument as the clock time it names (and the day, when that is not today), and each quoted argument's escapes read back into what they stand for with its whitespace closed up, so a query written over several lines reads as one line of words rather than as "\n"; any other tool's line unchanged. */
+export function stepDetail(detail: string, tool: string, now: Date = new Date()): string {
+  if (!QUOTING_STEPS.has(tool)) return detail;
+  return detail.replace(STEP_PART, (part) => {
+    // Go's %q writes a control character as \n, \t and the like, or as \x, \u or \U with hex digits; each reads as a space, so "\u0000" never shows up as the letters "u0000".
+    if (part.startsWith('"')) return part.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)/g, (_, c: string) => (c.length > 1 || "abfnrtv".includes(c) ? " " : c)).replace(/\s+/g, " ");
+    const d = new Date(part);
+    if (Number.isNaN(d.getTime())) return part;
+    return d.toDateString() === now.toDateString() ? hhmm(part) : `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${hhmm(part)}`;
+  });
 }
 
 /** What a limit's own window reads as in sentence case: "5-hour" for the ones Codex reports in hours, "Daily", "Weekly" and "Monthly" for the named ones, and whatever the provider called it, capitalised, for anything else. Input: the window as the daemon sent it ("5h", "daily", "weekly", "monthly", or a provider's own name). Output: the label. */

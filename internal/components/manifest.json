@@ -1,0 +1,156 @@
+{
+  "components": {
+    "whisper-bin": {
+      "win-cuda": {
+        "os": "windows", "arch": "amd64", "needs": "cuda",
+        "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-cublas-12.4.0-bin-x64.zip",
+        "size": 674539285, "sha256": "af520ddd034d985b55dfeea3e465ed93653ba2aee1a55e865033edc548c272a7", "disk": 1185415168,
+        "format": "zip", "strip": "Release/", "include": ["whisper-cli.exe", "*.dll"],
+        "dest": "whispercpp", "main": "whisper-cli.exe", "crt": true
+      },
+      "win-cpu": {
+        "os": "windows", "arch": "amd64",
+        "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-blas-bin-x64.zip",
+        "size": 21360234, "sha256": "55c06d09e8b9b6cfb2b0b47ddedc71803054f0e48be1f41848b3141c06c703a9", "disk": 67279238,
+        "format": "zip", "strip": "Release/", "include": ["whisper-cli.exe", "*.dll"],
+        "dest": "whispercpp", "main": "whisper-cli.exe", "crt": true
+      },
+      "linux-cpu": {
+        "os": "linux", "arch": "amd64",
+        "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-ubuntu-x64.tar.gz",
+        "size": 9793438, "sha256": "53e7fd8b5764edad916b8848dd0af6abb1ff1d3b86c899e79c78652412536c32", "disk": 17931710,
+        "format": "tar.gz", "strip": "whisper-bin-ubuntu-x64/", "include": ["whisper-cli", "lib*.so*", "LICENSE"],
+        "dest": "whispercpp", "main": "whisper-cli"
+      }
+    },
+    "whisper-medium": {
+      "any": {
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-medium.bin",
+        "size": 1533763059, "sha256": "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+        "format": "file", "dest": "whispercpp", "main": "ggml-medium.bin"
+      }
+    },
+    "whisper-small": {
+      "any": {
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+        "size": 487601967, "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        "format": "file", "dest": "whispercpp", "main": "ggml-small.bin"
+      }
+    },
+    "silero-vad": {
+      "any": {
+        "url": "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+        "size": 885098, "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+        "format": "file", "dest": "whispercpp", "main": "ggml-silero-v6.2.0.bin"
+      }
+    },
+    "sherpa-bin": {
+      "win": {
+        "os": "windows", "arch": "amd64",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-win-x64-shared-MT-Release.tar.bz2",
+        "size": 24805859, "sha256": "6dffdc715a4465b989446a6105265d2cb345e7101591a17d35534b6758f6e8df", "disk": 41325056,
+        "format": "tar.bz2", "strip": "sherpa-onnx-v1.13.8-win-x64-shared-MT-Release/",
+        "include": ["bin/sherpa-onnx-offline-speaker-diarization.exe", "bin/*.dll", "lib/*.dll"],
+        "rename": {"bin/": "", "lib/": "lib/"},
+        "dest": "sherpa", "main": "sherpa-onnx-offline-speaker-diarization.exe"
+      },
+      "linux": {
+        "os": "linux", "arch": "amd64",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-linux-x64-shared.tar.bz2",
+        "size": 28156791, "sha256": "c0bdb7907d3a74bba1d55d22bf4d9fa75586cf1530614ebe88a27b9118e015c4", "disk": 32913993,
+        "format": "tar.bz2", "strip": "sherpa-onnx-v1.13.8-linux-x64-shared/",
+        "include": ["bin/sherpa-onnx-offline-speaker-diarization", "lib/*.so*"],
+        "rename": {"bin/": "", "lib/": "lib/"},
+        "dest": "sherpa", "main": "sherpa-onnx-offline-speaker-diarization"
+      }
+    },
+    "sherpa-seg": {
+      "any": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+        "size": 6958444, "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488", "disk": 5993974,
+        "format": "tar.bz2", "strip": "sherpa-onnx-pyannote-segmentation-3-0/", "include": ["model.onnx", "LICENSE"],
+        "rename": {"model.onnx": "segmentation-3.0.onnx", "LICENSE": "segmentation-3.0.LICENSE"},
+        "dest": "sherpa", "main": "segmentation-3.0.onnx"
+      }
+    },
+    "sherpa-emb": {
+      "any": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B.onnx",
+        "size": 29292684, "sha256": "c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef",
+        "format": "file", "dest": "sherpa", "main": "wespeaker_en_voxceleb_CAM++.onnx"
+      }
+    },
+    "llama-server": {
+      "win": {
+        "os": "windows", "arch": "amd64",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11352/llama-b11352-bin-win-vulkan-x64.zip",
+        "size": 33211412, "sha256": "9f1edd9d8cf4ea5743e523ae735591bbe5da7aaa7eec3b2dcd3fa8a8cb7bad8b", "disk": 93758749,
+        "format": "zip", "include": ["llama-server.exe", "*.dll", "LICENSE*"],
+        "dest": "llama.cpp", "main": "llama-server.exe", "crt": true
+      },
+      "linux-vulkan": {
+        "os": "linux", "arch": "amd64", "needs": "vulkan",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11352/llama-b11352-bin-ubuntu-vulkan-x64.tar.gz",
+        "size": 31495723, "sha256": "2cd0afa40cc771d16189d57f34e55626662a762f24e2f7c727f114c424756fa2", "disk": 87154830,
+        "format": "tar.gz", "strip": "llama-b11352/", "include": ["llama-server", "lib*.so*", "LICENSE"],
+        "dest": "llama.cpp", "main": "llama-server"
+      },
+      "linux-cpu": {
+        "os": "linux", "arch": "amd64",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11352/llama-b11352-bin-ubuntu-x64.tar.gz",
+        "size": 17550544, "sha256": "9ddab20c8f93d408f3d30ed6d9ba260edaf4f78437ed49fb31c5c64f6aa32e16", "disk": 42831110,
+        "format": "tar.gz", "strip": "llama-b11352/", "include": ["llama-server", "lib*.so*", "LICENSE"],
+        "dest": "llama.cpp", "main": "llama-server"
+      }
+    },
+    "embeddinggemma": {
+      "any": {
+        "url": "https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/embeddinggemma-300M-Q8_0.gguf",
+        "size": 333590944, "sha256": "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63",
+        "format": "file", "dest": "models", "main": "embeddinggemma-300M-Q8_0.gguf"
+      }
+    },
+    "gemma-e2b": {
+      "any": {
+        "url": "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/b4243c156154b6dca9324415f8c7ccc098b4aed1/gemma-4-E2B-it-Q4_0.gguf",
+        "size": 2841481184, "sha256": "8e30dff3ac4c8434c49a7036fa15564bdbb6044e42bf04550bf1a096ad7e6a52",
+        "format": "file", "dest": "models", "main": "gemma-4-E2B-it-Q4_0.gguf"
+      }
+    }
+  },
+  "features": [
+    {
+      "id": "transcribe", "title": "Voice typing & meeting transcripts", "requires": [], "needs_restart": false,
+      "variants": [
+        {"name": "cuda", "os": "windows", "needs": "cuda", "components": ["whisper-bin@win-cuda", "whisper-medium", "silero-vad"]},
+        {"name": "cpu", "os": "windows", "components": ["whisper-bin@win-cpu", "whisper-small", "silero-vad"]},
+        {"name": "cpu", "os": "linux", "components": ["whisper-bin@linux-cpu", "whisper-small", "silero-vad"]}
+      ]
+    },
+    {
+      "id": "speakers", "title": "Who said what", "requires": ["transcribe"], "needs_restart": false,
+      "variants": [
+        {"name": "cpu", "os": "windows", "components": ["sherpa-bin@win", "sherpa-seg", "sherpa-emb"]},
+        {"name": "cpu", "os": "linux", "components": ["sherpa-bin@linux", "sherpa-seg", "sherpa-emb"]}
+      ]
+    },
+    {
+      "id": "memory", "title": "Smarter memory search", "requires": [], "needs_restart": true,
+      "variants": [
+        {"name": "vulkan", "os": "windows", "needs": "vulkan", "components": ["llama-server@win", "embeddinggemma"]},
+        {"name": "cpu", "os": "windows", "components": ["llama-server@win", "embeddinggemma"]},
+        {"name": "vulkan", "os": "linux", "needs": "vulkan", "components": ["llama-server@linux-vulkan", "embeddinggemma"]},
+        {"name": "cpu", "os": "linux", "components": ["llama-server@linux-cpu", "embeddinggemma"]}
+      ]
+    },
+    {
+      "id": "summaries", "title": "On-device summaries", "requires": [], "needs_restart": true, "min_ram_mb": 7680,
+      "variants": [
+        {"name": "vulkan", "os": "windows", "needs": "vulkan", "components": ["llama-server@win", "gemma-e2b"]},
+        {"name": "cpu", "os": "windows", "components": ["llama-server@win", "gemma-e2b"]},
+        {"name": "vulkan", "os": "linux", "needs": "vulkan", "components": ["llama-server@linux-vulkan", "gemma-e2b"]},
+        {"name": "cpu", "os": "linux", "components": ["llama-server@linux-cpu", "gemma-e2b"]}
+      ]
+    }
+  ]
+}
