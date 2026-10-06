@@ -206,19 +206,19 @@ func turnViews(turns []db.Turn) []TurnView {
 func errorReason(text string) string {
 	switch askSentence(errors.New(text), text) {
 	case askQuotaSpent, askTooFast:
-		return "The model's quota is spent (429)."
+		return "The AI's limit is used up for now."
 	case askOverloaded:
-		return "The model was overloaded (503)."
+		return "The AI was too busy."
 	case askTooLong:
-		return "The model took too long."
+		return "The AI took too long."
 	case askNoKey:
-		return "The brain has no API key."
+		return "This brain has no key."
 	case askLoggedOut, askLoggedOutChatGPT, askLoggedOutClaude, askLoggedOutAntigravity:
 		return "The brain's login has expired."
 	case askNotInstalled:
-		return "The brain's program was not found."
+		return "June couldn't find this brain's app."
 	case askNoAnswer:
-		return "The model gave no answer."
+		return "The AI gave no answer."
 	case askNoBrain:
 		return "No brain could answer."
 	}
@@ -226,11 +226,11 @@ func errorReason(text string) string {
 	lower := strings.ToLower(text)
 	switch {
 	case strings.Contains(lower, "resource_exhausted"):
-		return "The model's quota is spent (429)."
+		return "The AI's limit is used up for now."
 	case strings.Contains(lower, "unavailable"):
-		return "The model was overloaded (503)."
+		return "The AI was too busy."
 	default:
-		return "The model could not answer."
+		return "The AI couldn't answer."
 	}
 }
 

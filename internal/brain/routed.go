@@ -43,9 +43,9 @@ func RoutedFor(preferred string, build func(provider string) Brain) Brain {
 			if err == nil {
 				return text, nil
 			}
-			// A refusal made on this machine — the duty's own daily band is full, or this caller has no backend for the provider — hands on without opening the breaker, because the provider itself refused nothing and the asks that share the breaker can still use it. So does a run that ended with nothing said (agent.ErrNoAnswer): it says nothing about the provider's next prompt, though it did reach the provider and counts against maxDutyAnswers.
+			// A refusal made on this machine — the duty's own daily band is full, this caller has no backend for the provider, or the provider's program would not start (agent.ErrCouldNotRun) — hands on without opening the breaker and without counting against maxDutyAnswers, because no model was asked anything and the asks that share the breaker can still use it once the program starts again. So does a run that ended with nothing said (agent.ErrNoAnswer): it says nothing about the provider's next prompt, though it did reach the provider and counts against maxDutyAnswers.
 			var band *ErrDailyQuota
-			refusedHere := errors.As(err, &band) || errors.Is(err, ErrNoBackend)
+			refusedHere := errors.As(err, &band) || errors.Is(err, ErrNoBackend) || errors.Is(err, agent.ErrCouldNotRun)
 			if !refusedHere {
 				reached++
 			}

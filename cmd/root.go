@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -22,6 +21,7 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/ipc"
 	"june/internal/ipctoken"
 	"june/internal/obs"
 
@@ -38,7 +38,7 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		if workdir, _ := cmd.Flags().GetString("workdir"); workdir != "" {
 			if err := os.Chdir(workdir); err != nil {
-				reportFailure(fmt.Sprintf("June could not start: it could not change to %s: %v", workdir, err))
+				reportFailure(fmt.Sprintf("June couldn't start because it can't open the folder %s (%v).", workdir, err))
 				// Nothing with a deferred cleanup has started yet, so exiting here skips nothing; returning used to carry on and exit 0, which a login entry or a supervisor reads as a start that worked.
 				os.Exit(1)
 			}
@@ -53,6 +53,7 @@ var rootCmd = &cobra.Command{
 		opts.quit, _ = cmd.Flags().GetBool("quit")
 		opts.waitPid, _ = cmd.Flags().GetInt("wait-pid")
 		opts.open, _ = cmd.Flags().GetBool("open")
+		opts.toggle, _ = cmd.Flags().GetBool("toggle")
 		runRoot(opts)
 	},
 }
@@ -65,6 +66,7 @@ type rootOptions struct {
 	quit        bool
 	waitPid     int
 	open        bool
+	toggle      bool
 }
 
 // exitCode is what the process exits with once the command has returned and its deferred cleanup — the telemetry shutdown above all — has run. Written by runRoot or doctor on the one goroutine cobra calls them from, read by Execute after that call has come back.
@@ -113,11 +115,12 @@ func init() {
 	rootCmd.Flags().Bool("quit", false, "Ask the running daemon to shut down and wait for it to exit; exits 0 once no daemon is running, 1 if one still is")
 	rootCmd.Flags().Int("wait-pid", 0, "With --daemon: first wait for this process (the daemon being replaced) to exit and free the port")
 	rootCmd.Flags().Bool("open", false, "With --daemon: show the desktop window as soon as it is up")
+	rootCmd.Flags().Bool("toggle", false, "Show or hide June's hover, as June's shortcut does; for a desktop where June cannot set the shortcut itself")
 	// --version prints the release this build was stamped with, "dev" when none; the installer and a bug report read it from here.
 	rootCmd.Version = config.Version
 }
 
-// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows June's desktop window; --daemon runs the background daemon itself (see runDaemonLifecycle for --wait-pid and --open); --autostart flips start-on-login and returns; --update-check flips the daily release check and returns; --quit stops a running daemon. --workdir and the env files are handled before it, in rootCmd's PersistentPreRun.
+// runRoot is the root command's behaviour: with no flags it gets-or-creates a daemon and then shows June's desktop window; --daemon runs the background daemon itself (see runDaemonLifecycle for --wait-pid and --open); --autostart flips start-on-login and returns; --update-check flips the daily release check and returns; --quit stops a running daemon; --toggle shows or hides the hover of a running one. --workdir and the env files are handled before it, in rootCmd's PersistentPreRun.
 // Every failure sets exitCode before returning: a bad --autostart value or a telemetry init failure used to print its error and exit 0, so a script or an installer could not tell it had failed.
 func runRoot(opts rootOptions) {
 	if opts.autostart != "" {
@@ -138,6 +141,10 @@ func runRoot(opts rootOptions) {
 		exitCode = quitDaemon()
 		return
 	}
+	if opts.toggle {
+		exitCode = toggleHover()
+		return
+	}
 
 	// The wait comes before the log is opened: the daemon being replaced still has june.log open and may roll it aside, and Windows refuses to rename a file another process holds.
 	var waited error
@@ -153,7 +160,7 @@ func runRoot(opts rootOptions) {
 	// initialize otel
 	shutdownObs, err := obs.InitTelemetry(ctx, false)
 	if err != nil {
-		reportFailure(fmt.Sprintf("June could not start: it could not open its log in %s (%v).", config.DataDir(), err))
+		reportFailure(fmt.Sprintf("June couldn't start because it can't write to its folder, %s (%v).", config.DataDir(), err))
 		exitCode = 1
 		return
 	}
@@ -224,7 +231,8 @@ func showWindow(freshDaemon bool) int {
 	}
 	path, tried, err := windowBinary()
 	if err != nil {
-		reportFailure(fmt.Sprintf("June's desktop window is not installed (looked at: %s). Set JUNE_WINDOW=/path/to/it, or build it in app/.", strings.Join(tried, ", ")))
+		slog.Error("no window program found", "looked_at", tried, "hint", "set JUNE_WINDOW to the window program, or build it in app/")
+		reportFailure("June's window is missing, so June can't show it. Reinstall June to fix this.")
 		return 1
 	}
 
@@ -248,64 +256,55 @@ func showWindow(freshDaemon bool) int {
 				reportFailure(message)
 				return 1
 			}
-			reportFailure(fmt.Sprintf("June's daemon answers /ping but did not take the instruction to show its window (%v). Its side of it is in %s; if it stays like this, %s, then run june again.", err, filepath.Join(config.DataDir(), "june.log"), stopDaemonHint))
+			slog.Error("the daemon did not take the instruction to show its window", "error", err)
+			reportFailure(fmt.Sprintf("June is running but didn't show its window. If this keeps happening, %s, then open June again.", stopDaemonHint))
 			return 1
 		}
 	}
 
-	hotkey := formatHotkey(fetchWindowHotkey())
-	if hotkey == "" {
-		hotkey = "your June shortcut"
+	slog.Info("asked June's window to show", "window", path)
+	// A hint line only, so a daemon slow to say is not waited on.
+	if hotkey, _, _, _ := daemonHotkey(500 * time.Millisecond); ipc.CanonicalHotkey(hotkey) != "" {
+		fmt.Printf("June is running. If its window doesn't show, press %s.\n", hotkey)
+	} else {
+		fmt.Println("June is running. If its window doesn't show, open it from the June icon in the tray.")
 	}
-	fmt.Printf("June is running (window: %s). It starts hidden — showing it now; if it doesn't appear, press %s.\n", path, hotkey)
 	return 0
 }
 
-// fetchWindowHotkey asks the daemon's own /settings for the GNOME accelerator that shows the window (see internal/ipc.windowHotkey). Output: the raw accelerator, e.g. "<Control><Alt>space", or "" on any failure — this only ever feeds a hint line, never something startup can block or fail on.
-func fetchWindowHotkey() string {
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+DaemonPort+"/settings", nil)
+// toggleHover is `june --toggle`: it asks the running June to show or hide its hover, which is what June's shortcut does. It is the command to bind on a desktop where June cannot set the shortcut itself, and the one June's own GNOME binding runs. Output: the exit code, 1 when no June took the instruction. Nothing is shown on failure: a key press that finds June not running should do nothing, as the shortcut does on Windows once June has quit.
+func toggleHover() int {
+	if err := authedDaemonRequest(http.MethodGet, "http://127.0.0.1:"+DaemonPort+"/window?action=toggle"); err != nil {
+		fmt.Fprintln(os.Stderr, "June isn't running, so there is nothing to show.")
+		return 1
+	}
+	return 0
+}
+
+// daemonHotkey asks the running daemon's GET /setup about the shortcut, which it answers without the provider checks GET /settings makes. Input: how long to wait. Output: the shortcut in effect ("" for none), its status and its note (see internal/ipc.Hotkeys), or an error when the daemon did not answer with them.
+func daemonHotkey(wait time.Duration) (hotkey, status, note string, err error) {
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+DaemonPort+"/setup", nil)
 	if err != nil {
-		return ""
+		return "", "", "", err
 	}
 	ipctoken.Attach(req, ipctoken.DefaultPath())
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Do(req)
+	resp, err := (&http.Client{Timeout: wait}).Do(req)
 	if err != nil {
-		return ""
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return "", "", "", errors.New("it answered " + resp.Status)
 	}
 	var body struct {
-		Hotkey string `json:"hotkey"`
+		Hotkey       string `json:"hotkey"`
+		HotkeyStatus string `json:"hotkey_status"`
+		HotkeyNote   string `json:"hotkey_note"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return ""
+		return "", "", "", err
 	}
-	return body.Hotkey
-}
-
-// hotkeyModifier matches one "<Name>" modifier segment of a GNOME accelerator string.
-var hotkeyModifier = regexp.MustCompile(`<([^>]+)>`)
-
-// formatHotkey turns a GNOME accelerator like "<Control><Alt>space" into the plain "Ctrl+Alt+Space" a terminal hint can print. Input: the raw accelerator, or "". Output: the formatted string, or "" when there was nothing to format.
-func formatHotkey(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	var parts []string
-	for _, m := range hotkeyModifier.FindAllStringSubmatch(raw, -1) {
-		mod := m[1]
-		if mod == "Control" {
-			mod = "Ctrl"
-		}
-		parts = append(parts, mod)
-	}
-	if key := hotkeyModifier.ReplaceAllString(raw, ""); key != "" {
-		parts = append(parts, strings.ToUpper(key[:1])+key[1:])
-	}
-	return strings.Join(parts, "+")
+	return body.Hotkey, body.HotkeyStatus, body.HotkeyNote, nil
 }
 
 // pingDaemon sends a single /ping with a short timeout.
@@ -348,7 +347,7 @@ func awaitDaemon() bool {
 				probe.Close()
 				slog.Info("daemon not found, spawning background process")
 				if err := spawnHiddenDaemon(); err != nil {
-					reportFailure(fmt.Sprintf("June could not start its daemon: %v", err))
+					reportFailure(fmt.Sprintf("June couldn't start (%v).", err))
 					return false
 				}
 				spawned = true
@@ -356,7 +355,7 @@ func awaitDaemon() bool {
 				deadline = time.Now().Add(daemonWait)
 			case !portInUse(err):
 				// A port the daemon cannot bind, such as one inside a range Hyper-V or WSL reserved, would make a spawned daemon exit at once; trying the bind here says what is actually wrong.
-				reportFailure("June could not start its daemon: " + bindFailure(DaemonPort, err))
+				reportFailure("June couldn't start: " + bindFailure(DaemonPort, err))
 				return false
 			case !looked:
 				looked = true
@@ -369,7 +368,7 @@ func awaitDaemon() bool {
 				_, holder, holderIsJune, known = describePortHolder(DaemonPort)
 				// A program that is plainly not June will never answer as June, so there is nothing to wait ten seconds for.
 				if known && !holderIsJune {
-					reportFailure(fmt.Sprintf("June could not start its daemon: port %s is held by %s, which is not June. Close it and run june again; JUNE_PORT starts June on another port, but the desktop window only talks to 6942.", DaemonPort, holder))
+					reportFailure(fmt.Sprintf("June couldn't start because %s is using the port June needs (%s). Close %s, then open June again.", holder, DaemonPort, holder))
 					return false
 				}
 			}
@@ -393,16 +392,16 @@ func awaitDaemon() bool {
 	}
 	waited := int(time.Since(began).Round(time.Second).Seconds())
 	if spawned {
-		reportFailure(fmt.Sprintf("June started its daemon but it did not answer within %d seconds; why is in %s.", waited, filepath.Join(config.DataDir(), "june.log")))
+		reportFailure(fmt.Sprintf("June didn't finish starting within %d seconds. The reason is in %s.", waited, filepath.Join(config.DataDir(), "june.log")))
 		return false
 	}
 	switch {
 	case holderIsJune:
-		reportFailure(fmt.Sprintf("June could not start its daemon: port %s is held by %s, a June daemon that has not answered for %d seconds; %s, then run june again.", DaemonPort, holder, waited, stopDaemonHint))
+		reportFailure(fmt.Sprintf("Another June (%s) is stuck and hasn't answered for %d seconds. To fix it, %s, then open June again.", holder, waited, stopDaemonHint))
 	case holder != "":
-		reportFailure(fmt.Sprintf("June could not start its daemon: port %s is held by %s, which has not answered as June for %d seconds. If it is a stuck June, %s; otherwise close it. Then run june again.", DaemonPort, holder, waited, stopDaemonHint))
+		reportFailure(fmt.Sprintf("%s is using the port June needs (%s) and hasn't answered for %d seconds. If it's a stuck June, %s; otherwise close it. Then open June again.", holder, DaemonPort, waited, stopDaemonHint))
 	default:
-		reportFailure(fmt.Sprintf("June could not start its daemon: port %s is held by a program that has not answered as June for %d seconds, a stuck June daemon or another program. If it is June, %s; otherwise close it. Then run june again.", DaemonPort, waited, stopDaemonHint))
+		reportFailure(fmt.Sprintf("Another program is using the port June needs (%s) and hasn't answered for %d seconds. If it's a stuck June, %s; otherwise close it. Then open June again.", DaemonPort, waited, stopDaemonHint))
 	}
 	return false
 }
@@ -458,11 +457,11 @@ func otherAccountMessage(port, account, program string, isJune bool) string {
 	}
 	switch {
 	case isJune:
-		return fmt.Sprintf("June is already running for %s. For now only one person on a computer can use June at a time, because every June listens on the same port (%s). To use June here, switch to %s and quit June from its tray icon (or sign %s out), then open June again.", who, port, where, them)
+		return fmt.Sprintf("June is already running for %s. Only one person on a computer can use June at a time. To use it here, switch to %s and quit June from its tray icon (or sign %s out), then open June again.", who, where, them)
 	case program != "":
-		return fmt.Sprintf("June could not start: port %s, which every June listens on, is held by %s, a program running for %s. It is not June, and only that account can close it. To use June here, switch to %s and close %s (or sign %s out), then open June again.", port, program, who, where, program, them)
+		return fmt.Sprintf("June couldn't start because %s, running for %s, is using the port June needs (%s). Only that account can close it. Switch to %s and close %s (or sign %s out), then open June again.", program, who, port, where, program, them)
 	}
-	return fmt.Sprintf("June could not start: port %s, which every June listens on, is held by a program running for %s, most likely their June. To use June here, switch to %s and quit June from its tray icon (or sign %s out), then open June again.", port, who, where, them)
+	return fmt.Sprintf("June couldn't start because a program running for %s, most likely their June, is using the port June needs (%s). Switch to %s and quit June from its tray icon (or sign %s out), then open June again.", who, port, where, them)
 }
 
 // checkDaemonBuildMismatch GETs url (the daemon's /ping) and compares its build identity against this process's own (see sameBuild). They disagree when the daemon has been running since before the file it was started from was last overwritten — i.e. a rebuild happened and the daemon is still running the old code — or when it was started from another build altogether. Which of the two is newer is not known, so the warning says "different", not "older". Returns "" (no warning) on any failure or an empty/matching body — this is a diagnostic, never a reason to block startup.

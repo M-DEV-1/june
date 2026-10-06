@@ -48,6 +48,8 @@ type routeDependencies struct {
 	restartBlocker func() string
 	// busy is what restartBlocker reads besides the recorder and the downloader; the routes fill in the voice session's and the dictation's parts.
 	busy *busyState
+	// hotkeys is the shortcut record, made by startDaemonServices because its shutdown lets go of the shortcut. A second daemon on a port of its own (a test, a dry run) gets one that leaves the desktop's shortcut alone (see ipc.Hotkeys.HandsOff).
+	hotkeys *ipc.Hotkeys
 }
 
 // featureStopBound is how long the shutdown waits for local-feature jobs to stop. Moving a component into place is a rename on one volume, so the bound is for an archive part-way through being unpacked or a smoke test just started.
@@ -136,7 +138,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 		w.Write([]byte("paused"))
 	}))
 
-	// While observation waits for first-run setup POST /resume answers 409 {"error":"setup_not_done"}: nothing is observed until then, as the installer's privacy notice promises, and finishing setup is what turns observation on. The trays open the window on setup instead (see clickPauseItem). With the window turned off there is no setup to finish, so a resume is the user's own consent and is taken (see setupWaits).
+	// While observation waits for first-run setup POST /resume answers 409 {"error":"setup_not_done"}: nothing is observed until then, as the installer's privacy notice promises, and finishing setup is what turns observation on. The trays open the window on setup instead (see resumeFromTray). With the window turned off there is no setup to finish, so a resume is the user's own consent and is taken (see setupWaits).
 	mux.HandleFunc("POST /resume", auth(func(w http.ResponseWriter, r *http.Request) {
 		if setupWaits() {
 			writeLifecycleJSON(w, http.StatusConflict, map[string]string{"error": "setup_not_done", "message": "June starts watching once setup is finished."})
@@ -220,8 +222,13 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 	ipc.WarmModelCaches(nil)
 	mux.HandleFunc("/brains", auth(ipc.Brains(liveConfig, brainLimits)))
 	mux.HandleFunc("POST /overlay", auth(ipcServer.Overlay))
+	// The shortcut that shows the hover, the same on both systems: GET /hotkey/check says whether one is free, POST /settings {"hotkey"} changes it, and POST /hotkey/status is the Windows window saying whether it could register one. Route bodies are in internal/ipc/hotkey.go.
+	hotkeys := d.hotkeys
+	hotkeys.Start()
+	mux.HandleFunc("GET /hotkey/check", auth(hotkeys.CheckRoute))
+	mux.HandleFunc("POST /hotkey/status", auth(hotkeys.StatusRoute))
 	// The window's start-at-sign-in switch posts here too, and only cmd can change the login entry (see withAutostartSetting).
-	mux.HandleFunc("/settings", auth(withAutostartSetting(liveConfig, ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime, brainLimits))))
+	mux.HandleFunc("/settings", auth(withAutostartSetting(liveConfig, ipc.Settings(config.DataDir(), liveConfig, appConfig.Meetings.OfferEnabled() || appConfig.Meetings.AutoRecord, daemon.IsPaused, startTime, brainLimits, hotkeys))))
 	mux.HandleFunc("/usage", auth(ipc.Usage(store, appConfig.DailyTokenBudgetFor, appConfig.ExaMonthlyRequests, brainLimits)))
 
 	// Quitting and restarting from the window and the installer (lifecycle.go), first-run setup, the local-features downloader and the updater. The last three report progress on the same /events stream as everything else.
@@ -237,6 +244,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 		ResumeTracking: pauses.resume,
 		Server:         ipcServer,
 		RestartBlocker: d.restartBlocker,
+		Hotkeys:        hotkeys,
 	})
 	// Every setup route but the read can restart June on the user's behalf, saving the key above all, and the window they came from expects to come back (see restartAsks).
 	for pattern, h := range setup {

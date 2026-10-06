@@ -33,15 +33,13 @@ import {
   type UsageWindow,
   type Voice,
 } from "./api";
-import { bytes, cachedInput, compact, hhmm, hotkeyKeys, modelEffort, perQuestion, tokens, took } from "./format";
+import { bytes, cachedInput, compact, hhmm, modelEffort, perQuestion, tokens, took } from "./format";
+import { ShortcutRow } from "./hotkey";
 import { AutostartSwitch, BrainChoices, GeminiKey } from "./onboarding";
 import { FeatureList } from "./onboarding-features";
-import { Blank, BrainPicker, Group, HEAD, NO_SHORTCUT, ON_WINDOWS, PageHeader, Reading, Scroller, SectionHeading, TAIL, useHotkeyUnavailable, useWide } from "./parts";
+import { Blank, BrainPicker, Group, HEAD, ON_WINDOWS, PageHeader, Reading, Scroller, SectionHeading, TAIL, useWide } from "./parts";
 import { settings as settingsUi, ui, useAppDispatch, useAppSelector, type Theme } from "./store";
 import { UpdateStatus } from "./update";
-
-/** The keys the installer registers, drawn when the daemon reports no accelerator of its own. */
-const INSTALLED_HOTKEY = ["Ctrl", "Alt", "Space"];
 
 /** What each brain is, in a line a person can read. The daemon's own notes are written for whoever maintains June — a command to run, a file to edit, a policy to cite — so the window says it in its own words, and says nothing for a brain it has no line for. */
 const BRAIN_NOTES: Record<string, string> = {
@@ -190,7 +188,7 @@ function VoiceSection({ geminiKey }: { geminiKey?: boolean }) {
   return (
     <section className="mt-10">
       <SectionHeading>Voice</SectionHeading>
-      <p className="mb-3 text-meta text-muted-foreground">Heard the next time a live voice session starts, not the one already running — the daemon reads this when it dials.</p>
+      <p className="mb-3 text-meta text-muted-foreground">Takes effect the next time you talk to June out loud.</p>
       {/* Said before the play button is pressed rather than after: with no key, talking out loud and hearing a voice you have not played before both need one. */}
       {geminiKey === false ? <p className="mb-3 text-meta text-muted-foreground">Talking to June out loud, and hearing a voice you haven't played before, need a Gemini key. Add one under Brain.</p> : null}
       <Group>
@@ -397,8 +395,7 @@ export function UsageLedger({ usage, up }: { usage?: Usage; up: boolean }) {
         </div>
         {cache.has && cache.input > 0 ? (
           <p className="mt-3 text-meta text-muted-foreground">
-            Of {tokens(cache.input)} tokens sent in the calls below, {tokens(cache.cached)} came back out of the provider's cache and {tokens(Math.max(0, cache.input - cache.cached))} were read
-            afresh.
+            Of {tokens(cache.input)} tokens sent in these calls, {tokens(cache.cached)} were reused and {tokens(Math.max(0, cache.input - cache.cached))} were new.
           </p>
         ) : null}
         {tight ? (
@@ -499,7 +496,6 @@ export function SettingsScreen() {
   const [pickBrain] = usePickBrainMutation();
   const [setCapture] = useSetCaptureMutation();
   const [saveSettings] = useSaveSettingsMutation();
-  const hotkeyGone = useHotkeyUnavailable();
   const [wide, pane] = useWide();
   // Where the hover opens, kept in the localStorage key both windows share rather than on the daemon; read once on mount, same as the hover itself re-reads it on every open.
   const [hoverPosition, setHoverPosition] = useState<HoverPosition>(() => storedHoverPosition());
@@ -513,9 +509,6 @@ export function SettingsScreen() {
     }
   };
 
-  // The daemon reads the accelerator live off gsettings; the keys the installer registers are the fallback for a daemon that reports none.
-  const live = hotkeyKeys(daemon?.hotkey ?? "");
-  const keys = live.length ? live : INSTALLED_HOTKEY;
   // /status is the live answer and /settings is what was true when the page was read, so the live one wins when it is there.
   const watching = tracker ? !tracker.paused : (daemon?.capture_enabled ?? false);
   const pausedUntil = tracker?.paused ? (tracker.paused_until ?? "") : "";
@@ -583,22 +576,14 @@ export function SettingsScreen() {
                     </TabsList>
                   </Tabs>
                 </Row>
-                {/* Another program holding the keys leaves them doing nothing, so the row says so, and where June opens from instead, rather than drawing keys that will not work. */}
-                <Row label="Hotkey" hint={hotkeyGone ? NO_SHORTCUT : "the shortcut that opens this window"}>
-                  <div className={`flex gap-1 ${hotkeyGone ? "line-through opacity-60" : ""}`}>
-                    {keys.map((k) => (
-                      <kbd key={k} className="rounded-xs border border-hairline-strong px-1.5 py-0.5 text-micro text-muted-foreground uppercase">
-                        {k}
-                      </kbd>
-                    ))}
-                  </div>
-                </Row>
+                {/* The keys GET /settings says are in effect, whether they work, and the editor to pick others. */}
+                <ShortcutRow />
                 {setup ? (
-                  <Row label={ON_WINDOWS ? "Start with Windows" : "Start when you log in"} hint="June opens in the background when you sign in, so it is always keeping notes">
+                  <Row label={ON_WINDOWS ? "Start with Windows" : "Start when you log in"} hint="June starts when you sign in, so it's always keeping notes">
                     <AutostartSwitch on={setup.autostart} label={ON_WINDOWS ? "Start with Windows" : "Start when you log in"} />
                   </Row>
                 ) : null}
-                <Row label="Watching the screen" hint={pausedUntil ? `Paused until ${hhmm(pausedUntil)} — it starts again by itself` : "what June sees is what it can remember"}>
+                <Row label="Watching the screen" hint={pausedUntil ? `Paused until ${hhmm(pausedUntil)}. It starts again by itself.` : "what June sees is what it can remember"}>
                   <Switch checked={watching} aria-label="Watching the screen" onCheckedChange={(on) => void watch(on)} />
                 </Row>
                 {daemon?.meetings_offer ? (
@@ -607,8 +592,8 @@ export function SettingsScreen() {
                     label="Offer to record calls"
                     hint={
                       daemon.meetings_offer === "ask" && !daemon.meetings_enabled
-                        ? "June starts asking the next time it starts — after a restart, or when you next sign in"
-                        : "when another app uses the microphone for a while, June asks whether to record the call"
+                        ? "June starts asking after it restarts"
+                        : "when another app uses the microphone for a while, June asks to record the call"
                     }
                   >
                     <Tabs value={daemon.meetings_offer} activationMode="manual" onValueChange={(v) => void save({ meetings_offer: v === "off" ? "off" : "ask" })}>
@@ -638,7 +623,7 @@ export function SettingsScreen() {
                 </div>
               ) : null}
               <div className="border-b">
-                <Row label="Show Claude plan usage" hint="Reads your Claude Code login's usage from an undocumented Anthropic endpoint. Turn off if you would rather it did not.">
+                <Row label="Show Claude plan usage" hint="Uses Claude Code's sign-in to read how much of your plan is left. Anthropic doesn't officially offer this. Turn it off if you'd rather not.">
                   <Switch
                     checked={daemon?.claude_usage_from_login ?? true}
                     aria-label="Show Claude plan usage"
@@ -649,7 +634,7 @@ export function SettingsScreen() {
               {daemon?.allow_fallback !== undefined ? (
                 <div className="border-b">
                   {/* The daemon reads this for background work only (agent.DutyFallbackAllowed); a question you ask is still handed on when the AI you picked is out of allowance or signed out, so the hint names what the switch covers and promises nothing about questions. */}
-                  <Row label="If your chosen AI can't answer, try my other signed-in AIs" hint="Covers June's background work: tidying its notes and writing up meetings. On, that can use up the allowance on your other plans; off, only the AI you picked does it.">
+                  <Row label="If your chosen AI can't answer, try my other signed-in AIs" hint="For June's background work, like tidying notes and writing up meetings. When on, this can use up your other plans.">
                     <Switch checked={daemon.allow_fallback} aria-label="If your chosen AI can't answer, try my other signed-in AIs" onCheckedChange={(on) => void save({ allow_fallback: on })} />
                   </Row>
                 </div>
@@ -677,7 +662,7 @@ export function SettingsScreen() {
                       {b.signed_in ? (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {(b.models ?? []).length === 0 ? (
-                            <span className="text-meta text-muted-foreground">no model choice exposed</span>
+                            <span className="text-meta text-muted-foreground">no models to pick</span>
                           ) : (
                             // "" leads the row as "default model": a brain nobody pinned a model for runs on its own default, which is the chip lit for it, and pressing it is the way back to that after pinning one. Lighting the first listed model instead claimed a pin that was never made.
                             ["", ...b.models].map((m) => (
@@ -720,7 +705,7 @@ export function SettingsScreen() {
             <SectionHeading>About June</SectionHeading>
             <Group>
               <div className="divide-y">
-                <Row label="Version" hint={daemon?.update_check === false ? "automatic checks are off; Check now still asks" : "June looks for a newer one once a day"}>
+                <Row label="Version" hint={daemon?.update_check === false ? "automatic checks are off; Check now still works" : "June looks for a newer one once a day"}>
                   <UpdateStatus version={setup?.version || daemon?.version || ""} />
                 </Row>
                 {daemon?.update_check !== undefined ? (
@@ -734,7 +719,7 @@ export function SettingsScreen() {
 
           {/* The ledger is the last section of this page rather than a destination of its own, and it opens on the figures and the week's bars rather than on a table. */}
           <section className="mt-10">
-            <SectionHeading aside="counts, not prices — the daemon reports no money">Token use</SectionHeading>
+            <SectionHeading aside="counts, not prices">Token use</SectionHeading>
             <UsageLedger usage={usage} up={!isError} />
           </section>
         </Reading>

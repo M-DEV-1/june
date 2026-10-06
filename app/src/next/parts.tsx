@@ -9,14 +9,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
-import { AUTOMATIC_BRAIN, hotkeyFailed, useOpenUrlMutation, usePickBrainMutation, type Brain, type UsageLimit } from "./api";
+import { AUTOMATIC_BRAIN, useOpenUrlMutation, usePickBrainMutation, type Brain, type UsageLimit } from "./api";
 import { atBottom, hhmm, windowLabel } from "./format";
 import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type Queries } from "./store";
-import { DAEMON_HOST_PORT } from "./daemon-url";
-
-/** Where the daemon listens, named once so what the offline pane says cannot drift from what the window actually calls. */
-export const DAEMON_ADDRESS = DAEMON_HOST_PORT;
 
 /** The one reading column the whole window sets its text in: 68 characters at 15px, centred, with the same margins at every window width. A wider window gets wider margins rather than bigger text, which is why nothing here changes with a breakpoint. Defined in index.css so the rule lives with the other tokens. */
 export const MEASURE = "measure";
@@ -101,24 +97,6 @@ export function useFollowSelection(container: RefObject<HTMLElement | null>, id?
 /** Whether this window runs on Windows, for the sentences that name the tray, the Start menu or Windows' own settings. */
 export const ON_WINDOWS = typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
 
-/** What the window says in place of the shortcut's keys when another program holds them. Windows 11 tucks a new tray icon behind the ^ by the clock, so there the sentence says where to look. */
-export const NO_SHORTCUT = `Shortcut unavailable — open June from the tray${ON_WINDOWS ? " (the June icon by the clock; click ^ if you don't see it)" : ""}.`;
-
-/** Whether the shortcut that opens June is unavailable because another program already holds it. Input: none. Output: true once the window has said so. Asked once per mount: the window registers the shortcut only when it starts, so the answer cannot change while it runs. */
-export function useHotkeyUnavailable(): boolean {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let live = true;
-    void hotkeyFailed().then((f) => {
-      if (live) setFailed(f);
-    });
-    return () => {
-      live = false;
-    };
-  }, []);
-  return failed;
-}
-
 /** Opens Settings scrolled to one of its sections, for the actions that fix a problem the window says somewhere else. Input: none. Output: the function, taking the section's id ("brain", "local-features"). */
 export function useOpenSettingsAt(): (section: string) => void {
   const dispatch = useAppDispatch();
@@ -143,7 +121,7 @@ export function useOpenLink(): (href: string) => void {
 export function Nothing({ up, empty, loading }: { up: boolean; empty: string; loading?: boolean }) {
   const refused = useAppSelector((s) => s.progress.refused);
   const state = loading ? "thinking" : up ? "watching" : refused ? "refused" : "asleep";
-  const line = loading ? "Looking…" : up ? empty : refused ? "The daemon refused this window's key." : "Not connected.";
+  const line = loading ? "Looking…" : up ? empty : refused ? "This window lost touch with June. Reopen it." : "Not connected.";
   return (
     <div className="flex flex-col items-center gap-2 px-2 py-6 text-center">
       <Face state={state} className="text-title" />
@@ -156,14 +134,14 @@ export function Nothing({ up, empty, loading }: { up: boolean; empty: string; lo
 export function Blank({ up, empty, hint, action, loading }: { up: boolean; empty: string; hint?: string; action?: ReactNode; loading?: boolean }) {
   const refused = useAppSelector((s) => s.progress.refused);
   const state = loading ? "thinking" : up ? "watching" : refused ? "refused" : "asleep";
-  const title = loading ? "Looking…" : up ? empty : refused ? "June's daemon refused this window's key" : "Nothing is answering";
+  const title = loading ? "Looking…" : up ? empty : refused ? "This window lost touch with June" : "June isn't answering";
   const under = loading
     ? undefined
     : up
       ? hint
       : refused
-        ? "The daemon is running, but on a different key from the one this window holds. Reopen the window, or restart June, so it reads the current one."
-        : `June's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
+        ? "June is running, but this window is out of date. Close it and open it again, or restart June."
+        : "June isn't running right now. This window keeps trying and fills in once June is back.";
   return (
     <div className="m-auto flex max-w-[46ch] flex-col items-center gap-3 px-8 py-12 text-center">
       <Face state={state} className="text-title" />

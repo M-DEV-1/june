@@ -119,13 +119,13 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			paused := c.paused
 			cfg := c.cfg
-			srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&cfg, nil, noopSave), c.meetingsEnabled, func() bool { return paused }, startedAt, nil))
+			srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&cfg, nil, noopSave), c.meetingsEnabled, func() bool { return paused }, startedAt, nil, nil))
 			defer srv.Close()
 
 			var got SettingsView
 			getJSON(t, srv, "/", &got)
-			// The hotkey is whatever the platform answers (Windows always reports the chord its window registers), and TestSettings_Hotkey covers it.
-			c.want.Hotkey = windowHotkey()
+			// No shortcut record is handed in, so nothing is known about the shortcut.
+			c.want.HotkeyStatus = HotkeyUnknown
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("Settings() = %+v, want %+v", got, c.want)
 			}
@@ -138,7 +138,7 @@ func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	withFakeGsettings(t, noCustomKeybindings)
 	cfg := &config.JuneConfig{}
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.ReadConfig, config.SaveConfig), false, nil, time.Now(), nil))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.ReadConfig, config.SaveConfig), false, nil, time.Now(), nil, nil))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"claude_usage_from_login":false}`))

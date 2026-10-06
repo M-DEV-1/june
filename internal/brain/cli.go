@@ -101,12 +101,12 @@ func AgyCLI(binary string, timeoutSeconds int, model ...string) Brain {
 func agyDuty(ctx context.Context, binary string, timeoutSeconds int, model, prompt string) (text, denied string, err error) {
 	env, dir, remove, err := agent.AgyDutyHome()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%w: %w", agent.ErrCouldNotRun, err)
 	}
 	defer remove()
 	out, err := runCLI(ctx, binary, timeoutSeconds, agyArgs(model), agyTurn(prompt), agyResultEvent, cliPlace{env: env, dir: dir})
 	if err != nil {
-		return "", "", err
+		return "", "", agyRunError(err)
 	}
 	var res struct {
 		Status        string `json:"status"`
@@ -144,6 +144,18 @@ func agyDuty(ctx context.Context, binary string, timeoutSeconds int, model, prom
 		}
 	}
 	return strings.TrimSpace(res.Response), strings.Join(names, ", "), nil
+}
+
+// agyRunError is the error an agy duty run that exited before answering becomes, so the duty is handed to the next brain with a reason rather than stopping on "agy: exit status 1", which is all four failed duties of 2026-10-06 said: what agy said on stderr as it stopped (see agent.AgyStderrError), or agent.ErrNoAnswer when it died without saying. Input: runCLI's error. Output: the error; a timeout or a stop is returned as it came.
+func agyRunError(err error) error {
+	var exit *cliExitError
+	if !errors.As(err, &exit) {
+		return err
+	}
+	if said := agent.AgyStderrError(exit.stderr); said != nil {
+		return said
+	}
+	return fmt.Errorf("%w: agy stopped before it answered: %w", agent.ErrNoAnswer, err)
 }
 
 // GrokCLI answers by running `grok -p`, under the Grok login the machine already has — also a paid plan with a pro default model. Every tool is denied ('--deny *'), because the prompt carries text nobody vetted and these duties need none.
@@ -304,7 +316,7 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 		kill()
 		if err := cmd.Wait(); err != nil {
 			slog.Debug("a brain CLI exited with an error", "binary", name, "stderr", util.LogHead(stderr.String()))
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return nil, &cliExitError{name: name, err: err, stderr: stderr.String()}
 		}
 		return r.out, nil
 	case <-ctx.Done():
@@ -313,9 +325,54 @@ func runCLI(ctx context.Context, binary string, timeoutSeconds int, args []strin
 		if err := parent.Err(); err != nil {
 			return nil, fmt.Errorf("%s: stopped: %w", name, err)
 		}
-		return nil, fmt.Errorf("%s timed out after %s (stderr: %s)", name, timeout, util.LogHead(stderr.String()))
+		// The reader hands back what it read once the kill closes the pipe; the bound is for a pipe something outside the process group still holds.
+		var printed []byte
+		select {
+		case r := <-done:
+			printed = r.out
+		case <-time.After(2 * time.Second):
+		}
+		return nil, fmt.Errorf("%s timed out after %s (stderr: %s; stdout: %s)", name, timeout, util.LogHead(stderr.String()), printedShape(printed))
 	}
 }
+
+// printedShape describes what a child had printed on stdout when it was killed, with none of the text in it: how much, and the event its last whole line was with the names of the fields that event carried. A timed-out agy run with nothing on stderr said nothing else, and one that had printed nothing is a different fault from one still streaming its answer: on 2026-10-06 agy's own log went quiet 17 seconds into a dreaming duty, yet its conversation store was written to until 17 seconds before June's five-minute limit, and June's log said only "agy timed out after 5m0s (stderr: )". Input: stdout so far. Output: a short description for a log line.
+func printedShape(out []byte) string {
+	out = bytes.TrimSpace(out)
+	if len(out) == 0 {
+		return "nothing"
+	}
+	lines := bytes.Split(out, []byte("\n"))
+	shape := fmt.Sprintf("%d lines, %d bytes", len(lines), len(out))
+	// The last line can be cut off mid-write by the kill, so the last one that reads as an event is the one described.
+	for i := len(lines) - 1; i >= 0; i-- {
+		var line map[string]json.RawMessage
+		var event string
+		if json.Unmarshal(lines[i], &line) != nil || json.Unmarshal(line["event"], &event) != nil || event == "" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		json.Unmarshal(line[event], &fields)
+		names := make([]string, 0, len(fields))
+		for k := range fields {
+			names = append(names, k)
+		}
+		slices.Sort(names)
+		return fmt.Sprintf("%s, the last event %q, line %d [%s]", shape, util.RunesEllipsis(event, 40), i+1, util.RunesEllipsis(strings.Join(names, " "), 120))
+	}
+	return shape + ", no event line"
+}
+
+// cliExitError is a child that exited with an error before giving a whole answer. Its text is the exit status alone, for the reason runCLI gives; the stderr is kept beside it for a caller that reads its own CLI's words out of it (see agyRunError), and Error never prints it.
+type cliExitError struct {
+	name   string
+	err    error
+	stderr string
+}
+
+func (e *cliExitError) Error() string { return e.name + ": " + e.err.Error() }
+
+func (e *cliExitError) Unwrap() error { return e.err }
 
 // cliPlace is where and under what environment runCLI starts a child. The zero value is the daemon's own environment in the temp directory, which is what claude and grok get; an agy duty gets a throwaway HOME and an empty workspace of its own.
 type cliPlace struct {

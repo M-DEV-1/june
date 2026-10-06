@@ -209,7 +209,7 @@ function SidebarNotice({ live, notice, now }: { live?: LiveNotice; notice?: { te
 /** What stands where the chat list would be when there is nothing in it. Input: whether the daemon answered, how many chats it has in total, and what is typed in the search box. Output: the one line. */
 function NoChats({ up, total, query }: { up: boolean; total: number; query: string }) {
   const refused = useAppSelector((s) => s.progress.refused);
-  const line = !up ? (refused ? "The daemon refused this window's key." : "Not connected.") : total ? `Nothing matches “${query}”.` : "No chats yet.";
+  const line = !up ? (refused ? "This window lost touch with June. Reopen it." : "Not connected.") : total ? `Nothing matches “${query}”.` : "No chats yet.";
   return <p className="px-4 py-8 text-ui text-muted-foreground group-data-[collapsible=icon]:hidden">{line}</p>;
 }
 

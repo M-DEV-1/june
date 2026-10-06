@@ -140,6 +140,27 @@ fn read_token() -> Option<String> {
     }
 }
 
+/// Sends one small JSON body to a daemon route and reads back the status line. Input: the path and the body. Output: the status line, such as "HTTP/1.1 204 No Content", or the error that stopped the request. The connection is closed after the one answer, so nothing here has to read a body. Only Windows tells the daemon anything this way (see report_hotkey in lib.rs).
+#[cfg(windows)]
+pub(crate) fn post_json(path: &str, body: &str) -> std::io::Result<String> {
+    let token = read_token().ok_or_else(|| std::io::Error::other("no ipc token yet"))?;
+    let address = format!("{DAEMON_HOST}:{DAEMON_PORT}");
+    let target = address
+        .parse()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad daemon address"))?;
+    let mut socket = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)?;
+    socket.set_read_timeout(Some(CONNECT_TIMEOUT))?;
+    write!(
+        socket,
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nX-June-Token: {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    socket.flush()?;
+    let mut status = String::new();
+    BufReader::new(socket).read_line(&mut status)?;
+    Ok(status.trim().to_string())
+}
+
 /// Opens the daemon's /events stream and reads it until it ends, handing every event to the overlay window. Input: the app handle and the IPC token. Output: Ok when the stream closed cleanly, an error when it could not be opened or the connection broke; either way the caller dials again.
 fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
     let address = format!("{DAEMON_HOST}:{DAEMON_PORT}");
@@ -185,6 +206,9 @@ fn read_stream(app: &AppHandle, token: &str) -> std::io::Result<()> {
 
     // One line per successful dial, so the window's log shows whether the drawing layer was ever subscribed when a drawing seems not to have appeared.
     eprintln!("june: overlay event stream: connected");
+    // A daemon that has just started, or restarted, knows nothing about the shortcut this window holds, so it is told again on every connect.
+    #[cfg(windows)]
+    crate::hotkey_changed(app);
 
     let handing = hand_over(app.clone());
 

@@ -151,7 +151,7 @@ func systemdMainProcess() bool {
 }
 
 // stopDaemonHint tells the user how to end a running daemon.
-const stopDaemonHint = "quit it from the tray or `pkill june`"
+const stopDaemonHint = "quit June from its tray icon (or run `pkill june`)"
 
 // portInUse reports whether a failed bind found the port held by another socket, which for June's port is almost always another daemon.
 func portInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }

@@ -277,7 +277,7 @@ fn pid_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("window.pid"))
 }
 
-/// Writes this process's pid to <data dir>/window.pid and toggles the window whenever SIGHUP arrives. A Wayland session never delivers a global key grab to a hidden client, so the desktop's own keybinding (GNOME custom shortcut on Ctrl+Alt+Space) runs `kill -HUP $(cat window.pid)` instead. SIGHUP because JavaScriptCore inside the webview owns SIGUSR1 and SIGUSR2 for its own thread signalling, and chaining into its handler segfaults. Input: the app handle. Output: nothing; a pid file that cannot be written is logged and the signal thread still runs.
+/// Writes this process's pid to <data dir>/window.pid and toggles the window whenever SIGHUP arrives. A Wayland session never delivers a global key grab to a hidden client, so the desktop's own keybinding (the GNOME custom shortcut the daemon keeps on the user's chosen keys) runs `kill -HUP $(cat window.pid)` instead. SIGHUP because JavaScriptCore inside the webview owns SIGUSR1 and SIGUSR2 for its own thread signalling, and chaining into its handler segfaults. Input: the app handle. Output: nothing; a pid file that cannot be written is logged and the signal thread still runs.
 #[cfg(unix)]
 fn listen_for_toggle_signal(app: AppHandle) {
     if let Some(path) = pid_path() {
@@ -307,59 +307,150 @@ fn listen_for_toggle_signal(app: AppHandle) {
     });
 }
 
-/// What became of registering the global shortcut: unset until register_toggle_hotkey has run, and always on Linux, where the desktop's own keybinding is the shortcut and this process never learns whether it works; Err with the reason when another program already holds it.
-static HOTKEY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+/// The shortcut June opens with when the user has not picked one. It is the only default: when another program holds it, June has no shortcut until the user picks one in Settings, rather than quietly taking keys nobody was told about.
+#[cfg(windows)]
+const DEFAULT_HOTKEY: &str = "Ctrl+Alt+Space";
 
-/// Whether the shortcut that opens June is missing, and why.
-#[derive(serde::Serialize)]
-struct HotkeyStatus {
-    failed: bool,
-    reason: String,
-}
+/// The shortcut this window holds right now: None before the first one is registered, and after one was refused. The lock also puts one change after another, so two quick changes cannot interleave their unregister and register. It is only ever taken off the main thread, because the plugin runs every register on the main thread and waits for it there.
+#[cfg(windows)]
+static HELD_HOTKEY: std::sync::Mutex<Option<tauri_plugin_global_shortcut::Shortcut>> =
+    std::sync::Mutex::new(None);
 
-/// Tauri command: whether registering the global shortcut failed. The pages ask, because setup's last screen and Settings both promise the keys, and a promise of keys that do nothing reads as June being broken; with this they say to open June from the tray instead. Input: none. Output: failed true with the reason only when registration was tried and refused.
-#[tauri::command]
-fn hotkey_status() -> HotkeyStatus {
-    match HOTKEY.get() {
-        Some(Err(reason)) => HotkeyStatus {
-            failed: true,
-            reason: reason.clone(),
-        },
-        _ => HotkeyStatus {
-            failed: false,
-            reason: String::new(),
-        },
+/// The shortcut the user picked, read from the june-config.json the daemon writes (config.ConfigPath in internal/config). Input: none. Output: its "hotkey" field, or DEFAULT_HOTKEY when that is empty or missing or the file cannot be read.
+#[cfg(windows)]
+fn configured_hotkey() -> String {
+    let picked = data_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("june-config.json")).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|config| {
+            config
+                .get("hotkey")
+                .and_then(|v| v.as_str())
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_default();
+    if picked.is_empty() {
+        DEFAULT_HOTKEY.to_string()
+    } else {
+        picked
     }
 }
 
-/// Registers Ctrl+Alt+Space as a global shortcut that runs the same toggle the SIGHUP does on Linux. Windows delivers a global hotkey to a hidden window, so it needs no desktop keybinding or pid file. Input: the app handle. Output: nothing; a shortcut another program already holds is logged, recorded for hotkey_status, and the window runs without one.
+/// Loads the global shortcut plugin, whose handler runs the same toggle the SIGHUP does on Linux, and then registers the user's shortcut. Windows delivers a global hotkey to a hidden window, so it needs no desktop keybinding or pid file. Input: the app handle. Output: nothing; a plugin that will not load is logged, reported to the daemon by hotkey_changed, and the window runs without a shortcut.
 #[cfg(windows)]
-fn register_toggle_hotkey(app: &AppHandle) {
-    use tauri_plugin_global_shortcut::{
-        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-    };
-    let hotkey = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+fn load_hotkey_plugin(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::ShortcutState;
     let plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_handler(move |app, shortcut, event| {
-            // The handler fires on release as well as on press, and toggling on both would show and hide the hover in one keystroke.
-            if shortcut == &hotkey && event.state() == ShortcutState::Pressed {
+        .with_handler(|app, _shortcut, event| {
+            // Only one shortcut is ever registered, so any press is the toggle. The handler fires on release as well as on press, and toggling on both would show and hide the hover in one keystroke.
+            if event.state() == ShortcutState::Pressed {
                 toggle(app);
             }
         })
         .build();
     if let Err(e) = app.plugin(plugin) {
         eprintln!("june: could not load the global shortcut plugin: {e}");
-        let _ = HOTKEY.set(Err(e.to_string()));
-        return;
     }
-    let registered = app
-        .global_shortcut()
-        .register(hotkey)
-        .map_err(|e| e.to_string());
-    if let Err(e) = &registered {
-        eprintln!("june: could not register Ctrl+Alt+Space: {e}");
+    hotkey_changed(app);
+}
+
+/// Takes the user's shortcut, letting go of the old one first, and tells the daemon how that went. Runs on a thread of its own, because the plugin hands every register to the main thread and waits. Called once at start, every time the daemon's event stream connects (a daemon that has just started knows nothing about the shortcut), and when the daemon says the user picked a new one. Input: the app handle. Output: nothing.
+#[cfg(windows)]
+pub(crate) fn hotkey_changed(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Held across the read of the config as well, so two changes close together cannot register the older pick last.
+        let Ok(mut held) = HELD_HOTKEY.lock() else {
+            return;
+        };
+        let wanted = configured_hotkey();
+        let result = hold_hotkey(&app, &mut held, &wanted);
+        if let Err(e) = &result {
+            eprintln!("june: could not register {wanted}: {e}");
+        }
+        report_hotkey(&wanted, &result);
+    });
+}
+
+/// Registers one shortcut in place of the one held. Input: the app handle, the held shortcut, and the accelerator to hold, such as "Ctrl+Alt+Space". Output: Ok once it is held — straight away when it already was — or Err with the reason, and then nothing is held.
+#[cfg(windows)]
+fn hold_hotkey(
+    app: &AppHandle,
+    held: &mut Option<tauri_plugin_global_shortcut::Shortcut>,
+    wanted: &str,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcut, GlobalShortcutExt, Shortcut};
+    // global_shortcut() panics when the plugin never loaded.
+    if app.try_state::<GlobalShortcut<tauri::Wry>>().is_none() {
+        return Err("the shortcut plugin did not load".to_string());
     }
-    let _ = HOTKEY.set(registered);
+    // june-config.json can be edited by hand, and the plugin would take a bare "Escape" from every app; the daemon refuses such text, but this window reads the file itself.
+    let parsed = wanted
+        .parse::<Shortcut>()
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            if usable_shortcut(&s) {
+                Ok(s)
+            } else {
+                Err(format!("{wanted} is not a shortcut June can use"))
+            }
+        });
+    if parsed.as_ref().is_ok_and(|s| *held == Some(*s)) {
+        return Ok(());
+    }
+    // Let go of the old shortcut even when the new text is refused: the user's pick has changed, and June holds none until a usable one is picked.
+    if let Some(old) = held.take() {
+        if let Err(e) = app.global_shortcut().unregister(old) {
+            eprintln!("june: could not let go of the old shortcut: {e}");
+        }
+    }
+    let shortcut = parsed?;
+    app.global_shortcut()
+        .register(shortcut)
+        .map_err(|e| e.to_string())?;
+    *held = Some(shortcut);
+    Ok(())
+}
+
+/// Whether June may take a shortcut, by the rules the daemon's ParseHotkey and the Settings editor (ruleProblem in src/next/hotkey.tsx) apply. Input: the parsed shortcut. Output: false only when it has none of Ctrl, Alt and the Windows key, unless its key is F1 to F24 with Shift or F13 to F24 alone, so it cannot take ordinary typing. Any other combination is the user's to choose, even one apps use inside their own windows (the daemon's check warns about those); whether another program already holds it is for RegisterHotKey to say.
+#[cfg(windows)]
+fn usable_shortcut(shortcut: &tauri_plugin_global_shortcut::Shortcut) -> bool {
+    use tauri_plugin_global_shortcut::Modifiers;
+    let mods = shortcut.mods;
+    if mods.intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER) {
+        return true;
+    }
+    let f_key = shortcut
+        .key
+        .to_string()
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u32>().ok())
+        .unwrap_or(0);
+    if mods.contains(Modifiers::SHIFT) {
+        return f_key >= 1;
+    }
+    f_key >= 13
+}
+
+/// Tells the daemon whether the shortcut works, on POST /hotkey/status, so Settings can say so. Input: the accelerator and how registering it went. Output: nothing; a daemon that cannot be reached is logged, and is told again when its event stream next connects.
+#[cfg(windows)]
+fn report_hotkey(hotkey: &str, result: &Result<(), String>) {
+    let error = match result {
+        Ok(()) => "",
+        Err(e) if e.contains("already registered") => "Another app is using this shortcut.",
+        Err(e) if e.contains("not a shortcut June can use") => "June can't use this shortcut.",
+        Err(_) => "Windows would not let June use this shortcut.",
+    };
+    let body = serde_json::json!({ "hotkey": hotkey, "ok": result.is_ok(), "error": error });
+    match overlay::post_json("/hotkey/status", &body.to_string()) {
+        Ok(status)
+            if status
+                .split_whitespace()
+                .nth(1)
+                .is_some_and(|code| code.starts_with('2')) => {}
+        Ok(status) => eprintln!("june: the daemon answered {status} to the shortcut report"),
+        Err(e) => eprintln!("june: could not tell the daemon about the shortcut: {e}"),
+    }
 }
 
 /// One monitor as the overlay page needs it: where its top-left corner sits on the desktop and how big it is, both in physical pixels, plus its own scale factor.
@@ -629,7 +720,7 @@ fn window_action(payload: &str) -> Option<String> {
     )
 }
 
-/// Does what a daemon event asks of this window. Input: the app handle and the JSON text of one event off the daemon's stream. Output: true when the event was one of ours and has been acted on, false for every other event, which belongs to the pages. {"type": "window", "text": "open"} shows the main app window; {"type": "window", "text": "toggle"} runs the hover's show/hide, the same thing SIGHUP from the desktop's keybinding does.
+/// Does what a daemon event asks of this window. Input: the app handle and the JSON text of one event off the daemon's stream. Output: true when the event was one of ours and has been acted on, false for every other event, which belongs to the pages. {"type": "window", "text": "open"} shows the main app window; {"type": "window", "text": "toggle"} runs the hover's show/hide, the same thing SIGHUP from the desktop's keybinding does; {"type": "window", "text": "hotkey"} takes the shortcut the user just picked.
 pub(crate) fn window_command(app: &AppHandle, payload: &str) -> bool {
     match window_action(payload).as_deref() {
         Some("open") => {
@@ -640,6 +731,12 @@ pub(crate) fn window_command(app: &AppHandle, payload: &str) -> bool {
         }
         Some("toggle") => {
             toggle(app);
+            true
+        }
+        // The user picked a new shortcut and the daemon has saved it. On Windows this window is what holds the shortcut, so it lets go of the old one and takes the new one; on Linux the desktop's own keybinding is the shortcut and the daemon changes that itself.
+        Some("hotkey") => {
+            #[cfg(windows)]
+            hotkey_changed(app);
             true
         }
         // The daemon is about to photograph the screen. June's own hover is drawn over whatever the user was looking at, so it steps off the screen for the moment the picture is taken and comes back exactly as it was; a hover that was already hidden stays hidden, which the page decides, not this.
@@ -660,8 +757,7 @@ pub fn run() {
             system_theme,
             raise,
             dock_anchor,
-            overlay_layout,
-            hotkey_status
+            overlay_layout
         ])
         // Closing a window hides it instead of quitting: June keeps running under the daemon, and the same window comes back with its state when the daemon's tray asks for it again.
         .on_window_event(|window, event| {
@@ -683,14 +779,15 @@ pub fn run() {
             arm_overlay(app.handle());
             #[cfg(target_os = "linux")]
             hush_overlay(app.handle());
+            // Before the event stream starts, because every connect of that stream reports the shortcut to the daemon, and a report sent before the plugin had loaded would say there is none.
+            #[cfg(windows)]
+            load_hotkey_plugin(app.handle());
             // The daemon's stream is read here rather than in the page, because this app's WebKit holds a trickle of response body back long enough to lose a three second ring; see overlay.rs.
             overlay::stream_events(app.handle().clone());
             arm_hover(app.handle());
             // Nothing places the window here: it starts hidden and the page positions it against the dock, on the monitor the pointer is on, immediately before every show.
             #[cfg(unix)]
             listen_for_toggle_signal(app.handle().clone());
-            #[cfg(windows)]
-            register_toggle_hotkey(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

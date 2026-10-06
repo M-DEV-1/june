@@ -38,9 +38,11 @@ type SetupDeps struct {
 	// RestartBlocker names what a restart right now would cut short: "recording" while a meeting is being recorded, "processing" while one is still being transcribed and written up, "downloading" while local features are downloading or installing, and "" when nothing would. Saving or removing the key restarts June, so both refuse while it names anything; the restart POST /setup/complete owes waits until it names nothing. nil is a daemon with nothing to protect.
 	// cmd's blocker also names what the person is in the middle of: "voice" while a conversation is open, "dictating", "acting" while a screen job is running, paused or waiting on an answer, and "asking" while an answer is being written. The key routes refuse for those the same way, and the restart setup owes waits for them and then for a quiet spell (restartQuiet).
 	RestartBlocker func() string
+	// Hotkeys is the daemon's shortcut record, which setup's last screen reads the shortcut from. nil reports none.
+	Hotkeys *Hotkeys
 }
 
-// SetupView is GET /setup.
+// SetupView is GET /setup. Hotkey, HotkeyStatus and HotkeyNote are GET /settings' own, so setup's last screen can say which keys open June, or that the user has to choose them.
 type SetupView struct {
 	Done           bool   `json:"done"`
 	Version        string `json:"version"`
@@ -49,6 +51,8 @@ type SetupView struct {
 	DefaultBrain   string `json:"default_brain"`
 	Autostart      bool   `json:"autostart"`
 	Hotkey         string `json:"hotkey"`
+	HotkeyStatus   string `json:"hotkey_status"`
+	HotkeyNote     string `json:"hotkey_note"`
 	RestartPending bool   `json:"restart_pending"`
 	DataDir        string `json:"data_dir"`
 }
@@ -127,12 +131,15 @@ func (s *setupRoutes) get(w http.ResponseWriter, r *http.Request) {
 	freshPath()
 	cfg := s.d.Config.Get()
 	home, _ := os.UserHomeDir()
+	hotkey, hotkeyStatus, hotkeyNote := s.d.Hotkeys.View()
 	view := SetupView{
 		Done:           cfg.SetupDone,
 		Version:        s.d.Version,
 		GeminiKey:      os.Getenv(geminiKeyVar) != "",
 		Autostart:      cfg.Autostart,
-		Hotkey:         readableHotkey(windowHotkey()),
+		Hotkey:         hotkey,
+		HotkeyStatus:   hotkeyStatus,
+		HotkeyNote:     hotkeyNote,
 		RestartPending: lifecycle.RestartPending(),
 		DataDir:        s.d.DataDir,
 	}
@@ -156,7 +163,7 @@ func (s *setupRoutes) saveKey(w http.ResponseWriter, r *http.Request) {
 	}
 	key := cleanKey(req.Key)
 	if !plausibleKey.MatchString(key) {
-		setupError(w, http.StatusUnprocessableEntity, "invalid_key", "That is not a Gemini API key. Copy the whole key from Google AI Studio: one line of letters, digits, dashes and underscores.")
+		setupError(w, http.StatusUnprocessableEntity, "invalid_key", "That isn't a Gemini key. Copy the whole key from Google AI Studio.")
 		return
 	}
 	s.keyMu.Lock()
@@ -227,7 +234,7 @@ func (s *setupRoutes) deleteKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := util.UpsertEnvFile(path, geminiKeyVar, ""); err != nil {
 		slog.Error("setup: could not remove the Gemini key", "file", path, "error", err)
-		setupError(w, http.StatusInternalServerError, "save_failed", "June could not remove the key on this computer. Try again in a moment.")
+		setupError(w, http.StatusInternalServerError, "save_failed", "June couldn't remove the key. Try again in a moment.")
 		return
 	}
 	os.Unsetenv(geminiKeyVar)
@@ -240,7 +247,7 @@ func (s *setupRoutes) deleteKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // keyNotSaved is the 500 a key save answers when the file could not be written. Why is in the log; the person can only try again.
-const keyNotSaved = "June could not save the key on this computer. Try again in a moment."
+const keyNotSaved = "June couldn't save the key. Try again in a moment."
 
 // restartBlocker is what RestartBlocker names, "" when there is none to ask.
 func (s *setupRoutes) restartBlocker() string {
@@ -348,7 +355,7 @@ func checkGeminiKey(ctx context.Context, key string) (status int, code, message 
 	resp, err := keyCheckClient.Do(req)
 	if err != nil {
 		slog.Info("setup: could not reach Google to check the key", "error", err)
-		return http.StatusBadGateway, "unreachable", "June could not reach Google to check the key. Check the internet connection, or save the key without checking."
+		return http.StatusBadGateway, "unreachable", "June couldn't reach Google to check the key. Check your internet, or save the key without checking."
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -512,9 +519,9 @@ func (s *setupRoutes) micSettings(w http.ResponseWriter, r *http.Request) {
 		setupError(w, http.StatusNotImplemented, "no_settings_app", "This desktop has no sound settings June knows how to open. Open your system's sound or privacy settings and check the microphone there.")
 	default:
 		slog.Error("setup: could not open the microphone settings", "error", err)
-		msg := "June could not open the microphone settings. Open your system's sound or privacy settings and check the microphone there."
+		msg := "June couldn't open the microphone settings. Open your sound or privacy settings and check the microphone there."
 		if runtime.GOOS == "windows" {
-			msg = "June could not open the microphone settings. Open Settings, then Privacy & security, then Microphone, and let desktop apps use it."
+			msg = "June couldn't open the microphone settings. Open Settings, then Privacy & security, then Microphone, and let desktop apps use it."
 		}
 		setupError(w, http.StatusInternalServerError, "open_failed", msg)
 	}
@@ -524,7 +531,7 @@ func (s *setupRoutes) micSettings(w http.ResponseWriter, r *http.Request) {
 func (s *setupRoutes) complete(w http.ResponseWriter, r *http.Request) {
 	if err := s.d.Config.Update(func(c *config.JuneConfig) { c.SetupDone = true }); err != nil {
 		slog.Error("setup: could not save setup_done", "error", err)
-		setupError(w, http.StatusInternalServerError, "save_failed", "June could not save that setup is finished. Try again in a moment.")
+		setupError(w, http.StatusInternalServerError, "save_failed", "June couldn't finish setup. Try again in a moment.")
 		return
 	}
 	if s.d.ResumeTracking != nil {
@@ -591,7 +598,7 @@ func tellSettingsReset(server *Server, aside string) {
 	slog.Info("setup: telling the user their settings file was set aside", "kept_as", aside)
 	n := Notice{
 		Title:   "June's settings were reset",
-		Body:    "June could not read its settings file, so it started fresh and kept the old one beside the new. Your memory is untouched. Check your brain and other choices in Settings.",
+		Body:    "June couldn't read its settings, so it started fresh and kept a copy of the old ones. Your memory is safe. Check your choices in Settings.",
 		Place:   "settings",
 		Kind:    "settings",
 		Actions: []NoticeButton{{Key: "done", Label: "OK"}},
@@ -609,26 +616,4 @@ func setupError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": code, "message": message})
-}
-
-// readableHotkey turns the accelerator windowHotkey reads, "<Control><Alt>space", into the "Ctrl+Alt+Space" the window shows. Output: "" when there is no hotkey.
-func readableHotkey(raw string) string {
-	var parts []string
-	for {
-		start := strings.IndexByte(raw, '<')
-		end := strings.IndexByte(raw, '>')
-		if start != 0 || end < 0 {
-			break
-		}
-		mod := raw[1:end]
-		if mod == "Control" || mod == "Primary" {
-			mod = "Ctrl"
-		}
-		parts = append(parts, mod)
-		raw = raw[end+1:]
-	}
-	if raw != "" {
-		parts = append(parts, strings.ToUpper(raw[:1])+raw[1:])
-	}
-	return strings.Join(parts, "+")
 }

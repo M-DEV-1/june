@@ -37,9 +37,9 @@ import {
   type SetupView,
 } from "./api";
 import { Face } from "./face";
-import { hotkeyKeys } from "./format";
+import { OpenJune } from "./hotkey";
 import { FeatureList, restartBlockedLine, useFeaturesUnderWay, useRestartBlocker, type UnderWay } from "./onboarding-features";
-import { Group, NO_SHORTCUT, ON_WINDOWS, useHotkeyUnavailable, useOpenLink } from "./parts";
+import { Group, ON_WINDOWS, useOpenLink } from "./parts";
 import { DRAFT_CHAT, progress, setupUi, ui, useAppDispatch, useAppSelector, type AppDispatch, type RestartWhy } from "./store";
 
 /** Where a person gets a Gemini key: Google's own page, which makes one in two clicks for any Google account. */
@@ -123,8 +123,8 @@ function keyProblem(e: unknown): KeyProblem {
       text:
         errorMessage(e) ||
         (ON_WINDOWS
-          ? "This computer already gives every program a Gemini key of its own, in Windows' environment variables, and that one always wins. Change or remove it there, then restart June."
-          : "This computer already gives every program a Gemini key of its own, in your login environment, and that one always wins. Change or remove it there, then restart June."),
+          ? "This computer already has a Gemini key set in Windows' environment variables, and that one always wins. Change or remove it there, then restart June."
+          : "This computer already has a Gemini key set in your login environment, and that one always wins. Change or remove it there, then restart June."),
     };
   if (status === 404) return { text: "This version of June can't save a key from here yet." };
   if (status === undefined) return { text: "June isn't answering. Try again in a moment." };
@@ -736,13 +736,10 @@ function DoneStep({ setup, onBack }: { setup: SetupView; onBack: () => void }) {
   const { data: daemon } = useSettingsQuery();
   const [saveSettings] = useSaveSettingsMutation();
   const [fallbackProblem, setFallbackProblem] = useState("");
-  const hotkeyGone = useHotkeyUnavailable();
   const [finishing, setFinishing] = useState(false);
   const [failed, setFailed] = useState<{ text: string; detail?: string } | undefined>(undefined);
   // The same reading as the brain screen's: a key, or a login a provider has not refused. Offering a question to a June that cannot answer it made the first thing a new person saw in Chats an error.
   const canAnswer = setup.gemini_key || (brains ? answeringLogin(brains.brains) !== undefined : setup.brain_ready);
-  // Windows' window registers Ctrl+Alt+Space itself; on Linux a hotkey is only there when GNOME's keybinding for June is, and "" from GET /setup means there is none to press.
-  const keys = hotkeyKeys(setup.hotkey || (ON_WINDOWS ? "Ctrl+Alt+Space" : ""));
   // Falling back only means something with a second way to answer: a key and a login, or two logins.
   const ways = (setup.gemini_key ? 1 : 0) + LOGINS.filter(({ id }) => brains?.brains.some((b) => b.id === id && b.signed_in)).length;
   const fallback = daemon?.allow_fallback;
@@ -804,28 +801,15 @@ function DoneStep({ setup, onBack }: { setup: SetupView; onBack: () => void }) {
     >
       <Group>
         <div className="divide-y">
+          {/* The keys GET /settings says are in effect; when another app holds them, the way to pick others is right here rather than a trip to Settings. */}
           <Fact label="Open June">
-            {hotkeyGone ? (
-              NO_SHORTCUT
-            ) : keys.length ? (
-              <span className="inline-flex flex-wrap items-center gap-1">
-                Press
-                {keys.map((k) => (
-                  <kbd key={k} className="rounded-xs border border-hairline-strong px-1.5 py-0.5 text-micro text-foreground uppercase">
-                    {k}
-                  </kbd>
-                ))}
-                from anywhere.
-              </span>
-            ) : (
-              "Open it from your apps menu whenever you need it."
-            )}
+            <OpenJune />
           </Fact>
           {/* A switch rather than a sentence: the installer's tick box for this is easy to miss, and this is the last place setup can ask. */}
           <Fact label={ON_WINDOWS ? "Starts with Windows" : "Starts when you log in"} control={<AutostartSwitch on={setup.autostart} label={ON_WINDOWS ? "Start June with Windows" : "Start June when you log in"} />}>
             {setup.autostart ? "June opens in the background when you sign in, so it is always keeping notes." : `June runs when you open it${ON_WINDOWS ? " from the Start menu" : ""}. It won't start on its own when you sign in.`}
           </Fact>
-          <Fact label="Watching your screen">Starts when you press Start using June. You can pause it any time, for a few minutes or for longer, from the button beside June's face at the top left.</Fact>
+          <Fact label="Watching your screen">Starts when you press Start using June. You can pause it any time with the button next to June's face, top left.</Fact>
           {fallback !== undefined && ways > 1 ? (
             <Fact
               label="Background work"
@@ -833,8 +817,8 @@ function DoneStep({ setup, onBack }: { setup: SetupView; onBack: () => void }) {
             >
               {/* Background work only: the daemon applies this to its own duties (agent.DutyFallbackAllowed), not to the questions a person asks. */}
               {fallback
-                ? "When the AI you picked can't do June's background work — tidying its notes, writing up meetings — your other signed-in AIs do it, which can use up their plans' allowance."
-                : "June's background work — tidying its notes, writing up meetings — is done only by the AI you picked."}
+                ? "When the AI you picked can't do June's background work, like tidying notes or writing up meetings, your other AIs do it. This can use up their plans."
+                : "Only the AI you picked does June's background work, like tidying notes and writing up meetings."}
               {fallbackProblem ? <span className="mt-1 block text-meta text-destructive">{fallbackProblem}</span> : null}
             </Fact>
           ) : null}

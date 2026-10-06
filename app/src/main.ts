@@ -981,25 +981,25 @@ function startAsk(q: string, conversation: string | undefined): void {
           dispatch({ kind: "asked", conversationId: res.conversationId });
       })
       .catch(() =>
-        offline("June's daemon stopped answering, so I could not look this up."),
+        offline("I lost my connection, so I couldn't look this up."),
       );
   } else if (mockMode) {
     scheduleAnswer(m.id);
   } else {
-    offline("June's daemon is not running, so I cannot look anything up.");
+    offline("I'm not connected right now, so I can't look anything up.");
   }
 }
 
 /** Starts a computer-use job for a goal, the "do:" counterpart to startAsk. Input: the goal in the user's own words. Output: nothing; the job's progress arrives later as "act" daemon events, matched against jobId once the POST /act reply names it. */
 function startJob(goal: string): void {
   if (!daemonUp) {
-    offline("June's daemon is not running, so I cannot start that.");
+    offline("I'm not connected right now, so I can't start that.");
     return;
   }
   jobId = undefined;
   void actStart(goal).then((id) => {
     if (!id) {
-      offline("June's daemon would not start that job.");
+      offline("I couldn't start that. Try again.");
       return;
     }
     jobId = id;

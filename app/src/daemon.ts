@@ -44,7 +44,7 @@ export async function post(path: string, body?: unknown): Promise<Response | nul
 export async function voiceStart(): Promise<string | null> {
   const res = await post("/voice/start");
   if (!res) return null;
-  if (!res.ok) throw new Error((await res.text()).trim() || "June's daemon would not start a voice session.");
+  if (!res.ok) throw new Error((await res.text()).trim() || "I couldn't start talking. Try again.");
   return ((await res.json()) as { id: string }).id;
 }
 

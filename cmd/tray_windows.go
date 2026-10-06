@@ -24,7 +24,7 @@ var trayIcon []byte
 // trayQuitWait is how long shutdown waits for the tray to remove its icon before the process exits; an icon left behind stays in the notification area until the pointer passes over it.
 const trayQuitWait = time.Second
 
-// runDaemonSupervisor on Windows starts the daemon's services, then shows a notification-area icon with the same menu as Linux: a status line, Open June, Pause/Resume Observation, Start/Stop meeting recording, and Quit June.
+// runDaemonSupervisor on Windows starts the daemon's services, then shows a notification-area icon with the same menu as Linux (see tray.go): a status line, Open June, the pause item, the meeting item, and Quit June.
 // The services start before the tray so a tray that cannot be created leaves the daemon running headless: systray only logs a failed setup and never calls onReady.
 // It returns when ctx is cancelled, when Quit June is clicked, or when Windows ends the session.
 func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
@@ -95,55 +95,98 @@ func trayMenu(ctx context.Context, tracking *tracker.Daemon, quit func()) {
 	systray.SetIcon(trayIcon)
 	systray.SetTooltip("June")
 
+	recording := func() bool { return meetingRecorder != nil && meetingRecorder.Active() }
 	// ponytail: the status line is text only; Linux draws a coloured dot, which here needs a rendered .ico per state, add one if the label alone reads poorly.
-	status := systray.AddMenuItem("Observing", "")
+	status := systray.AddMenuItem(trayStatus(tracking.IsPaused()), "")
 	status.Disable()
 	systray.AddSeparator()
 	open := systray.AddMenuItem("Open June", "")
-	pause := systray.AddMenuItem("Pause Observation", "")
-	meeting := systray.AddMenuItem(meetingLabel(meetingRecorder != nil && meetingRecorder.Active()), "")
+	// The pause item's three faces are three items, of which only the one for the moment is shown: a Windows menu item that opens a submenu cannot also be clicked, so Resume cannot be the submenu's own title.
+	pauseMenu := systray.AddMenuItem(pauseMenuLabel, "")
+	choices := make([]*systray.MenuItem, len(pauseChoices))
+	for i, c := range pauseChoices {
+		choices[i] = pauseMenu.AddSubMenuItem(c.label, "")
+	}
+	resume := systray.AddMenuItem(resumeLabel, "")
+	setup := systray.AddMenuItem(finishSetupLabel, "")
+	meeting := systray.AddMenuItem(meetingLabel(recording()), "")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit June", "")
 
 	// A recording started or stopped by anything else, such as the microphone watcher, changes the label too.
-	refreshMeeting := func() {
-		meeting.SetTitle(meetingLabel(meetingRecorder != nil && meetingRecorder.Active()))
-	}
+	refreshMeeting := func() { meeting.SetTitle(meetingLabel(recording())) }
 	if meetingRecorder != nil {
 		meetingRecorder.AddStateObserver(refreshMeeting)
 	}
 
-	// The window pauses and resumes observation through the same /pause and /resume, so the labels are drawn from the tracker's own state rather than from a flag only the tray's clicks flipped, which read "Pause" over a paused tracker and made the next click pause it again.
-	var pauseMu sync.Mutex
-	shownStatus, shownItem := "Observing", "Pause Observation" // what the items above were created with
-	refreshPause := func() {
-		pauseMu.Lock()
-		defer pauseMu.Unlock()
-		statusLabel, itemLabel := pauseLabels(tracking.IsPaused())
-		if statusLabel == shownStatus && itemLabel == shownItem {
+	// The window pauses and resumes observation through the same pause control, so the menu is drawn from the tracker's own state rather than from a flag only the tray's clicks flipped, which read "Pause" over a paused tracker and made the next click pause it again.
+	// Only the item for the mode now is shown. systray re-inserts an item it is asked to retitle, so the three are never retitled, and each is hidden or shown only on a change, since hiding one twice fails.
+	faces := map[trayMode]*systray.MenuItem{modeWatching: pauseMenu, modePaused: resume, modeSetup: setup}
+	var mu sync.Mutex
+	shownStatus := trayStatus(tracking.IsPaused())
+	shownMode := trayMode(-1)
+	refresh := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		paused := tracking.IsPaused()
+		if s := trayStatus(paused); s != shownStatus {
+			shownStatus = s
+			status.SetTitle(s)
+		}
+		mode := pauseMode(paused)
+		if mode == shownMode {
 			return
 		}
-		shownStatus, shownItem = statusLabel, itemLabel
-		status.SetTitle(statusLabel)
-		pause.SetTitle(itemLabel)
+		for m, item := range faces {
+			switch {
+			case m == mode && shownMode != -1:
+				item.Show()
+			case m != mode && (shownMode == -1 || m == shownMode):
+				item.Hide()
+			}
+		}
+		shownMode = mode
 	}
-	refreshPause()
+	refresh()
 	// ponytail: polled, because systray gives no "menu about to open" callback to redraw from and the tracker tells no one when it is paused; a pause observer on tracker.Daemon would make this event-driven.
 	pausePoll := time.NewTicker(time.Second)
 	defer pausePoll.Stop()
+
+	// The submenu's items each have a channel of their own; they are gathered into one so the loop below waits on a fixed set.
+	picked := make(chan int)
+	for i, item := range choices {
+		go func() {
+			for {
+				select {
+				case <-item.ClickedCh:
+					select {
+					case picked <- i:
+					case <-ctx.Done():
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	for {
 		select {
 		case <-open.ClickedCh:
 			go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
-		case <-pause.ClickedCh:
-			paused := tracking.IsPaused()
+		case i := <-picked:
+			pauseFromTray(pauseChoices[i].minutes)
+			refresh()
+		case <-resume.ClickedCh:
 			go func() {
-				clickPauseItem(paused)
-				refreshPause()
+				resumeFromTray()
+				refresh()
 			}()
+		case <-setup.ClickedCh:
+			go resumeFromTray()
 		case <-pausePoll.C:
-			refreshPause()
+			refresh()
 		case <-meeting.ClickedCh:
 			toggleMeeting(ctx, meetingRecorder)
 			refreshMeeting()

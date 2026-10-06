@@ -9,8 +9,8 @@ import (
 
 // The desktop window is the daemon's child (see cmd/window.go), and the tray lives in the daemon, so a tray click reaches the window through the event stream the window is already reading rather than through a second channel of its own.
 
-// windowActions are the things the window may be asked to do: open brings the main window to the front, toggle runs the hover's own show and hide, and conceal and reveal take the hover off the screen for the moment a picture of the screen is taken and put it back exactly as it was.
-var windowActions = map[string]bool{"open": true, "toggle": true, "conceal": true, "reveal": true}
+// windowActions are the things the window may be asked to do: open brings the main window to the front, toggle runs the hover's own show and hide, conceal and reveal take the hover off the screen for the moment a picture of the screen is taken and put it back exactly as it was, and hotkey has the Windows window register the shortcut GET /settings now names and report back on POST /hotkey/status (see hotkey.go).
+var windowActions = map[string]bool{"open": true, "toggle": true, "conceal": true, "reveal": true, "hotkey": true}
 
 // windowEventID is the id every window instruction carries. It is deliberately not of the "ask-N" shape, because no question caused it.
 const windowEventID = "window"

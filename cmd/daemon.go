@@ -824,6 +824,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		},
 	})
 
+	// The shortcut record is made here rather than with its routes, because a quit lets go of the shortcut.
+	hotkeys := ipc.NewHotkeys(liveConfig, ipcServer, appConfig.Window)
+	if os.Getenv("JUNE_PORT") != "" {
+		hotkeys.HandsOff()
+	}
+
 	registerDaemonRoutes(mux, routeDependencies{
 		ctx:             ctx,
 		auth:            auth,
@@ -842,6 +848,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		exeDir:          exeDir,
 		restartBlocker:  restartBlocker(features, busy),
 		busy:            busy,
+		hotkeys:         hotkeys,
 	})
 
 	server := &http.Server{
@@ -876,6 +883,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		// A quit takes the window down first, so it goes the moment it is asked to. A restart keeps it up, saying "Restarting June…", through the recording's close and the activity flush, which after a busy hour can take most of a minute: the replacement's window only comes up once this process has exited, and taking this one down first left no sign of June at all for that long.
 		if !restartWanted.Load() {
 			stopWindow()
+		}
+		// With no June to follow, the shortcut goes back to other apps, as it does on Windows with the window's process (see Hotkeys.Stop). Early, while a logoff still has the desktop's settings service up. Five seconds: a few gsettings calls of milliseconds each, each bounded at two.
+		if goingAway() {
+			within("letting go of the shortcut", 5*time.Second, hotkeys.Stop)
 		}
 		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
 		// Five seconds: this stops the audio capture, closes mic.wav and system.wav, and calls the tray's state observer, which emits over D-Bus. All of it is local and takes milliseconds; the bound is there for a wedged session bus, not for the work.

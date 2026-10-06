@@ -150,15 +150,17 @@ type dbusMenuLayout struct {
 	Children   []dbus.Variant
 }
 
-// dbusMenu implements com.canonical.dbusmenu at /MenuBar.
+// dbusMenu implements com.canonical.dbusmenu at /MenuBar. Its items are those of tray.go, in the same order and words as the Windows tray.
 // Item IDs:
 //
 //	0 = root
-//	1 = Status indicator  (disabled; label reflects tracking state)
+//	1 = Status indicator  (disabled; label follows the tracker's own state)
 //	2 = separator
 //	7 = Open June  (brings the desktop window to the front)
-//	3 = Pause / Resume Tracking  (label toggled by the tracker's own state)
-//	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
+//	3 = Pause watching  (submenu of 10, 11, 12: the window's three pauses; shown while June watches)
+//	8 = Resume watching  (shown while paused)
+//	9 = Finish setting up June…  (shown while observation waits for setup)
+//	6 = Record a meeting / Stop recording  (label follows the recorder's own state)
 //	4 = separator
 //	5 = Quit June
 type dbusMenu struct {
@@ -167,7 +169,7 @@ type dbusMenu struct {
 	quitCh chan<- struct{}
 	conn   *dbus.Conn // needed to emit LayoutUpdated when pause label changes
 	rec    *recorder.Recorder
-	// tracking is read for the pause labels on every redraw. The window pauses and resumes through the same /pause and /resume, so a flag only the tray's clicks flipped read "Pause" over a paused tracker and made the next click pause it again.
+	// tracking is read for the pause labels on every redraw. The window pauses and resumes through the same pause control, so a flag only the tray's clicks flipped read "Pause" over a paused tracker and made the next click pause it again.
 	tracking *tracker.Daemon
 	// drawnStatus is the status line the last LayoutUpdated went out with, so watchPause can tell when the window, a pause running out or setup finishing has changed it since.
 	drawnStatus atomic.Pointer[string]
@@ -180,24 +182,36 @@ const (
 	menuSep1    int32 = 2
 	menuOpen    int32 = 7
 	menuPause   int32 = 3
+	menuResume  int32 = 8
+	menuSetup   int32 = 9
 	menuMeeting int32 = 6
 	menuSep2    int32 = 4
 	menuQuit    int32 = 5
 )
+
+// menuPauseChoice is the ID of the first of the pause submenu's items; pauseChoices[i] is menuPauseChoice+i.
+const menuPauseChoice int32 = 10
 
 // recording reports whether a meeting is being recorded. Nil-safe: the recorder is only wired in once the daemon's store exists, and the tray must still render before then.
 func (m *dbusMenu) recording() bool {
 	return m.rec != nil && m.rec.Active()
 }
 
-// items is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label.
-func (m *dbusMenu) items() []dbusMenuItemProps {
-	statusLabel, pauseLabel := pauseLabels(m.tracking.IsPaused())
-	item := func(id int32, label string, enabled bool) dbusMenuItemProps {
+// menuNode is one item of the menu with the items of its submenu, if it has one.
+type menuNode struct {
+	props    dbusMenuItemProps
+	children []menuNode
+}
+
+// tree is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label. All three faces of the pause item are always there, the two not wanted now hidden, so a host that keeps items by ID never holds one that has vanished.
+func (m *dbusMenu) tree() []menuNode {
+	paused := m.tracking.IsPaused()
+	mode := pauseMode(paused)
+	item := func(id int32, label string, enabled, visible bool) dbusMenuItemProps {
 		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
 			"label":   dbus.MakeVariant(label),
 			"enabled": dbus.MakeVariant(enabled),
-			"visible": dbus.MakeVariant(true),
+			"visible": dbus.MakeVariant(visible),
 		}}
 	}
 	sep := func(id int32) dbusMenuItemProps {
@@ -208,24 +222,47 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 		}}
 	}
 
-	status := item(menuStatus, statusLabel, false)
+	status := item(menuStatus, trayStatus(paused), false, true)
 	status.Properties["icon-data"] = dbus.MakeVariant(m.statusIcon())
 
-	return []dbusMenuItemProps{
-		status,
-		sep(menuSep1),
-		// The window has no tray icon of its own, so opening it lives here, on the one icon. The hover is not in the menu: it is what the keyboard shortcut is for, and a menu item for it would be a second name for the same thing.
-		item(menuOpen, "Open June", true),
-		item(menuPause, pauseLabel, true),
-		item(menuMeeting, meetingLabel(m.recording()), true),
-		sep(menuSep2),
-		item(menuQuit, "Quit June", true),
+	pause := item(menuPause, pauseMenuLabel, true, mode == modeWatching)
+	pause.Properties["children-display"] = dbus.MakeVariant("submenu")
+	choices := make([]menuNode, len(pauseChoices))
+	for i, c := range pauseChoices {
+		choices[i] = menuNode{props: item(menuPauseChoice+int32(i), c.label, true, true)}
 	}
+
+	return []menuNode{
+		{props: status},
+		{props: sep(menuSep1)},
+		// The window has no tray icon of its own, so opening it lives here, on the one icon. The hover is not in the menu: it is what the keyboard shortcut is for, and a menu item for it would be a second name for the same thing.
+		{props: item(menuOpen, "Open June", true, true)},
+		{props: pause, children: choices},
+		{props: item(menuResume, resumeLabel, true, mode == modePaused)},
+		{props: item(menuSetup, finishSetupLabel, true, mode == modeSetup)},
+		{props: item(menuMeeting, meetingLabel(m.recording()), true, true)},
+		{props: sep(menuSep2)},
+		{props: item(menuQuit, "Quit June", true, true)},
+	}
+}
+
+// items is every item of the menu, submenus' included, flattened in display order.
+func (m *dbusMenu) items() []dbusMenuItemProps {
+	var out []dbusMenuItemProps
+	var walk func([]menuNode)
+	walk = func(nodes []menuNode) {
+		for _, n := range nodes {
+			out = append(out, n.props)
+			walk(n.children)
+		}
+	}
+	walk(m.tree())
+	return out
 }
 
 // refresh bumps the menu revision and tells the shell to re-read the layout, which is how a toggled label reaches the screen.
 func (m *dbusMenu) refresh() {
-	status, _ := pauseLabels(m.tracking.IsPaused())
+	status := trayStatus(m.tracking.IsPaused())
 	m.drawnStatus.Store(&status)
 	rev := m.menuRev.Add(1)
 	if m.conn != nil {
@@ -233,7 +270,7 @@ func (m *dbusMenu) refresh() {
 	}
 }
 
-// watchPause redraws the menu when the tracker has been paused or resumed by something other than the tray, a pause has run out or setup has finished, until ctx ends.
+// watchPause redraws the menu when the tracker has been paused or resumed by something other than the tray, a pause has run out or setup has finished, until ctx ends. Each of those changes the status line, which is what is compared.
 // ponytail: polled, because the tracker tells no one when it is paused; a pause observer on tracker.Daemon would make this event-driven.
 func (m *dbusMenu) watchPause(ctx context.Context) {
 	tick := time.NewTicker(time.Second)
@@ -243,7 +280,7 @@ func (m *dbusMenu) watchPause(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			status, _ := pauseLabels(m.tracking.IsPaused())
+			status := trayStatus(m.tracking.IsPaused())
 			if drawn := m.drawnStatus.Load(); drawn == nil || *drawn != status {
 				m.refresh()
 			}
@@ -259,16 +296,46 @@ func (m *dbusMenu) statusIcon() []byte {
 	return dotActive
 }
 
-func (m *dbusMenu) GetLayout(parentId, recursionDepth int32, propertyNames []string) (uint32, dbusMenuLayout, *dbus.Error) {
-	var children []dbus.Variant
-	for _, it := range m.items() {
+// layout renders nodes as dbusmenu layouts, depth levels of submenu deep (-1 for all of them).
+func layout(nodes []menuNode, depth int32) []dbus.Variant {
+	children := []dbus.Variant{}
+	if depth == 0 {
+		return children
+	}
+	for _, n := range nodes {
 		children = append(children, dbus.MakeVariant(dbusMenuLayout{
-			ID:         it.ID,
-			Properties: it.Properties,
-			Children:   []dbus.Variant{},
+			ID:         n.props.ID,
+			Properties: n.props.Properties,
+			Children:   layout(n.children, depth-1),
 		}))
 	}
-	root := dbusMenuLayout{ID: 0, Properties: map[string]dbus.Variant{}, Children: children}
+	return children
+}
+
+// findNode is the item with id among nodes and their submenus, or false when there is none.
+func findNode(nodes []menuNode, id int32) (menuNode, bool) {
+	for _, n := range nodes {
+		if n.props.ID == id {
+			return n, true
+		}
+		if found, ok := findNode(n.children, id); ok {
+			return found, true
+		}
+	}
+	return menuNode{}, false
+}
+
+// GetLayout answers the item parentId (0 for the whole menu) with its submenu, recursionDepth levels deep, -1 for all.
+func (m *dbusMenu) GetLayout(parentId, recursionDepth int32, propertyNames []string) (uint32, dbusMenuLayout, *dbus.Error) {
+	tree := m.tree()
+	root := dbusMenuLayout{ID: 0, Properties: map[string]dbus.Variant{"children-display": dbus.MakeVariant("submenu")}, Children: layout(tree, recursionDepth)}
+	if parentId != 0 {
+		node, ok := findNode(tree, parentId)
+		if !ok {
+			return m.menuRev.Load(), root, dbus.MakeFailedError(fmt.Errorf("no menu item %d", parentId))
+		}
+		root = dbusMenuLayout{ID: node.props.ID, Properties: node.props.Properties, Children: layout(node.children, recursionDepth)}
+	}
 	return m.menuRev.Load(), root, nil
 }
 
@@ -276,14 +343,18 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 	if eventId != "clicked" {
 		return nil
 	}
+	if i := int(id - menuPauseChoice); i >= 0 && i < len(pauseChoices) {
+		pauseFromTray(pauseChoices[i].minutes)
+		m.refresh()
+		return nil
+	}
 	switch id {
 	case menuOpen:
 		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
-	case menuPause:
-		paused := m.tracking.IsPaused()
-		// The redraw waits for the request, since the labels are read off the tracker it changes; signalled from root so both the status label (id 1) and pause label (id 3) refresh.
+	case menuResume, menuSetup:
+		// The redraw waits for the change, since the labels are read off the tracker it changes.
 		go func() {
-			clickPauseItem(paused)
+			resumeFromTray()
 			m.refresh()
 		}()
 	case menuMeeting:
@@ -342,7 +413,7 @@ type dbusMenuItemProps struct {
 	Properties map[string]dbus.Variant
 }
 
-// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides menu items: Open June, Pause/Resume Tracking, and Quit June.
+// runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus with the same menu as Windows (see tray.go): a status line, Open June, the pause item, the meeting item, and Quit June.
 // If SNI registration fails it falls back to headless mode.
 func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	stop, tracking, err := startDaemonServices(ctx, listener)
@@ -413,7 +484,7 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}, tracking *tracker.
 		IconName:    "",
 		IconPixmaps: []sniPixmap{},
 		Title:       "June",
-		Description: "June Context Runtime is active",
+		Description: "June is running",
 	}
 	menuPath := dbus.ObjectPath("/MenuBar")
 

@@ -69,17 +69,45 @@ tools: []
 Answer the request you are sent with text alone. You have no tools. When the request asks you to name a tool or an action, or to reply in JSON, write that out as your text.
 `
 
+// AgyAskAgent is the custom agent an ask's session runs as, defined by agyAskAgentFile in the session's workspace. It is AgyDutyAgent's counterpart for asks: under the default agent every round paid for agy's own system prompt and its whole built-in tool roster, about 11,800 input tokens before June had said a word, though June refuses every one of those tools but its web search. Measured on agy 1.3.0 on 2026-10-06 with "Reply with the single word ok.": the default agent with no MCP server read 11,846 input tokens, and a whole June ask under it 15,943; as this agent the same ask read 4,618. A question answered with one call to query_memory read 50,172 under the default agent and 9,977 as this one, with the same tool call and the same answer.
+const AgyAskAgent = "june-ask"
+
+// agyAskAgentFile is AgyAskAgent's definition. It keeps June's tool server (inheritMcp: the throwaway HOME's MCP config names that server and nothing else) and agy's own web search, the one built-in tool an ask uses, and leaves out the rest of agy's built-in tools and prompt sections and the user's own rules and skills. June's instruction itself goes in the session's first turn, as before.
+const agyAskAgentFile = `---
+name: june-ask
+description: Answers the user's questions for June, with June's tools and web search.
+mainAgent: true
+subagent: false
+excludeDefaultComponents: true
+inheritMcp: true
+inheritCustomizations: false
+tools: [search_web]
+---
+# June
+
+You answer for June. Use the tools on the june MCP server for the user's screen and memory, and search_web to look things up. Follow the instructions in the first message.
+`
+
 // agyToolNote is told to the model on a session's first turn, so it does not spend a round discovering that its own tools are refused. June's branch tool is not named: an ask is not offered it.
 const agyToolNote = "[tools] Only the tools June serves you, on the june MCP server, work here, along with your own web search. Your own tools for running commands, reading or writing files and opening web pages are refused, so do not reach for them: use June's tools for the screen and the user's memory, and your web search for anything you need to look up."
 
-// buildAgyHome builds a throwaway HOME for one agy run at tempHome: every entry of the real ~/.gemini is linked into place except the config directory (see linkEntry for what a link is on each system), every entry of the real ~/.gemini/config is linked except mcp_config.json and config.json, and June's own versions of those two files are written: the tool server at mcpURL as the only MCP server and its tools as the only grant, or for a duty (mcpURL "") no server and no grant at all. An empty workspace directory is made beside them. Input: the real home directory to mirror from, the fresh temp directory to build the mirror in, and the tool server's URL. Output: an error naming what could not be listed, linked or written.
+// buildAgyHome builds a throwaway HOME for one agy run at tempHome: every entry of the real ~/.gemini is linked into place except the config directory (see linkEntry for what a link is on each system), every entry of the real ~/.gemini/config is linked except mcp_config.json and config.json, and June's own versions of those two files are written: the tool server at mcpURL as the only MCP server and its tools as the only grant, or for a duty (mcpURL "") no server and no grant at all. A workspace directory is made beside them, empty but for the agent the run is started as: AgyAskAgent for an ask, AgyDutyAgent for a duty. Input: the real home directory to mirror from, the fresh temp directory to build the mirror in, and the tool server's URL. Output: an error naming what could not be listed, linked or written.
 func buildAgyHome(realHome, tempHome, mcpURL string) error {
 	configDir := filepath.Join(tempHome, ".gemini", "config")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("agy: making the temp .gemini/config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(tempHome, agyWorkspaceDir), 0o700); err != nil {
+	// agy looks for a project's custom agents in the workspace's .agents/agents in a headless run.
+	agents := filepath.Join(tempHome, agyWorkspaceDir, ".agents", "agents")
+	if err := os.MkdirAll(agents, 0o700); err != nil {
 		return fmt.Errorf("agy: making the run's workspace: %w", err)
+	}
+	name, definition := AgyDutyAgent, agyDutyAgentFile
+	if mcpURL != "" {
+		name, definition = AgyAskAgent, agyAskAgentFile
+	}
+	if err := os.WriteFile(filepath.Join(agents, name+".md"), []byte(definition), 0o600); err != nil {
+		return fmt.Errorf("agy: writing the run's agent: %w", err)
 	}
 
 	// antigravity-cli is linked whole with the rest: it holds agy's SQLite stores, and only a directory link keeps a database's -wal and -shm beside the real file. June used to make it a directory of its own to put a statusline command in it, which agy never runs in print mode (see readAgyUsage).
@@ -248,15 +276,6 @@ func AgyDutyHome() (env []string, dir string, remove func(), err error) {
 		return nil, "", nil, err
 	}
 	dir = filepath.Join(tempHome, agyWorkspaceDir)
-	agents := filepath.Join(dir, ".agents", "agents")
-	if err := os.MkdirAll(agents, 0o700); err != nil {
-		removeAgyHome(tempHome)
-		return nil, "", nil, fmt.Errorf("agy: making the duty's agent directory: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(agents, AgyDutyAgent+".md"), []byte(agyDutyAgentFile), 0o600); err != nil {
-		removeAgyHome(tempHome)
-		return nil, "", nil, fmt.Errorf("agy: writing the duty's agent: %w", err)
-	}
 	remove = func() {
 		if os.RemoveAll(tempHome) != nil {
 			go removeAgyHome(tempHome)
@@ -267,6 +286,33 @@ func AgyDutyHome() (env []string, dir string, remove func(), err error) {
 
 // AgyLoginExpired reports whether the reason an agy run gave for failing is its own login having expired, for internal/brain's duty path to wrap ErrLoggedOut the same way an ask does. Input: the run's error text. Output: see loggedOut.
 func AgyLoginExpired(reason string) bool { return loggedOut(reason) }
+
+// AgyStderrError is the error an agy run that ended before it answered becomes, read from why agy said it stopped on stderr, for a duty run and an ask session alike, so either hands the work on with agy's own reason rather than "exit status 1" or a broken pipe (2026-10-06).
+// "Failed to start: <reason>" is printed before agy reads a turn, so no model was asked: ErrCouldNotRun — unless the reason is its login having expired, which agy 1.3.0 also reports there ("Eligibility check failed: %w. Please log out (/logout) and log back in (/login).") and which must open the breaker and say so like any other expired login, or every ask and duty would start agy again only to fail the same way.
+// "CLI panicked: <reason>" can come at any point of a run, after the model was asked, so it is ErrNoAnswer, which a duty counts as a provider reached.
+// Input: the stderr, or its tail. Output: the error, or nil when agy said neither, for the caller to say what it saw instead.
+func AgyStderrError(stderr string) error {
+	if reason := agyStderrLine(stderr, "Failed to start: "); reason != "" {
+		if loggedOut(reason) {
+			return fmt.Errorf("%w: agy: %s", ErrLoggedOut, reason)
+		}
+		return fmt.Errorf("%w: agy: %s", ErrCouldNotRun, reason)
+	}
+	if reason := agyStderrLine(stderr, "CLI panicked: "); reason != "" {
+		return fmt.Errorf("%w: agy crashed: %s", ErrNoAnswer, reason)
+	}
+	return nil
+}
+
+// agyStderrLine is the rest of the last stderr line that starts with marker. Input: the stderr and the marker. Output: that text on one line, cut short, or "" when no line has it.
+func agyStderrLine(stderr, marker string) string {
+	i := strings.LastIndex(stderr, marker)
+	if i < 0 {
+		return ""
+	}
+	line, _, _ := strings.Cut(stderr[i+len(marker):], "\n")
+	return util.RunesEllipsis(util.OneLine(line), 200)
+}
 
 // agyResult is the object agy's "result" event carries when a turn is over.
 type agyResult struct {

@@ -5,10 +5,7 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -31,20 +28,23 @@ const noBrainSignedIn = "nothing — no brain is signed in"
 
 // SettingsView is GET /settings: the daemon's configuration and on-disk footprint. Every field is present; a value the daemon cannot back is a documented sentinel (KeepAudioDays -1, EmbedModel "none", VoiceModel noVoiceKey, Brain noBrainSignedIn) rather than an invented number.
 type SettingsView struct {
-	DataDir         string       `json:"data_dir"`
-	StoreBytes      int64        `json:"store_bytes"`
-	RecordingsBytes int64        `json:"recordings_bytes"`
-	ModelsBytes     int64        `json:"models_bytes"`
-	VoiceModel      string       `json:"voice_model"`
-	Brain           string       `json:"brain"`
-	EmbedModel      string       `json:"embed_model"`
-	MeetingsEnabled bool         `json:"meetings_enabled"`
-	CaptureEnabled  bool         `json:"capture_enabled"`
-	KeepAudioDays   int          `json:"keep_audio_days"`
-	DaemonStarted   string       `json:"daemon_started"`
-	Version         string       `json:"version"`
-	Hotkey          string       `json:"hotkey"`
-	FirstRun        FirstRunView `json:"first_run"`
+	DataDir         string `json:"data_dir"`
+	StoreBytes      int64  `json:"store_bytes"`
+	RecordingsBytes int64  `json:"recordings_bytes"`
+	ModelsBytes     int64  `json:"models_bytes"`
+	VoiceModel      string `json:"voice_model"`
+	Brain           string `json:"brain"`
+	EmbedModel      string `json:"embed_model"`
+	MeetingsEnabled bool   `json:"meetings_enabled"`
+	CaptureEnabled  bool   `json:"capture_enabled"`
+	KeepAudioDays   int    `json:"keep_audio_days"`
+	DaemonStarted   string `json:"daemon_started"`
+	Version         string `json:"version"`
+	// Hotkey is the shortcut actually in effect as canonical text ("Ctrl+Alt+Space"), "" when June has none; while it is pending, the one being set up. HotkeyStatus is "ok", "taken", "pending", "unsupported" or "unknown", and HotkeyNote one plain sentence about it, or "". See hotkey.go.
+	Hotkey       string       `json:"hotkey"`
+	HotkeyStatus string       `json:"hotkey_status"`
+	HotkeyNote   string       `json:"hotkey_note"`
+	FirstRun     FirstRunView `json:"first_run"`
 	// ClaudeUsageFromLogin mirrors config.JuneConfig.ClaudeUsageFromLoginEnabled: whether GET /brains is allowed to read the Claude row's usage bars from the undocumented Anthropic endpoint. POST /settings with this field set writes it back to the config.
 	ClaudeUsageFromLogin bool `json:"claude_usage_from_login"`
 	// UpdateCheck mirrors config.JuneConfig.UpdateCheckEnabled: whether June looks for a new release once a day. The updater reads the file before each check, so a POST holds from the next one.
@@ -122,18 +122,20 @@ func (c *LiveConfig) ClaudeUsageEnabled() bool {
 	return c.cfg.ClaudeUsageFromLoginEnabled()
 }
 
-// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool, "update_check": bool, "allow_fallback": bool, "meetings_offer": "ask"|"off"} writes the fields it carries, persists them in one save so they survive a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. A field the body does not carry changes nothing: the window sends the whole form back on any change, and a missing field means "not mentioned", not "off". A meetings_offer other than the two words is 400 and changes nothing. Input: the data directory to walk for disk usage, the config accessor shared with the rest of the daemon so a POST's change is visible everywhere and no two request goroutines touch the struct at once, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), the time the daemon started, and the usage lookup GET /brains reads (nil for none), so the brain line counts a login its provider refused as signed out exactly as the picker does. Output: the handler.
-func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits) http.HandlerFunc {
+// Settings builds the /settings handler. GET answers SettingsView as JSON, read off the live config. POST {"claude_usage_from_login": bool, "update_check": bool, "allow_fallback": bool, "meetings_offer": "ask"|"off"} writes the fields it carries, persists them in one save so they survive a restart, and answers with the same view GET would — the same GET-plus-POST-on-one-route shape as /brains. A field the body does not carry changes nothing: the window sends the whole form back on any change, and a missing field means "not mentioned", not "off". A meetings_offer other than the two words is 400 and changes nothing. Input: the data directory to walk for disk usage, the config accessor shared with the rest of the daemon so a POST's change is visible everywhere and no two request goroutines touch the struct at once, whether the meeting watcher is running, a func reporting whether capture is currently paused (read at request time so a live /pause toggle is reflected immediately), the time the daemon started, the usage lookup GET /brains reads (nil for none), so the brain line counts a login its provider refused as signed out exactly as the picker does, and the daemon's shortcut record (nil reports nothing known and refuses a change). Output: the handler.
+// POST {"hotkey": string} changes the shortcut, "" meaning back to config.DefaultHotkey: text that is not a shortcut is 400, and one June cannot have is 409 {"error": "taken" or "unsupported", "message": a plain sentence} with nothing in the body saved, the other fields included; see Hotkeys.Change.
+func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits, hotkeys *Hotkeys) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor)
+			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor, hotkeys)
 		case http.MethodPost:
 			var req struct {
 				ClaudeUsageFromLogin *bool   `json:"claude_usage_from_login"`
 				UpdateCheck          *bool   `json:"update_check"`
 				AllowFallback        *bool   `json:"allow_fallback"`
 				MeetingsOffer        *string `json:"meetings_offer"`
+				Hotkey               *string `json:"hotkey"`
 			}
 			if !DecodeJSON(w, r, &req) {
 				return
@@ -148,6 +150,13 @@ func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaus
 					offer = new(bool)
 				default:
 					http.Error(w, `meetings_offer must be "ask" or "off"`, http.StatusBadRequest)
+					return
+				}
+			}
+			// The shortcut goes first, after every field has been checked and before any is saved, so one June cannot have refuses the whole body with nothing written.
+			if req.Hotkey != nil {
+				if code, word, message := hotkeys.Change(*req.Hotkey); code != 0 {
+					setupError(w, code, word, message)
 					return
 				}
 			}
@@ -172,7 +181,7 @@ func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaus
 					return
 				}
 			}
-			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor)
+			writeSettings(r.Context(), w, dataDir, cfg.Get(), meetingsEnabled, capturePaused, startedAt, limitsFor, hotkeys)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -180,7 +189,8 @@ func Settings(dataDir string, cfg *LiveConfig, meetingsEnabled bool, capturePaus
 }
 
 // writeSettings writes SettingsView as JSON, the body both GET and POST /settings answer with.
-func writeSettings(ctx context.Context, w http.ResponseWriter, dataDir string, cfg config.JuneConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits) {
+func writeSettings(ctx context.Context, w http.ResponseWriter, dataDir string, cfg config.JuneConfig, meetingsEnabled bool, capturePaused func() bool, startedAt time.Time, limitsFor BrainLimits, hotkeys *Hotkeys) {
+	hotkey, hotkeyStatus, hotkeyNote := hotkeys.View()
 	capture := true
 	if capturePaused != nil {
 		capture = !capturePaused()
@@ -208,7 +218,9 @@ func writeSettings(ctx context.Context, w http.ResponseWriter, dataDir string, c
 		KeepAudioDays:        keepAudioNotConfigured,
 		DaemonStarted:        startedAt.Format(time.RFC3339),
 		Version:              config.Version,
-		Hotkey:               windowHotkey(),
+		Hotkey:               hotkey,
+		HotkeyStatus:         hotkeyStatus,
+		HotkeyNote:           hotkeyNote,
 		FirstRun:             firstRun(cfg, home),
 		ClaudeUsageFromLogin: cfg.ClaudeUsageFromLoginEnabled(),
 		UpdateCheck:          cfg.UpdateCheckEnabled(),
@@ -223,87 +235,6 @@ func meetingsOffer(m config.MeetingsConfig) string {
 		return meetingsOfferAsk
 	}
 	return meetingsOfferOff
-}
-
-// hotkeyGOOS is runtime.GOOS, indirected so a test can exercise the non-Linux branch of windowHotkey on a Linux box.
-var hotkeyGOOS = runtime.GOOS
-
-// gsettingsTimeout bounds each gsettings call windowHotkey makes, so a wedged dconf backend cannot stall the /settings response.
-const gsettingsTimeout = 2 * time.Second
-
-// gsettingsRunner runs `gsettings <args...>` and returns its trimmed stdout, or an error. A package variable so the test can swap in a fake instead of touching the real desktop.
-var gsettingsRunner = runGsettings
-
-// runGsettings is gsettingsRunner's real implementation.
-func runGsettings(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gsettingsTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "gsettings", args...).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// mediaKeysSchema is the GNOME schema custom keybindings are registered under.
-const mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
-
-// customKeybindingSchemaPrefix, plus a keybinding's own D-Bus path, names the per-keybinding schema its command and binding live under.
-const customKeybindingSchemaPrefix = mediaKeysSchema + ".custom-keybinding:"
-
-// windowToggleCommand is the command the june-window-hotkey wiring registers, which marks a custom keybinding as ours among however many others GNOME holds.
-const windowToggleCommand = "june-window-toggle"
-
-// windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs june-window-toggle, gsettings is unavailable, or the platform is neither Linux nor Windows (Windows always answers the chord the window registers) — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
-func windowHotkey() string {
-	// The Windows window registers this chord itself (app/src-tauri/src/lib.rs), so there is nothing to read.
-	if hotkeyGOOS == "windows" {
-		return "<Control><Alt>space"
-	}
-	if hotkeyGOOS != "linux" {
-		return ""
-	}
-	list, err := gsettingsRunner("get", mediaKeysSchema, "custom-keybindings")
-	if err != nil {
-		return ""
-	}
-	for _, path := range gvariantStrings(list) {
-		schema := customKeybindingSchemaPrefix + path
-		command, err := gsettingsRunner("get", schema, "command")
-		if err != nil || !strings.Contains(command, windowToggleCommand) {
-			continue
-		}
-		binding, err := gsettingsRunner("get", schema, "binding")
-		if err != nil {
-			return ""
-		}
-		return gvariantString(binding)
-	}
-	return ""
-}
-
-// gvariantStrings splits a GVariant string-array literal, as gsettings prints one, into its elements. Input: a literal like "['a', 'b']" or the empty array's "@as []" / "[]". Output: the quoted elements, unquoted. ponytail: plain split-and-trim, not a real GVariant parser — every value gsettings hands back here is a D-Bus object path, which never itself contains a comma or a quote, so this holds; a command or binding string with an embedded comma would break it.
-func gvariantStrings(literal string) []string {
-	literal = strings.TrimSpace(literal)
-	literal = strings.TrimPrefix(literal, "@as")
-	literal = strings.TrimSpace(literal)
-	literal = strings.TrimPrefix(literal, "[")
-	literal = strings.TrimSuffix(literal, "]")
-	literal = strings.TrimSpace(literal)
-	if literal == "" {
-		return nil
-	}
-	parts := strings.Split(literal, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		out = append(out, gvariantString(p))
-	}
-	return out
-}
-
-// gvariantString strips the single quotes gsettings wraps a string value in. Input: a literal like "'june-window-toggle'". Output: the value alone, or the input unchanged if it carries no quotes to strip.
-func gvariantString(literal string) string {
-	return strings.Trim(strings.TrimSpace(literal), "'")
 }
 
 // storeBytes sums the size of the sqlite database and its WAL/shm side files directly under dataDir. Input: the data directory. Output: the total bytes, 0 for any file that does not exist.

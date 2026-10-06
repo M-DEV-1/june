@@ -12,7 +12,7 @@ import { ui, useAppDispatch } from "./store";
 /** How often the window asks whether June is paused. The tray pauses and resumes too, and nothing on the event stream says so; a minute is soon enough for a line that says what June is doing. */
 const STATUS_POLL_MS = 60_000;
 
-/** The pauses on offer, in minutes, 0 for one that lasts until resumed. A pause with an end is the one that cannot be forgotten about for days. */
+/** The pauses on offer, in minutes, 0 for one that lasts until resumed, worded exactly as both trays word them (cmd/tray.go), so the same choice reads the same wherever it is made. A pause with an end is the one that cannot be forgotten about for days. */
 const PAUSES = [
   { minutes: 15, label: "Pause for 15 minutes" },
   { minutes: 60, label: "Pause for 1 hour" },
@@ -92,13 +92,11 @@ export function PausedBanner() {
   return (
     <div role="status" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-card px-4 py-2 text-ui">
       <span>
-        June is {pausedWords(until)}
-        <span className="text-muted-foreground">
-          {until ? " — it isn't watching your screen, and starts again by itself." : " — it isn't watching your screen, so it won't remember what you do until you resume."}
-        </span>
+        June is {pausedWords(until)}.
+        <span className="text-muted-foreground">{until ? " It starts again by itself." : " It won't remember what you do until you resume."}</span>
       </span>
       <Button size="sm" className="ml-auto" disabled={isLoading} onClick={() => void setCapture(true).unwrap().catch(() => dispatch(ui.noticed({ text: "Could not start watching", kind: "error" })))}>
-        Resume now
+        Resume watching
       </Button>
     </div>
   );

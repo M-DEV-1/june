@@ -28,15 +28,6 @@ export async function refreshToken(): Promise<string | undefined> {
   return token;
 }
 
-/** Whether the window's own global shortcut could not be registered (hotkey_status in src-tauri/src/lib.rs). Input: none. Output: true only when the window tried and another program holds the keys; false when it worked, on Linux, where the desktop's keybinding is the shortcut, and outside Tauri. */
-export async function hotkeyFailed(): Promise<boolean> {
-  try {
-    return Boolean((await invoke<{ failed: boolean }>("hotkey_status"))?.failed);
-  } catch {
-    return false;
-  }
-}
-
 /** The token to send, reading one if this window has never had one. Input: none. Output: the token, or undefined when none could be read. */
 async function ensureToken(): Promise<string | undefined> {
   if (!token) await refreshToken();
@@ -171,7 +162,7 @@ export type FirstRun = {
   steps: string[];
 };
 
-/** The daemon's configuration and on-disk footprint on GET /settings. Mirrors ipc.SettingsView; keep_audio_days is -1 when the config has no retention setting, embed_model is "none" when hybrid search runs lexical-only, and hotkey is the GNOME accelerator read live off gsettings. */
+/** The daemon's configuration and on-disk footprint on GET /settings. Mirrors ipc.SettingsView; keep_audio_days is -1 when the config has no retention setting, embed_model is "none" when hybrid search runs lexical-only, hotkey is the shortcut that opens June right now, spelled "Ctrl+Alt+Space" ("" when there is none), and hotkey_status and hotkey_note say whether it works. */
 export type SettingsView = {
   data_dir: string;
   store_bytes: number;
@@ -186,6 +177,10 @@ export type SettingsView = {
   daemon_started: string;
   version: string;
   hotkey: string;
+  /** Whether the shortcut works: "ok"; "taken" when another app holds it and June has none; "pending" while the window is still taking a new one (Windows); "unsupported" on a desktop June cannot set one on; "unknown" when June cannot tell. Optional, as is the note, because an older daemon sends neither. */
+  hotkey_status?: HotkeyStatus;
+  /** One plain sentence about the shortcut, "" when there is nothing to say. */
+  hotkey_note?: string;
   /** Optional because a daemon older than the field sends no "first_run" at all, and the window must draw nothing rather than a panel full of undefined. */
   first_run?: FirstRun;
   /** Whether GET /brains may read the Claude row's usage bars from the undocumented Anthropic endpoint using the Claude Code login's own token. POST /settings with this field writes it back. */
@@ -198,8 +193,15 @@ export type SettingsView = {
   meetings_offer?: "ask" | "off";
 };
 
-/** What POST /settings may change, any subset at once: a field left out is left as it is. autostart is the start-at-sign-in choice GET /setup reports. */
+/** Whether the shortcut that opens June works, as GET /settings reports it. */
+export type HotkeyStatus = "ok" | "taken" | "pending" | "unsupported" | "unknown";
+
+/** GET /hotkey/check's answer about one shortcut: the shortcut as June spells it, whether it can be used, why ("current" is the one June already has, which counts as usable), and one plain sentence. */
+export type HotkeyCheck = { hotkey: string; available: boolean; reason: "ok" | "taken" | "invalid" | "current" | "unsupported"; note: string };
+
+/** What POST /settings may change, any subset at once: a field left out is left as it is. autostart is the start-at-sign-in choice GET /setup reports. hotkey is a shortcut spelled "Ctrl+Shift+J", or "" for the default; the daemon checks it again and refuses 409 {"error":"taken"} without saving anything when another app holds it. */
 export type SettingsChange = Partial<{
+  hotkey: string;
   claude_usage_from_login: boolean;
   update_check: boolean;
   allow_fallback: boolean;
@@ -576,6 +578,11 @@ export const juneApi = createApi({
       query: (body) => ({ url: "/settings", method: "POST", body }),
       invalidatesTags: ["Settings", "Setup"],
     }),
+    /** Whether a shortcut is free to use, asked afresh every time: another app can take or let go of one at any moment, so nothing is kept. */
+    hotkeyCheck: build.query<HotkeyCheck, string>({
+      query: (hotkey) => `/hotkey/check?hotkey=${encodeURIComponent(hotkey)}`,
+      keepUnusedDataFor: 0,
+    }),
     /** The brains June can call on this machine, which one is the default, and whether none is and the daemon picks per question. */
     brains: build.query<Brains, void>({
       query: () => "/brains",
@@ -794,6 +801,7 @@ export const {
   useMeetingsQuery,
   useSettingsQuery,
   useSaveSettingsMutation,
+  useHotkeyCheckQuery,
   useBrainsQuery,
   usePickBrainMutation,
   useVoicesQuery,

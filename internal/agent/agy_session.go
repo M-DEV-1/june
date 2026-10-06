@@ -47,7 +47,9 @@ func newAgyProcess() agySessionRunner { return &agyProcess{} }
 // agyProcess is the real agySessionRunner, one long-lived `agy --input-format stream-json ...` subprocess.
 type agyProcess struct {
 	// dir is the working directory agy runs in, which it takes as its workspace; empty means the temp directory.
-	dir    string
+	dir string
+	// stderr keeps the end of what the process printed on stderr, which is the only place agy says why it would not start; with stderr dropped, an agy that died on start reached the user as "write |1: The pipe has been ended." (2026-10-06).
+	stderr tailBuffer
 	events chan []byte
 	// exited is closed once the process has been reaped and its process group let go, which is when the files it held in its throwaway HOME can be removed.
 	exited chan struct{}
@@ -78,6 +80,9 @@ func (p *agyProcess) Start(ctx context.Context, env, args []string) error {
 	if err != nil {
 		return fmt.Errorf("agy: opening the session's stdout: %w", err)
 	}
+	cmd.Stderr = &p.stderr
+	// A child agy started can hold stderr open after agy is gone; the reaper's Wait then stops waiting for it rather than keeping the HOME undeletable.
+	cmd.WaitDelay = 2 * time.Second
 	release, err := util.StartProcessGroup(cmd)
 	if err != nil {
 		return fmt.Errorf("agy: starting the session: %w", err)
@@ -132,6 +137,37 @@ func (p *agyProcess) Events() <-chan []byte { return p.events }
 // Exited is closed once the process has been reaped. Nil for a process that never started.
 func (p *agyProcess) Exited() <-chan struct{} { return p.exited }
 
+// stderrAtExit is the end of what a dead process printed on stderr, read once it has exited or bound has passed, so the lines it printed as it gave up are in it.
+func (p *agyProcess) stderrAtExit(bound time.Duration) string {
+	waitExited(p, bound)
+	return p.stderr.String()
+}
+
+// agyStderrTail is how much of a session's stderr is kept: enough for the lines agy prints as it gives up, and a fixed cost however long the session runs.
+const agyStderrTail = 16 << 10
+
+// tailBuffer is an io.Writer that keeps only the last agyStderrTail bytes written to it. The zero value is ready to use.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(b []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, b...)
+	if over := len(t.buf) - agyStderrTail; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+	}
+	return len(b), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
 // Kill stops the process and everything it started without waiting for it; the reaper in Start notices the exit. Killing only agy itself left whatever it had spawned running, and on Windows nothing else would ever stop it.
 func (p *agyProcess) Kill() {
 	p.mu.Lock()
@@ -160,9 +196,9 @@ func waitExited(proc agySessionRunner, bound time.Duration) {
 	}
 }
 
-// agySessionArgs is the argument list for one long-lived `agy` session. Input: the model to ask for ("" leaves --model off, keeping the CLI's own default). Output: the arguments.
+// agySessionArgs is the argument list for one long-lived `agy` session, run as AgyAskAgent, which buildAgyHome defines in the session's workspace. Input: the model to ask for ("" leaves --model off, keeping the CLI's own default). Output: the arguments.
 func agySessionArgs(model string) []string {
-	args := []string{"--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--print-timeout", agyAskTimeout.String()}
+	args := []string{"--input-format", "stream-json", "--output-format", "stream-json", "--disable-slash-commands", "--print-timeout", agyAskTimeout.String(), "--agent", AgyAskAgent}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -442,10 +478,13 @@ func (a *Agent) CloseAgySession() {
 	}
 }
 
+// errAgySessionGone marks a turn that failed because the session's process was gone: its stdin would not take the turn, or its stdout closed before the result. runAgyTurn reads it to say why (see agyGoneError).
+var errAgySessionGone = errors.New("the agy session ended")
+
 // sendAgyTurn sends one turn's line and reads the session's stream until its result event arrives. The caller has the slot busy.
 func sendAgyTurn(ctx context.Context, s *agySlot, line string) (agyResult, error) {
 	if err := s.proc.Send(line); err != nil {
-		return agyResult{}, fmt.Errorf("agy: writing to the session: %w", err)
+		return agyResult{}, fmt.Errorf("agy: writing to the session: %w: %w", errAgySessionGone, err)
 	}
 	events := s.proc.Events()
 	for {
@@ -454,7 +493,7 @@ func sendAgyTurn(ctx context.Context, s *agySlot, line string) (agyResult, error
 			return agyResult{}, ctx.Err()
 		case raw, ok := <-events:
 			if !ok {
-				return agyResult{}, errors.New("agy: the session ended before answering")
+				return agyResult{}, fmt.Errorf("agy: %w before answering", errAgySessionGone)
 			}
 			var env agySessionEnvelope
 			if err := json.Unmarshal(raw, &env); err != nil {
@@ -465,6 +504,27 @@ func sendAgyTurn(ctx context.Context, s *agySlot, line string) (agyResult, error
 			}
 		}
 	}
+}
+
+// agyGoneWait bounds how long a dead session's process is waited for before its stderr is read for the reason it gave.
+const agyGoneWait = 3 * time.Second
+
+// agyGoneError is the error a turn whose process was gone becomes, so the question is handed to the next brain with the reason rather than stopping on a broken pipe: what agy said on stderr as it stopped (see AgyStderrError), or ErrNoAnswer when it died without saying. Input: the dead process and the turn's error. Output: the error.
+func agyGoneError(proc agySessionRunner, err error) error {
+	if p, ok := proc.(interface{ stderrAtExit(time.Duration) string }); ok {
+		if said := AgyStderrError(p.stderrAtExit(agyGoneWait)); said != nil {
+			return said
+		}
+	}
+	return fmt.Errorf("%w: %w", ErrNoAnswer, err)
+}
+
+// agyStartError is the error a session that could not be started becomes: ErrCouldNotRun, so the question goes on to the next brain, unless June is shutting down. The cause stays wrapped, so a missing command line still reads as exec.ErrNotFound. Input: the pool, the slot and startAgySlot's error. Output: the error.
+func agyStartError(pool *agySessionState, s *agySlot, err error) error {
+	if pool.doomed(s) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrCouldNotRun, err)
 }
 
 // addAgyTurn folds a follow-up turn's result into the first one's: the follow-up's status and answer, both turns' cost, and every tool either was refused.
@@ -489,7 +549,7 @@ func (a *Agent) runAgyTurn(ctx context.Context, newProc func() agySessionRunner,
 
 	if !reused {
 		if err := a.startAgySlot(s, newProc, model); err != nil {
-			return agyResult{}, nil, false, err
+			return agyResult{}, nil, false, agyStartError(pool, s, err)
 		}
 	}
 	resetToolServerForTurn(s.server, ctx)
@@ -502,7 +562,7 @@ func (a *Agent) runAgyTurn(ctx context.Context, newProc func() agySessionRunner,
 	if err != nil && reused && ctx.Err() == nil && !pool.doomed(s) {
 		// The process this ask was reusing has died since the last turn (idle-killed by the CLI itself, crashed, or similar) — replace it transparently and give the new one the instruction and history again, exactly as a fresh process would get them.
 		if serr := a.startAgySlot(s, newProc, model); serr != nil {
-			return agyResult{}, nil, false, serr
+			return agyResult{}, nil, false, agyStartError(pool, s, serr)
 		}
 		reused = false
 		resetToolServerForTurn(s.server, ctx)
@@ -519,6 +579,9 @@ func (a *Agent) runAgyTurn(ctx context.Context, newProc func() agySessionRunner,
 	RefreshAgyUsage()
 	hops := s.server.Hops()
 	capped := s.server.Capped()
+	if errors.Is(err, errAgySessionGone) && ctx.Err() == nil && !pool.doomed(s) {
+		err = agyGoneError(s.proc, err)
+	}
 	if err != nil {
 		return agyResult{}, hops, capped, err
 	}

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 
@@ -35,6 +37,10 @@ func applyAutostart(value string) error {
 	}
 	if err := setAutostart(on); err != nil {
 		return err
+	}
+	// Best effort, as --update-check does: a running June answers GET /setup from its own copy of the config, so without this its Settings switch showed the old choice until its next start.
+	if pingOnce() {
+		tellDaemonSetting(fmt.Sprintf(`{"autostart":%t}`, on))
 	}
 	fmt.Printf("start on login: %s\n", map[bool]string{true: "on", false: "off"}[on])
 	return nil
@@ -88,7 +94,8 @@ func withAutostartSetting(cfg *ipc.LiveConfig, settings http.HandlerFunc) http.H
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		var req struct {
-			Autostart *bool `json:"autostart"`
+			Autostart *bool            `json:"autostart"`
+			Hotkey    *json.RawMessage `json:"hotkey"`
 		}
 		if err := json.NewDecoder(bytes.NewReader(body)).Decode(&req); err != nil {
 			var typeErr *json.UnmarshalTypeError
@@ -99,21 +106,42 @@ func withAutostartSetting(cfg *ipc.LiveConfig, settings http.HandlerFunc) http.H
 			settings(w, r)
 			return
 		}
-		if req.Autostart != nil {
-			on := *req.Autostart
-			autostartMu.Lock()
-			err := setAutostart(on)
-			if err == nil {
-				err = cfg.Update(func(c *config.JuneConfig) { c.Autostart = on })
-			}
-			autostartMu.Unlock()
-			if err != nil {
-				slog.Warn("could not change start at sign-in from the window", "on", on, "error", err)
-				http.Error(w, "could not change whether June starts at sign-in: "+err.Error(), http.StatusInternalServerError)
+		if req.Autostart == nil {
+			settings(w, r)
+			return
+		}
+		// A shortcut June cannot have refuses the whole body with nothing saved, so with one in the body the settings handler answers first, into a recorder, and the login entry is only touched once it has taken the rest.
+		if req.Hotkey != nil {
+			rec := httptest.NewRecorder()
+			settings(rec, r)
+			if rec.Code < 300 && !changeAutostart(cfg, *req.Autostart, w) {
 				return
 			}
-			slog.Info("start at sign-in changed from the window", "on", on)
+			maps.Copy(w.Header(), rec.Header())
+			w.WriteHeader(rec.Code)
+			w.Write(rec.Body.Bytes())
+			return
+		}
+		if !changeAutostart(cfg, *req.Autostart, w) {
+			return
 		}
 		settings(w, r)
 	}
+}
+
+// changeAutostart turns start at sign-in on or off for the window: the login entry first, then the config. Input: the live config, the choice, and the response, which a failure is answered on. Output: false when it failed and the response has been written.
+func changeAutostart(cfg *ipc.LiveConfig, on bool, w http.ResponseWriter) bool {
+	autostartMu.Lock()
+	err := setAutostart(on)
+	if err == nil {
+		err = cfg.Update(func(c *config.JuneConfig) { c.Autostart = on })
+	}
+	autostartMu.Unlock()
+	if err != nil {
+		slog.Warn("could not change start at sign-in from the window", "on", on, "error", err)
+		http.Error(w, "June couldn't change whether it starts when you sign in: "+err.Error(), http.StatusInternalServerError)
+		return false
+	}
+	slog.Info("start at sign-in changed from the window", "on", on)
+	return true
 }

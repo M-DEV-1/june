@@ -99,7 +99,7 @@ func waitProcessExit(pid int, bound time.Duration) bool {
 func supervisedBySystemd() bool { return false }
 
 // stopDaemonHint tells the user how to end a running daemon. The package runs it as junew.exe from the login entry and as june.exe from a terminal, so both names are given. taskkill without /F closes the tray's window, which quits June the same way the tray's Quit does; /F is only for a daemon whose tray never came up.
-const stopDaemonHint = "quit it from its tray icon, or with `taskkill /IM june.exe /IM junew.exe`"
+const stopDaemonHint = "quit June from its tray icon (or run `taskkill /IM june.exe /IM junew.exe`)"
 
 // portInUse reports whether a failed bind found the port held by another socket (WSAEADDRINUSE), which for June's port is almost always another daemon.
 func portInUse(err error) bool { return errors.Is(err, windows.WSAEADDRINUSE) }

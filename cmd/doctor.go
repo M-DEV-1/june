@@ -21,6 +21,7 @@ import (
 	"june/internal/agent"
 	"june/internal/components"
 	"june/internal/config"
+	"june/internal/ipc"
 	"june/internal/ipctoken"
 	"june/internal/recorder"
 	"june/internal/util"
@@ -116,8 +117,33 @@ func runDoctor(ctx context.Context, emit func(doctorCheck)) []doctorCheck {
 	for _, c := range localPieceChecks(config.DataDir(), os.Getenv("XDG_RUNTIME_DIR"), cfg.Embed) {
 		add(c)
 	}
+	// Only a running June knows whether its shortcut works; with none running the daemon line below already says what to do.
+	if daemonUp {
+		add(shortcutCheck(daemonHotkey(doctorPingTimeout)))
+	}
 	need(daemon)
 	return out
+}
+
+// shortcutCheck reports whether June has a shortcut that shows its hover, as the running June says, the same way on Windows and Linux. Input: what daemonHotkey answered. Output: the check, which fails, turning only the shortcut off, when another app holds the shortcut or this desktop does not let June set one.
+func shortcutCheck(hotkey, status, note string, err error) doctorCheck {
+	const fix = "Open June → Settings and choose a shortcut"
+	switch {
+	case err != nil:
+		// The reason is left out: it names the address and Go's own error words, and doctor keeps no log to put it in, so a slog line would land in the same terminal.
+		return doctorCheck{Name: "shortcut", Detail: "June didn't answer about its shortcut", Fix: "run june doctor again"}
+	case status == ipc.HotkeyOK:
+		return doctorCheck{Name: "shortcut", Detail: hotkey + " shows June", OK: true}
+	case status == ipc.HotkeyPending:
+		return doctorCheck{Name: "shortcut", Detail: "June is still setting up " + hotkey, OK: true}
+	case status == ipc.HotkeyUnsupported && note == ipc.WindowOffNote:
+		return doctorCheck{Name: "shortcut", Detail: note, Fix: `turn June's window back on: set "window" to true in ` + config.ConfigPath() + ", then restart June"}
+	case status == ipc.HotkeyUnsupported:
+		return doctorCheck{Name: "shortcut", Detail: note, Fix: "add the shortcut in your desktop's keyboard settings"}
+	case note == "":
+		note = "June has no shortcut"
+	}
+	return doctorCheck{Name: "shortcut", Detail: note, Fix: fix}
 }
 
 // doctorPingTimeout bounds doctor's /ping, which a healthy daemon answers in milliseconds.

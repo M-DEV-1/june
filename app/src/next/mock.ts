@@ -97,7 +97,9 @@ const emptySettings: SettingsView = {
   keep_audio_days: -1,
   daemon_started: "",
   version: "dev",
-  hotkey: "",
+  hotkey: "Ctrl+Alt+Space",
+  hotkey_status: "ok",
+  hotkey_note: "",
   claude_usage_from_login: true,
   update_check: true,
   allow_fallback: true,
@@ -473,11 +475,20 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = [], emit?: (ev:
     // Nothing can be played in a browser, so the mock reports a machine with no speaker, which is a real answer the section already knows how to say.
     if (method === "POST" && path === "/voices/preview") return { status: 503, body: {} };
     if (method === "GET" && path === "/settings") return { status: 200, body: { ...emptySettings, ...settingsState } };
+    // Every shortcut is free except the default, which another app holds, so both answers can be seen; the one in effect is "current".
+    if (method === "GET" && path === "/hotkey/check") {
+      const hotkey = params.get("hotkey") ?? "";
+      const current = hotkey === ({ ...emptySettings, ...settingsState }).hotkey;
+      const taken = !current && hotkey === "Ctrl+Alt+Space";
+      return { status: 200, body: { hotkey, available: !taken, reason: current ? "current" : taken ? "taken" : "ok", note: "" } };
+    }
     if (method === "POST" && path === "/settings") {
       const { autostart, ...rest } = (body ?? {}) as Partial<SettingsView> & { autostart?: boolean };
       // Start-at-sign-in is written through /settings and read back through /setup, as on the daemon.
       if (autostart !== undefined) setupState = { ...setupState, autostart };
       settingsState = { ...settingsState, ...rest };
+      // A new shortcut is in effect at once, as on Linux; "" is the default again.
+      if (typeof rest.hotkey === "string") settingsState = { ...settingsState, hotkey: rest.hotkey || "Ctrl+Alt+Space", hotkey_status: "ok", hotkey_note: "" };
       return { status: 200, body: { ...emptySettings, ...settingsState } };
     }
     if (method === "GET" && path === "/usage") return { status: 200, body: canned.usage ?? { today: { providers: [], models: [] }, week: { providers: [], models: [] }, days: [], recent: [] } };
@@ -839,7 +850,8 @@ export const demo: Canned = {
     keep_audio_days: -1,
     daemon_started: ago(0, 7, 42),
     version: "dev",
-    hotkey: "<Control><Alt>space",
+    hotkey: "Ctrl+Alt+Space",
+    hotkey_status: "ok",
   },
   usage: {
     today: {

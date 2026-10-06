@@ -29,15 +29,15 @@ func applyUpdateCheck(value string) error {
 	}
 	// Best effort: a June that is not running reads the file when it starts, and one that refuses the request still does at its next start.
 	if pingOnce() {
-		tellDaemonUpdateCheck(on)
+		tellDaemonSetting(fmt.Sprintf(`{"update_check":%t}`, on))
 	}
 	fmt.Printf("check for updates: %s\n", map[bool]string{true: "on", false: "off"}[on])
 	return nil
 }
 
-// tellDaemonUpdateCheck sends the running daemon POST /settings {"update_check": on}. The updater reads the file before each check, but GET /settings answers from the daemon's own copy of the config, which only a POST changes. Input: the choice. Output: none.
-func tellDaemonUpdateCheck(on bool) {
-	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+DaemonPort+"/settings", strings.NewReader(fmt.Sprintf(`{"update_check":%t}`, on)))
+// tellDaemonSetting sends the running daemon POST /settings with body, such as {"update_check": true}. The updater reads the file before each check, but GET /settings and GET /setup answer from the daemon's own copy of the config, which only a POST changes. Input: the JSON body. Output: none.
+func tellDaemonSetting(body string) {
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+DaemonPort+"/settings", strings.NewReader(body))
 	if err != nil {
 		return
 	}

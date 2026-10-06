@@ -265,13 +265,13 @@ func announce(text string, detail any, failed bool) {
 
 // restartRefusals is the sentence POST /restart answers with for each word restartBlocker gives.
 var restartRefusals = map[string]string{
-	"recording":   "Restarting June now would end the meeting recording, and the rest of the call would not be recorded. Restart once the meeting is over.",
-	"processing":  "Restarting June now would stop the write-up of the meeting it just recorded. Restart in a few minutes, once the notes are ready.",
-	"downloading": "Restarting June now would stop the local features it is downloading. Restart once they finish, or cancel the download first.",
-	"voice":       "Restarting June now would end the voice conversation. Restart once you have finished talking.",
-	"dictating":   "Restarting June now would lose what you are dictating. Restart once it has been typed in.",
-	"acting":      "Restarting June now would end the task it is working on for you, including one that is paused or waiting for your answer. Finish or stop it first, then restart.",
-	"asking":      "Restarting June now would cut off the answer it is writing. Restart once the answer is in.",
+	"recording":   "Restarting now would stop the meeting recording. Restart once the meeting is over.",
+	"processing":  "June is still writing up the meeting. Restart in a few minutes, once the notes are ready.",
+	"downloading": "Restarting now would stop the download. Restart once it finishes, or cancel it first.",
+	"voice":       "Restarting now would end the voice chat. Restart once you're done talking.",
+	"dictating":   "Restarting now would lose what you're dictating. Restart once it's typed in.",
+	"acting":      "Restarting now would stop the task June is doing for you. Finish or stop it first, then restart.",
+	"asking":      "Restarting now would cut off the answer June is writing. Restart once it's done.",
 }
 
 // lifecycleRoutes answers POST /quit and POST /restart. Input: what a restart now would cut short, as restartBlocker gives it. Output: the handlers keyed by ServeMux pattern, for registerRoutes to put behind the IPC token.
@@ -291,7 +291,7 @@ func lifecycleRoutes(blocker func() string) map[string]http.HandlerFunc {
 				return
 			}
 			if restartDaemon == nil {
-				writeLifecycleJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_daemon", "message": "This June cannot restart itself."})
+				writeLifecycleJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "not_daemon", "message": "This copy of June can't restart itself."})
 				return
 			}
 			// The restart is started here rather than through lifecycle.RequestRestart, so a replacement that will not start is answered to the window that asked instead of only announced.
@@ -300,7 +300,7 @@ func lifecycleRoutes(blocker func() string) map[string]http.HandlerFunc {
 				if errors.Is(err, errShuttingDown) {
 					status, code = http.StatusConflict, "shutting_down"
 				}
-				writeLifecycleJSON(w, status, map[string]string{"error": code, "message": "June could not restart: " + strings.TrimSuffix(err.Error(), ".") + "."})
+				writeLifecycleJSON(w, status, map[string]string{"error": code, "message": "June couldn't restart: " + strings.TrimSuffix(err.Error(), ".") + "."})
 				return
 			}
 			writeLifecycleJSON(w, http.StatusAccepted, map[string]any{"restarting": true, "pid": os.Getpid()})
@@ -507,12 +507,12 @@ func quittingPid(body []byte) int {
 func startAfterQuit(pid int) int {
 	p, err := spawnReplacement(pid, "--open")
 	if err != nil {
-		reportFailure(fmt.Sprintf("June is still quitting, and could not be started again to follow it (%v). Run june again in a minute.", err))
+		reportFailure(fmt.Sprintf("June is still quitting and couldn't start again (%v). Try again in a minute.", err))
 		return 1
 	}
 	slog.Info("the daemon is quitting; started the one that follows it", "quitting", pid, "pid", p.Pid)
 	p.Release()
-	fmt.Println("June is quitting; it starts again and shows its window as soon as that is done.")
+	fmt.Println("June is quitting. It will start again and show its window when it's done.")
 	return 0
 }
 

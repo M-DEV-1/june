@@ -27,7 +27,7 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 
-# Windows delivers a global hotkey to a hidden window, so there the window registers Ctrl+Alt+Space itself; see register_toggle_hotkey in src/lib.rs.
+# Windows delivers a global hotkey to a hidden window, so there the window registers the user's shortcut itself; see load_hotkey_plugin and hotkey_changed in src/lib.rs.
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-global-shortcut = "~2.3"
 

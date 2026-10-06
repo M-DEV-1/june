@@ -19,22 +19,22 @@ import (
 // The sentences a failed ask can read as. Each says what happened and, where there is something to do about it, what to do; none carries a URL, a status code or any of the provider's own JSON. Nor does any send the person to a terminal, a file or a variable name: the window has a key box in Settings → Brain and in setup, and a lapsed login is signed back into in the provider's own app, which is where these point.
 const (
 	askQuotaSpent           = "Today's free Gemini requests are used up. It works again tomorrow, or now on another brain."
-	askTooFast              = "That is too many requests in a row. Give it a moment, then ask again."
-	askOverloaded           = "Every model is busy right now. Ask again in a moment."
+	askTooFast              = "That's too many questions in a row. Wait a moment, then ask again."
+	askOverloaded           = "The AI is busy right now. Ask again in a moment."
 	askKeyRefused           = "The key for this brain was refused. Check it in Settings → Brain, then ask again."
 	askNoKey                = "Gemini has no key on this computer. Add a free one in Settings → Brain, or pick another brain."
-	askMalformed            = "The model turned the question down as malformed. Try asking it another way."
-	askTooLong              = "That took too long and was given up on. Ask again, or ask for less at once."
+	askMalformed            = "The AI couldn't read that question. Try asking it another way."
+	askTooLong              = "That took too long, so June stopped. Ask again, or ask for less at once."
 	askStopped              = "That question was stopped before it was answered."
-	askNoNetwork            = "No network. The model cannot be reached from here."
+	askNoNetwork            = "No internet connection, so June can't reach the AI."
 	askLoggedOut            = "This brain's login has expired. Open its app and sign in again, or pick another brain."
 	askLoggedOutChatGPT     = "Your ChatGPT login has expired. Open the Codex app and sign in again, or pick another brain."
 	askLoggedOutClaude      = "Your Claude login has expired. Open Claude Code and sign in again, or pick another brain."
 	askLoggedOutAntigravity = "Your Antigravity login has expired. Open Antigravity and sign in again, or pick another brain."
-	askNoAnswer             = "The model ended its turn without an answer. Ask again, or pick another brain."
+	askNoAnswer             = "The AI didn't answer. Ask again, or pick another brain."
 	askNoBrain              = "No brain can answer right now. Add a Gemini key or sign in to one in Settings → Brain."
-	askNotInstalled         = "June cannot find this brain's program. If you just installed it, quit June and open it again."
-	askUnexplained          = "That ask failed for a reason June did not recognise. Ask again, or pick another brain."
+	askNotInstalled         = "June can't find this brain's app. If you just installed it, quit June and open it again."
+	askUnexplained          = "That didn't work, and June can't tell why. Ask again, or pick another brain."
 )
 
 // statusInText finds the HTTP status a provider named in a plain error string, for the paths that return no typed API error: another brain's HTTP client, and any error whose typed cause was flattened to text on the way here. It only reads a number that follows a word saying it is one, so a model name or a byte count is never mistaken for a status.

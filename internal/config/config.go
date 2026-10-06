@@ -70,6 +70,19 @@ type JuneConfig struct {
 	ClaudeUsageFromLogin *bool `json:"claude_usage_from_login,omitempty"`
 	// ExaMonthlyRequests is the request ceiling of the user's own Exa plan, so GET /usage can show calls-this-month against it as a fraction. Exa's own usage endpoint needs a team-management key June does not hold (see internal/agent/websearch.go), so this is the only ceiling there is, and it is never guessed: 0 means unset, and the usage view then shows the call count with no bar.
 	ExaMonthlyRequests int `json:"exa_monthly_requests,omitempty"`
+	// Hotkey is the shortcut that shows and hides June's hover, as canonical text such as "Ctrl+Shift+Space" (see ipc.ParseHotkey). "" means DefaultHotkey. It is the shortcut the user asked for, not necessarily the one in effect: one another program already holds leaves June with none, and GET /settings reports what is actually in effect.
+	Hotkey string `json:"hotkey,omitempty"`
+}
+
+// DefaultHotkey is the shortcut June asks for when the config names none. There is deliberately no second choice behind it: a shortcut June quietly picked for itself is one the user does not know to press, so when this one is taken June has none until the user chooses their own.
+const DefaultHotkey = "Ctrl+Alt+Space"
+
+// HotkeyWanted is the shortcut June should try to hold: the configured one, or DefaultHotkey when none is set.
+func (cfg JuneConfig) HotkeyWanted() string {
+	if cfg.Hotkey == "" {
+		return DefaultHotkey
+	}
+	return cfg.Hotkey
 }
 
 // ClaudeUsageFromLoginEnabled reports whether the Claude usage endpoint should be read. Unset means on.

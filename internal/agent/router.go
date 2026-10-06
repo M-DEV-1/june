@@ -260,6 +260,9 @@ func ProviderSpent(err error) bool {
 // ErrNoAnswer is what a command-line asker returns when its run ended cleanly with nothing said: agy does this when the model reached for one of its own tools June does not grant, and asking it once more in the same session had not helped either. It is a third kind of failure another provider can fix, but unlike the other two it says nothing about the provider's next question, so it hands this one on without opening the provider's breaker.
 var ErrNoAnswer = errors.New("no answer")
 
+// ErrCouldNotRun is what a command-line backend returns when its program would not start, so no model was asked anything: agy under Windows' RedirectionGuard died in a quarter of a second on every ask and duty, and the ask stopped there with Claude signed in behind it (2026-10-06). Another provider's program is not affected, so the question is handed on. The breaker is not opened, because what stops a program starting is this machine's state rather than the provider's, and the next start can work (an expired login agy reports as it starts is ErrLoggedOut instead; see AgyStderrError); and since nothing reached a model, a duty does not count it as one of its answers.
+var ErrCouldNotRun = errors.New("the brain's program could not start")
+
 // ProviderUsable reports whether a provider is worth asking right now: this machine can run it and no breaker is open on it. Input: the provider id. Output: true when the router would offer it. For a caller that asks one provider directly rather than through Route, such as the job's Claude fallback, so it does not spend a call on a login the router already knows is dead.
 func ProviderUsable(id string) bool {
 	reviveRenewedLogins()
@@ -283,7 +286,7 @@ func ProviderUsable(id string) bool {
 var ErrNoProvider = errors.New("no provider can answer this right now: every one is either unavailable on this machine or out of allowance")
 
 // askInOrder tries each provider in turn until one answers. Input: the provider ids the router returned, best first, and how to ask one. Output: the first answer, or the last failure.
-// It hands on only when the failure is one another provider can fix (a spent allowance, an expired login, or ErrNoAnswer), and only while no action has run: a read like observe_screen can be repeated on another provider and change nothing, where a click or a keystroke would happen twice. A provider that reports a spent allowance is marked so the next question skips it rather than paying the same failure again.
+// It hands on only when the failure is one another provider can fix (a spent allowance, an expired login, ErrNoAnswer or ErrCouldNotRun), and only while no action has run: a read like observe_screen can be repeated on another provider and change nothing, where a click or a keystroke would happen twice. A provider that reports a spent allowance is marked so the next question skips it rather than paying the same failure again.
 func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTrace, error) {
 	var tr TurnTrace
 	var err error
@@ -295,7 +298,7 @@ func askInOrder(order []string, ask func(id string) (TurnTrace, error)) (TurnTra
 		if err == nil {
 			return tr, nil
 		}
-		if errors.Is(err, ErrNoAnswer) {
+		if errors.Is(err, ErrNoAnswer) || errors.Is(err, ErrCouldNotRun) {
 			slog.Warn("ask: provider gave no answer, handing the question on", "provider", id, "error", err)
 			continue
 		}

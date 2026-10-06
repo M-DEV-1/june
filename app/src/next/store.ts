@@ -691,6 +691,11 @@ export function streamMiddleware(open: typeof events = events) {
             else if (ev.text === "installing") api.dispatch(setupSlice.actions.restartBegan("update"));
             return;
           }
+          // The shortcut was taken, or turned out to be held by another app; GET /settings says which, so Settings and the last setup screen change the moment it is known.
+          if (ev.type === "hotkey") {
+            api.dispatch(juneApi.util.invalidateTags(["Settings", "Setup"]));
+            return;
+          }
           if (ev.type === "lifecycle") {
             const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
             const d = detailOf(ev.detail);
