@@ -3,7 +3,6 @@ package tracker
 import (
 	"bytes"
 	"image"
-	"image/draw"
 	"image/jpeg"
 	_ "image/png"
 	"sort"
@@ -93,18 +92,8 @@ func encodeFrame(img image.Image, r image.Rectangle) []byte {
 		nw, nh = jpegMaxWidth, h*jpegMaxWidth/w
 	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
-	if nw == w && nh == h {
-		draw.Draw(dst, dst.Bounds(), img, r.Min, draw.Src)
-	} else {
-		// Nearest-neighbor: no extra dependency, and this path only runs for a monitor wider than the cap.
-		for y := 0; y < nh; y++ {
-			sy := r.Min.Y + y*h/nh
-			for x := 0; x < nw; x++ {
-				dst.Set(x, y, img.At(r.Min.X+x*w/nw, sy))
-			}
-		}
-	}
+	// Area-averaged like a look's picture (see shrink): a monitor wider than the cap is a 4K one, scaled by 2/3, where nearest-neighbour sampling drops a third of every thin stroke of the text these frames are kept to show.
+	dst := shrink(img, r, nw, nh)
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: jpegQuality}); err != nil {

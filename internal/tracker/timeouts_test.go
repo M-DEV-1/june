@@ -94,8 +94,9 @@ func TestStart_ASlowCaptureDoesNotStopTheTickLoop(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go d.Start(ctx)
+	done := make(chan struct{})
+	go func() { d.Start(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
 
 	select {
 	case <-capturing:

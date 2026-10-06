@@ -1,6 +1,7 @@
 package input
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -98,7 +99,10 @@ func sendPointer(flags, data uint32) error {
 }
 
 // PressKey sends a full press-then-release for the named key or chord (e.g. "Enter", "Ctrl+L"), paced keyDelay apart. Modifiers are pressed first and released last, in reverse order. Every key that went down is released even when a later press fails, because a modifier left held is chorded into whatever is sent next. Input: the key or chord name. Output: the first error hit, pressing or releasing, or nil.
-func (s *Session) PressKey(name string) error {
+func (s *Session) PressKey(name string) error { return s.PressKeyContext(context.Background(), name) }
+
+// PressKeyContext is PressKey that presses no further key of the chord once ctx has ended, which a stopped job does while it waits on the acting lock behind another call's typing; the keys already down are released as on any other failure. Input: the context and the key or chord name. Output: a *Stopped when ctx ended before the chord was all down, else what PressKey returns.
+func (s *Session) PressKeyContext(ctx context.Context, name string) error {
 	codes, err := vkChord(name)
 	if err != nil {
 		return err
@@ -107,6 +111,10 @@ func (s *Session) PressKey(name string) error {
 	defer s.acting.Unlock()
 	held := 0
 	for _, c := range codes {
+		if e := ctx.Err(); e != nil {
+			err = &Stopped{Sent: held, Of: len(codes), Err: e}
+			break
+		}
 		if err = sendKey(c, 0, false); err != nil {
 			break
 		}
@@ -123,10 +131,28 @@ func (s *Session) PressKey(name string) error {
 }
 
 // TypeText presses and releases each character of text in turn, paced keyDelay apart: newline, tab and backspace as their keys, everything else as Unicode characters, so any text types whatever the keyboard layout. Characters Linux drops are dropped (see textStrokes). Input: the text. Output: the first refusal, or nil.
-func (s *Session) TypeText(text string) error {
+func (s *Session) TypeText(text string) error { return s.TypeTextContext(context.Background(), text) }
+
+// TypeTextContext is TypeText that stops between two characters once ctx has ended, so a job the user stopped stops typing within a character rather than after the whole text has gone out: at about two dozen milliseconds a character, a long dictation ran on for seconds after the stop. Input: the context and the text. Output: a *Stopped naming how many characters went out when ctx ended first, else what TypeText returns.
+func (s *Session) TypeTextContext(ctx context.Context, text string) error {
 	s.acting.Lock()
 	defer s.acting.Unlock()
-	for _, k := range textStrokes(text) {
+	strokes := textStrokes(text)
+	chars := 0
+	for _, k := range strokes {
+		if !lowSurrogate(k) {
+			chars++
+		}
+	}
+	typed := 0
+	for _, k := range strokes {
+		// The second half of a surrogate pair is never sent apart from its first, so the check is made only where a character begins.
+		if !lowSurrogate(k) {
+			if err := ctx.Err(); err != nil {
+				return &Stopped{Sent: typed, Of: chars, Err: err}
+			}
+			typed++
+		}
 		if err := sendKey(k.vk, k.unit, false); err != nil {
 			return err
 		}
@@ -139,6 +165,9 @@ func (s *Session) TypeText(text string) error {
 	}
 	return nil
 }
+
+// lowSurrogate reports whether a stroke is the second UTF-16 half of a character outside the Basic Multilingual Plane, which textStrokes sends straight after its first half.
+func lowSurrogate(k stroke) bool { return k.vk == 0 && k.unit >= 0xDC00 && k.unit <= 0xDFFF }
 
 // moveTo puts the cursor on a desktop point. Input: the point in physical virtual-desktop pixels, the space screenshots and window rectangles are measured in once the daemon is per-monitor DPI aware; it is negative on a monitor left of or above the main one. Output: an error naming the desktop's extent when the point is on no monitor, including a gap between two, or when Windows refused the move.
 func moveTo(x, y float64) error {

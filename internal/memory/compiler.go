@@ -224,6 +224,12 @@ func (c *Compiler) processFlush(ctx context.Context, buf []tracker.Activity, sin
 		return
 	}
 
+	// No summarizer (no Gemini key): the buffer is still kept, as the raw fallback node.
+	if c.llm == nil {
+		c.writeFallbackNode(ctx, buf, since)
+		return
+	}
+
 	tracer := obs.GetTracer(ctx, "june.memory")
 	ctx, span := tracer.Start(ctx, "Compiler.FlushBuffer")
 	defer span.End()

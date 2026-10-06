@@ -1,7 +1,28 @@
 /** The fake daemon: one fetch function that answers every route api.ts calls, out of a plain object of canned answers. It is imported by the tests in this folder through testing.tsx, and by the ?mock=1 browser mode below, so a screen and its test and a screenshot all read the same fixtures. Nothing here imports vitest or React.
  */
 
-import type { ActJob, Brain, ConversationSummary, ConversationView, DaySummary, DayView, LiveModel, Meeting, Notice, Routine, SettingsView, Task, Usage, Voice } from "./api";
+import type {
+  ActJob,
+  Brain,
+  Components,
+  ConversationSummary,
+  ConversationView,
+  DaySummary,
+  DayView,
+  Feature,
+  LiveModel,
+  Meeting,
+  MicTest,
+  Notice,
+  Routine,
+  SettingsView,
+  SetupView,
+  Task,
+  UpdateView,
+  Usage,
+  Voice,
+} from "./api";
+import type { DaemonEvent } from "../shared/wire";
 import { isoDay } from "./format";
 
 /** What the fake daemon holds. Anything left out answers as an empty list or an empty object, which is what a daemon with nothing recorded would say. */
@@ -15,6 +36,8 @@ export type Canned = {
   pages?: Record<string, DayView>;
   meetings?: Meeting[];
   brains?: Brain[];
+  /** Whether GET /brains starts out saying no brain is pinned and the router picks per question. */
+  automatic?: boolean;
   voices?: Voice[];
   /** The Live models GET /voices reports beside the voice roster, one carrying current true. */
   models?: LiveModel[];
@@ -30,6 +53,29 @@ export type Canned = {
   notice?: Pick<Notice, "body" | "id" | "kind" | "action" | "until">;
   /** What POST /dictate/stop answers with once a recording is stopped. Defaults to a fixed sentence, same as a daemon that transcribed something. */
   dictateText?: string;
+  /** What GET /setup starts out saying. Left out, setup reads as long finished, so every other fixture opens on Chats the way it always has. */
+  setup?: Partial<SetupView>;
+  /** What GET /components starts out saying; left out, the route answers 404, as a daemon without local features does. */
+  components?: Components;
+  /** What GET /update starts out saying; left out, the route answers 404. */
+  update?: UpdateView;
+  /** Whether POST /update fails partway, the way a download that does not match SHA256SUMS does. */
+  updateFails?: boolean;
+  /** What POST /setup/mic-test answers, and after how many milliseconds. */
+  mic?: MicTest;
+  micMs?: number;
+  /** How long the fake daemon stays unreachable after anything that restarts it, in milliseconds. */
+  restartMs?: number;
+  /** How long the old daemon keeps answering once a restart has begun, as the real one does through its shutdown (closing a recording, flushing the last activity), in milliseconds. */
+  stopMs?: number;
+  /** Whether every restart fails to start its replacement, leaving the old daemon running, as a program held by antivirus does. */
+  restartFails?: boolean;
+  /** Whether POST /setup/complete fails to save, as a locked or unwritable june-config.json does. */
+  completeFails?: boolean;
+  /** Whether no newer release is known when the page opens, and the daily check finds one a few seconds later. */
+  updateLater?: boolean;
+  /** Whether a meeting is being recorded, which the routes that restart June refuse for, and which the browser mode's stream says the moment it opens. */
+  recording?: boolean;
   /** The routes that should fail, each written "METHOD /path", so a test can see what the window says when a write does not go through. */
   fails?: string[];
 };
@@ -53,14 +99,184 @@ const emptySettings: SettingsView = {
   version: "dev",
   hotkey: "",
   claude_usage_from_login: true,
+  update_check: true,
+  allow_fallback: true,
+  meetings_offer: "ask",
 };
 
-/** A fake daemon as one fetch function. Input: what it should answer with, and the list to record every call in — the tests read that list to check a click wrote what it should have, and the browser mode passes one it ignores. Output: a function with fetch's own signature, to be put in fetch's place.
+/** What GET /setup says when a fixture names nothing: setup long finished. */
+const finishedSetup: SetupView = {
+  done: true,
+  version: "dev",
+  gemini_key: false,
+  brain_ready: true,
+  default_brain: "",
+  autostart: true,
+  hotkey: "Ctrl+Alt+Space",
+  restart_pending: false,
+  data_dir: "/home/you/.june",
+};
+
+/** The file each feature's progress names while it downloads, the largest one it fetches, as the real downloader reports it. */
+const FEATURE_FILE: Record<string, string> = {
+  transcribe: "ggml-medium.bin",
+  speakers: "wespeaker_en_voxceleb_CAM++.onnx",
+  memory: "embeddinggemma-300M-Q8_0.gguf",
+  summaries: "gemma-4-E2B-it-Q4_0.gguf",
+};
+
+/** How often the fake daemon sends a download's or an update's progress, and in how many steps a download completes. */
+const MOCK_TICK_MS = 250;
+const MOCK_TICKS = 28;
+
+/** A fake daemon as one fetch function. Input: what it should answer with, the list to record every call in — the tests read that list to check a click wrote what it should have, and the browser mode passes one it ignores — and, for the browser mode, where to send the events a real daemon would put on its stream (a download's progress, the microphone test's level, an update's steps). Output: a function with fetch's own signature, to be put in fetch's place.
  *
- * Nothing here imports vitest, so the same fake serves the test suite and the ?mock=1 page a plain browser tab opens.
+ * Nothing here imports vitest, so the same fake serves the test suite and the ?mock=1 page a plain browser tab opens. Anything that restarts the real daemon — a Gemini key, finishing setup with a restart pending, POST /restart, an update — has this one announce it on the stream, keep answering for stopMs as the real one does through its shutdown, and then go unreachable for restartMs, so the window's own wait for a restart runs against it exactly as it would against the real one.
  */
-export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fetch {
+export function daemonFetch(canned: Canned = {}, calls: Call[] = [], emit?: (ev: DaemonEvent) => void): typeof fetch {
   const fails = new Set(canned.fails ?? []);
+  let setupState: SetupView = { ...finishedSetup, ...(canned.setup ?? {}) };
+  let brains = [...(canned.brains ?? [])];
+  const components: Components | undefined = canned.components ? { ...canned.components, features: canned.components.features.map((f) => ({ ...f })) } : undefined;
+  // With updateLater the daily check has not found the release yet; it does a few seconds in (see the timer below).
+  let update: UpdateView | undefined = canned.update ? (canned.updateLater ? { ...canned.update, latest: "", available: false, release_url: "", can_install: false } : { ...canned.update }) : undefined;
+  // A restart runs in two parts, as the real one does: the old daemon still answering through its shutdown until stoppingUntil, then nothing answering until downUntil.
+  let stoppingUntil = 0;
+  let downUntil = 0;
+  const stopping = () => Date.now() < stoppingUntil;
+  const recording = canned.recording ?? false;
+  // One download at a time, the way the real downloader runs them.
+  const queue: string[] = [];
+  let running: { id: string; timer: ReturnType<typeof setInterval> } | undefined;
+  // How far each download had got when a restart cut it off, in ticks, so it carries on from there the way the real downloader resumes a partial file.
+  const partial: Record<string, number> = {};
+  // A restart POST /setup/complete owed but put off while something downloads, carried out once the queue is empty.
+  let restartWhenIdle = false;
+  const busy = () => Boolean(running) || queue.length > 0;
+
+  /** Restarts the fake daemon, announcing it on the stream the way announce in cmd/lifecycle.go does. Input: whether the replacement shows its window — true when a request the person made set the restart off, false for the one setup put off until a download ended — and how long nothing answers. Output: false when the restart failed (restartFails), with the daemon still running and "restart_failed" announced instead.
+   * The old daemon answers for stopMs more and then goes for restartMs, and comes back as a restarted one: nothing waiting on a restart any more, and the download queue taken up again, since the real downloader keeps it in state.json and resumes it from the partial files (resume in internal/components). */
+  const goDown = (reopen: boolean, ms = canned.restartMs ?? 2500): boolean => {
+    if (canned.restartFails) {
+      emit?.({ id: "june", type: "lifecycle", text: "restart_failed", detail: JSON.stringify({ error: "the replacement daemon could not be started: Access is denied." }), failed: true });
+      return false;
+    }
+    emit?.({ id: "june", type: "lifecycle", text: "restarting", detail: JSON.stringify({ reopen }), failed: false });
+    comeBackAfter(ms);
+    return true;
+  };
+
+  /** Stops the fake daemon and brings it back as a new one, with nothing announced: what a restart does once under way, and what the installer's quit does on its own. Input: how long nothing answers. */
+  const comeBackAfter = (ms: number) => {
+    stoppingUntil = Date.now() + (canned.stopMs ?? 600);
+    downUntil = stoppingUntil + ms;
+    setupState = { ...setupState, restart_pending: false };
+    restartWhenIdle = false;
+    if (running) {
+      clearInterval(running.timer);
+      queue.unshift(running.id);
+      running = undefined;
+    }
+    if (!components) return;
+    components.restart_pending = false;
+    for (const f of components.features) if (f.state === "installing") f.state = "queued";
+    if (queue.length) setTimeout(runQueue, downUntil - Date.now() + 50);
+  };
+
+  /** The refusal the routes that restart June give while a restart would cut something short, as internal/ipc/setup.go words it, or undefined when nothing would. Input: what the route does, as the start of the sentence. */
+  const restartRefusal = (doing: string) => {
+    if (recording) return { status: 409, body: { error: "recording", message: `${doing} restarts June, which would end the meeting recording, and the rest of the call would not be recorded. Try again once the meeting is over.` } };
+    if (busy()) return { status: 409, body: { error: "downloading", message: `${doing} restarts June, which would stop the local features downloading now. Try again once they finish, or cancel the download first.` } };
+    return undefined;
+  };
+
+  // The daily check finding the release, which the real updater announces as an "update" event with text "available" and the version as its id (internal/update/check.go).
+  if (canned.update && canned.updateLater && emit) {
+    const found = canned.update;
+    setTimeout(() => {
+      update = { ...found };
+      emit({ id: found.latest, type: "update", text: "available", detail: "", failed: false });
+    }, 4000);
+  }
+
+  /** Starts the next queued download, playing its progress onto the stream as the real downloader would. Without a stream to play onto — the test suite — a queued feature simply stays queued. */
+  const runQueue = () => {
+    if (!components || running || !emit) return;
+    const id = queue.shift();
+    if (!id) {
+      // Nobody asked for this restart just now, so its replacement comes up hidden, as restartWhenFree's does.
+      if (restartWhenIdle) goDown(false);
+      return;
+    }
+    const f = components.features.find((x) => x.id === id);
+    if (!f) return runQueue();
+    f.state = "installing";
+    const send = (text: string, detail = {}) => emit({ id, type: "component", text, detail: JSON.stringify(detail), failed: false });
+    let i = partial[id] ?? 0;
+    const timer = setInterval(() => {
+      i++;
+      if (i <= MOCK_TICKS) partial[id] = i;
+      const total = f.download_bytes;
+      if (i <= MOCK_TICKS) send("downloading", { file: FEATURE_FILE[id] ?? id, done: Math.round((total * i) / MOCK_TICKS), total, bps: Math.round(((total / MOCK_TICKS) * 1000) / MOCK_TICK_MS) });
+      else if (i === MOCK_TICKS + 3) send("verifying");
+      else if (i === MOCK_TICKS + 6) send("extracting");
+      else if (i === MOCK_TICKS + 9) send("testing");
+      else if (i === MOCK_TICKS + 12) {
+        clearInterval(timer);
+        running = undefined;
+        delete partial[id];
+        f.state = "installed";
+        if (f.needs_restart) {
+          components.restart_pending = true;
+          setupState = { ...setupState, restart_pending: true };
+        }
+        send("installed");
+        runQueue();
+      }
+    }, MOCK_TICK_MS);
+    running = { id, timer };
+  };
+
+  /** Plays an update's download, check and install onto the stream, ending in the fake daemon going away and coming back as the new version — or, with updateFails, in the failure the real updater reports for a download that does not match SHA256SUMS. */
+  const runUpdate = () => {
+    if (!update || !emit) return;
+    const u = update;
+    const total = 26_214_400;
+    let i = 0;
+    update = { ...u, state: "downloading", error: "" };
+    const timer = setInterval(() => {
+      i++;
+      if (i <= 16) emit({ id: "update", type: "update", text: "downloading", detail: JSON.stringify({ done: Math.round((total * i) / 16), total }) });
+      else if (i === 18) {
+        if (canned.updateFails) {
+          clearInterval(timer);
+          update = { ...u, state: "failed", error: "the download did not match its checksum" };
+          emit({ id: "update", type: "update", text: "failed", detail: "{}", failed: true });
+          return;
+        }
+        update = { ...u, state: "ready" };
+        emit({ id: "update", type: "update", text: "verifying", detail: "{}" });
+      } else if (i === 21) {
+        clearInterval(timer);
+        emit({ id: "update", type: "update", text: "installing", detail: "{}" });
+        update = { ...u, current: u.latest, available: false, state: "idle" };
+        setupState = { ...setupState, version: u.latest };
+        comeBackAfter(4000);
+      }
+    }, MOCK_TICK_MS);
+  };
+
+  /** Plays the microphone test's levels onto the stream for as long as it listens: speech-shaped when the fixture says the test heard something, a near-silent floor when it did not. */
+  const playLevels = (heard: boolean, ms: number) => {
+    if (!emit) return;
+    let i = 0;
+    const timer = setInterval(() => {
+      i++;
+      const mic = heard ? 0.04 + 0.4 * Math.abs(Math.sin(i / 2.3)) * Math.abs(Math.sin(i / 7.1)) : 0.003;
+      emit({ id: "mic-test", type: "level", detail: JSON.stringify({ mic }) });
+    }, 60);
+    setTimeout(() => clearInterval(timer), ms);
+  };
   // Both lists are the daemon's own copies: a delete takes a row out, a new chat puts one in, and a status change moves a task, so the next read answers what the write left behind rather than what the test first handed over.
   let conversations = [...(canned.conversations ?? [])];
   let tasks = [...(canned.tasks ?? [])];
@@ -70,6 +286,11 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
   const statusById = new Map<string, { done: boolean; status: string }>();
   // Settings the mock daemon holds in place: a POST /settings changes this, and the next GET /settings sees it, the same way the task lists above hold what a write left behind.
   let settingsState: Partial<SettingsView> = { ...(canned.settings ?? {}) };
+  // Pausing and resuming change what GET /status says, the way they do on the daemon, so the rail's pause control and the strip across the top can be seen to work.
+  let paused = canned.paused ?? false;
+  let pausedUntil = "";
+  // Whether no brain is pinned, which POST /brains changes and GET /brains reads back.
+  let automatic = canned.automatic ?? false;
 
   const answer = (method: string, path: string, body: unknown, params: URLSearchParams): { status: number; body: unknown } => {
     const conversation = /^\/conversations\/([^/]+)$/.exec(path);
@@ -151,8 +372,97 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
       return { status: 200, body: { ...page, tasks: raised } };
     }
     if (method === "GET" && path === "/meetings") return { status: 200, body: { meetings: canned.meetings ?? [] } };
-    if (method === "GET" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
-    if (method === "POST" && path === "/brains") return { status: 200, body: { brains: canned.brains ?? [] } };
+    if (method === "GET" && path === "/brains") return { status: 200, body: { brains, automatic } };
+    // Picking "auto" hands the choice back to the router and any brain pins it again, the same way round the real route has it, so the picker's Automatic row lights and unlights against the mock too.
+    if (method === "POST" && path === "/brains") {
+      const { brain, default: makeDefault } = (body ?? {}) as { brain?: string; default?: boolean };
+      if (brain === "auto") automatic = true;
+      else if (makeDefault !== false) automatic = false;
+      return { status: 200, body: { brains, automatic } };
+    }
+    if (method === "GET" && path === "/setup") return { status: 200, body: setupState };
+    // The real route asks Google; this one reads the key itself, so every answer the window has to explain can be had by typing it: "offline" is Google out of reach, "env" a key the environment already sets, "noapi" a well-formed key Google refuses for a reason of its own, and anything else not shaped like a Gemini key one Google calls not valid. force saves whatever was typed, as the real route does. The messages are the real route's and Google's own.
+    if (method === "POST" && path === "/setup/gemini-key") {
+      const { key = "", force = false } = (body ?? {}) as { key?: string; force?: boolean };
+      if (!force && key === "offline") return { status: 502, body: { error: "unreachable", message: "June could not reach Google to check the key: dial tcp: lookup generativelanguage.googleapis.com: no such host" } };
+      if (!force && key === "env") return { status: 409, body: { error: "env_var_set", message: "GEMINI_API_KEY is set in Windows' environment variables for your account, and that copy always wins. Change or remove it there, then restart June." } };
+      if (!force && key === "noapi")
+        return { status: 422, body: { error: "invalid_key", message: "Generative Language API has not been used in project 381294411 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/generativelanguage.googleapis.com/overview?project=381294411 then retry." } };
+      if (!force && key.length < 20) return { status: 422, body: { error: "invalid_key", message: "That is not a Gemini API key. Copy the whole key from Google AI Studio: one line of letters, digits, dashes and underscores." } };
+      if (!force && !/^AIza[0-9A-Za-z_-]{35}$/.test(key)) return { status: 422, body: { error: "invalid_key", message: "API key not valid. Please pass a valid API key." } };
+      const refused = restartRefusal("Saving the key");
+      if (refused) return refused;
+      brains = brains.map((b) => (b.id === "gemini" ? { ...b, signed_in: true, note: "" } : b));
+      setupState = { ...setupState, gemini_key: true, brain_ready: true };
+      // The answer goes out whether or not the restart then starts, as answerRestarting's does: the key is written either way.
+      goDown(true);
+      return { status: 200, body: { ok: true, restarting: true } };
+    }
+    if (method === "DELETE" && path === "/setup/gemini-key") {
+      const refused = restartRefusal("Removing the key");
+      if (refused) return refused;
+      brains = brains.map((b) => (b.id === "gemini" ? { ...b, signed_in: false } : b));
+      setupState = { ...setupState, gemini_key: false, brain_ready: brains.some((b) => b.signed_in) };
+      goDown(true);
+      return { status: 200, body: { ok: true, restarting: true } };
+    }
+    if (method === "POST" && path === "/setup/mic-settings") return { status: 204, body: null };
+    // The restart setup owes is put off while anything downloads, and carried out once the queue is empty, as the real route does.
+    if (method === "POST" && path === "/setup/complete") {
+      if (canned.completeFails) return { status: 500, body: { error: "save_failed", message: "open C:\\Users\\you\\AppData\\Local\\june\\june-config.json: The process cannot access the file because it is being used by another process." } };
+      const pending = setupState.restart_pending;
+      const restarting = pending && !recording && !busy();
+      setupState = { ...setupState, done: true };
+      if (restarting) goDown(true);
+      else if (pending) restartWhenIdle = true;
+      return { status: 200, body: { restarting } };
+    }
+    // As lifecycleRoutes answers it: refused for what a restart would cut short, except while a restart is already under way, when asking again only has the replacement show its window.
+    if (method === "POST" && path === "/restart") {
+      if (stopping()) return { status: 202, body: { restarting: true, pid: 4242 } };
+      if (recording) return { status: 409, body: { error: "recording", message: "Restarting June now would end the meeting recording, and the rest of the call would not be recorded. Restart once the meeting is over." } };
+      if (busy()) return { status: 409, body: { error: "downloading", message: "Restarting June now would stop the local features it is downloading. Restart once they finish, or cancel the download first." } };
+      if (!goDown(true)) return { status: 500, body: { error: "restart_failed", message: "June could not restart: the replacement daemon could not be started: Access is denied." } };
+      return { status: 202, body: { restarting: true, pid: 4242 } };
+    }
+    if (method === "GET" && path === "/components" && components) return { status: 200, body: components };
+    const feature = /^\/components\/([^/]+)(\/install|\/cancel)?$/.exec(path);
+    const f: Feature | undefined = feature && components ? components.features.find((x) => x.id === decodeURIComponent(feature[1])) : undefined;
+    if (feature && components && !f) return { status: 404, body: { error: "no such feature" } };
+    if (f && components && method === "POST" && feature?.[2] === "/install") {
+      if (f.state === "queued" || f.state === "installing") return { status: 202, body: {} };
+      f.state = "queued";
+      f.error = "";
+      queue.push(f.id);
+      runQueue();
+      return { status: 202, body: {} };
+    }
+    if (f && components && method === "POST" && feature?.[2] === "/cancel") {
+      if (running?.id === f.id) {
+        clearInterval(running.timer);
+        running = undefined;
+      }
+      queue.splice(0, queue.length, ...queue.filter((id) => id !== f.id));
+      f.state = "not_installed";
+      emit?.({ id: f.id, type: "component", text: "cancelled", detail: "{}", failed: false });
+      runQueue();
+      return { status: 204, body: null };
+    }
+    if (f && components && method === "DELETE" && !feature?.[2]) {
+      f.state = "not_installed";
+      if (f.needs_restart) {
+        components.restart_pending = true;
+        setupState = { ...setupState, restart_pending: true };
+      }
+      return { status: 200, body: { restart_pending: components.restart_pending } };
+    }
+    if (method === "GET" && path === "/update" && update) return { status: 200, body: update };
+    if (method === "POST" && path === "/update" && update) {
+      if (recording) return { status: 409, body: { error: "recording", message: "Updating June now would end the meeting recording, and the rest of the call would not be recorded. Update once the meeting is over." } };
+      if (busy()) return { status: 409, body: { error: "downloading", message: "Updating June now would stop the local features it is downloading. Update once they finish, or cancel the download first." } };
+      runUpdate();
+      return { status: 202, body: update };
+    }
     if (method === "GET" && path === "/voices") return { status: 200, body: { voices: canned.voices ?? [], models: canned.models ?? [] } };
     // Picking a voice or a Live model in the mock answers the roster with that one marked, so the section behaves the way it does against a real daemon rather than freezing on its first answer. A body names one or the other, never both, same as the real route.
     if (method === "POST" && path === "/voices") {
@@ -164,7 +474,10 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     if (method === "POST" && path === "/voices/preview") return { status: 503, body: {} };
     if (method === "GET" && path === "/settings") return { status: 200, body: { ...emptySettings, ...settingsState } };
     if (method === "POST" && path === "/settings") {
-      settingsState = { ...settingsState, ...(body as Partial<SettingsView>) };
+      const { autostart, ...rest } = (body ?? {}) as Partial<SettingsView> & { autostart?: boolean };
+      // Start-at-sign-in is written through /settings and read back through /setup, as on the daemon.
+      if (autostart !== undefined) setupState = { ...setupState, autostart };
+      settingsState = { ...settingsState, ...rest };
       return { status: 200, body: { ...emptySettings, ...settingsState } };
     }
     if (method === "GET" && path === "/usage") return { status: 200, body: canned.usage ?? { today: { providers: [], models: [] }, week: { providers: [], models: [] }, days: [], recent: [] } };
@@ -184,8 +497,18 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     }
     // The rail line's own Done/1h/Evening/Tomorrow buttons; nothing here fires the "notice" event the real Act does, since a fixture that wants to show one arriving already dispatches progress.eventArrived directly (see store.test.ts).
     if (method === "POST" && noticeAction) return { status: 200, body: null };
-    if (method === "GET" && path === "/status") return { status: 200, body: { paused: canned.paused ?? false } };
-    if (method === "POST" && (path === "/pause" || path === "/resume")) return { status: 200, body: "paused" };
+    if (method === "GET" && path === "/status") return { status: 200, body: { paused, paused_until: pausedUntil } };
+    if (method === "POST" && path === "/pause") {
+      const minutes = (body as { minutes?: number } | undefined)?.minutes ?? 0;
+      paused = true;
+      pausedUntil = minutes > 0 ? new Date(Date.now() + minutes * 60_000).toISOString() : "";
+      return { status: 200, body: "paused" };
+    }
+    if (method === "POST" && path === "/resume") {
+      paused = false;
+      pausedUntil = "";
+      return { status: 200, body: "resumed" };
+    }
     if (method === "POST" && path === "/dictate/start") return { status: 202, body: { id: "dictate-1" } };
     if (method === "POST" && path === "/dictate/stop") return { status: 200, body: { text: canned.dictateText ?? "send this thought" } };
     return { status: 404, body: null };
@@ -200,8 +523,18 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = []): typeof fet
     if (asRequest) sent = await asRequest.clone().text();
     else if (typeof init?.body === "string") sent = init.body;
     const body = sent ? JSON.parse(sent) : undefined;
+    // A restarting daemon is not there at all once its shutdown is over, which fetch says by throwing rather than by any status.
+    if (Date.now() >= stoppingUntil && Date.now() < downUntil) throw new TypeError("Failed to fetch");
     calls.push({ method, path: url.pathname, body });
     if (fails.has(`${method} ${url.pathname}`)) return new Response("no", { status: 500 });
+    // The one route that takes its time: the real one listens for three seconds before it answers.
+    if (method === "POST" && url.pathname === "/setup/mic-test") {
+      const mic = canned.mic ?? { device: "Microphone Array (Realtek Audio)", heard: true, peak: 0.42, consent: "allowed" };
+      const ms = canned.micMs ?? 3000;
+      playLevels(mic.heard, ms);
+      await new Promise((done) => setTimeout(done, ms));
+      return new Response(JSON.stringify(mic), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     const { status, body: out } = answer(method, url.pathname, body, url.searchParams);
     if (out === null) return new Response(null, { status });
     if (typeof out === "string") return new Response(out, { status });
@@ -222,6 +555,40 @@ function day(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return isoDay(d);
+}
+
+/** The local features as GET /components reports them, on a Windows laptop with a small NVIDIA card, or with gpu false on one without, which gets the CPU build and the small whisper model. Sizes are the manifest's own. Input: whether there is an NVIDIA card, and the state to give each feature by id (not_installed for any left out). Output: the body. */
+function featuresFixture(gpu: boolean, states: Record<string, Feature["state"]> = {}): Components {
+  const feature = (id: string, title: string, variant: string, download: number, disk: number, more: Partial<Feature> = {}): Feature => ({
+    id,
+    title,
+    variant,
+    download_bytes: download,
+    disk_bytes: disk,
+    state: states[id] ?? "not_installed",
+    error: "",
+    requires: [],
+    needs_restart: false,
+    ...more,
+  });
+  return {
+    platform: {
+      os: "windows",
+      gpu: gpu ? { vendor: "nvidia", name: "NVIDIA GeForce RTX 3050 Laptop GPU", vram_mb: 4096, driver: "581.57" } : { vendor: "intel", name: "Intel Iris Xe Graphics", vram_mb: 128, driver: "31.0.101.4502" },
+      vulkan: true,
+      free_bytes: 182_000_000_000,
+      ram_mb: 16084,
+    },
+    features: [
+      gpu
+        ? feature("transcribe", "Voice typing & meeting transcripts", "cuda", 2_209_187_442, 2_730_000_000)
+        : feature("transcribe", "Voice typing & meeting transcripts", "cpu", 509_847_299, 560_000_000),
+      feature("speakers", "Who said what", "cpu", 61_056_987, 70_000_000, { requires: ["transcribe"] }),
+      feature("memory", "Smarter memory search", "vulkan", 366_802_356, 400_000_000, { needs_restart: true }),
+      feature("summaries", "On-device summaries", "vulkan", 2_874_692_596, 2_900_000_000, { needs_restart: true }),
+    ],
+    restart_pending: false,
+  };
 }
 
 /** What ?mock=1 shows: enough of every screen to see the design working — a conversation with an answer, its sources and a failed ask; work of both kinds; a recording with real minutes; a day's page; brains signed in and not; and a week of token use. This is the only fixture the browser mode has, because its whole job is to make one page look at. */
@@ -457,6 +824,8 @@ export const demo: Canned = {
     { id: "codex", name: "Codex", signed_in: true, account: "plus", models: ["gpt-5.5", "gpt-5.5-mini"], model: "gpt-5.5", note: "", default: false },
     { id: "gemini", name: "Gemini", signed_in: false, account: "", models: [], model: "", note: "set GEMINI_API_KEY in ~/.config/june/env", default: false },
   ],
+  setup: { ...finishedSetup, version: "0.2.0", default_brain: "claude" },
+  components: featuresFixture(true, { transcribe: "installed", memory: "external" }),
   settings: {
     data_dir: "/home/you/.june",
     store_bytes: 22020096,
@@ -584,11 +953,77 @@ const firstRunSteps = {
   steps: ["Set GEMINI_API_KEY in ~/.config/june/env.", "Or sign in with the Claude CLI: run claude login.", "Or sign in with the Codex CLI: run codex login.", "Or point JUNE_LOCAL_MODEL at a model on this machine."],
 };
 
-/** Puts the fake daemon in fetch's place for a page opened with ?mock=1, so the window can be looked at in a plain browser tab with no daemon running. Input: the page's location. Output: true when the fake was installed. Called once from main.tsx before anything is rendered; on any other URL it does nothing and the window talks to the real daemon as always. ?firstrun=1 on top of ?mock=1 answers /settings and /brains as a daemon that cannot answer yet, so the panels Settings and the chat page only draw in that state can be screenshotted. */
+/** The release the ?update=1 page offers. */
+const newerRelease: UpdateView = {
+  current: "0.2.0",
+  latest: "0.2.1",
+  available: true,
+  release_url: "https://github.com/M-DEV-1/june/releases/tag/v0.2.1",
+  can_install: true,
+  state: "idle",
+  error: "",
+};
+
+/** What the page's query string asks the fake daemon to be, on top of the demo. Input: the query string. Output: the fixture.
+ *
+ * ?firstrun=1 answers /settings and /brains as a daemon that cannot answer yet, so the panels Settings and the chat page only draw in that state can be screenshotted.
+ * ?onboarding=1 is a fresh install on Windows: setup not done, Claude signed in, an expired ChatGPT login, no Gemini key, an NVIDIA laptop with no local features yet. On top of it, nobrain=1 signs everything out, chatgpt=1 keeps ChatGPT signed in (and so answering, ahead of Claude), grok=1 adds a signed-in Grok, mic=blocked or mic=silent fails the microphone test the two ways it can (mic=denied is blocked with the microphone also refusing to open), gpu=none is a machine without an NVIDIA card, and done=fail has finishing setup fail to save.
+ * ?update=1 offers a newer June (update=fail has its download fail the checksum, update=linux is a machine June cannot replace itself on, update=later has the daily check find it a few seconds after the page opens).
+ * ?restart=fail has every restart fail to start its replacement; restart=slow has the old daemon keep answering through twenty seconds of shutdown first, as one flushing a busy hour does.
+ * ?recording=1, with any of the above, has a meeting being recorded, which every button that restarts June waits for.
+ */
+function fixtureFor(search: string): Canned {
+  const q = new URLSearchParams(search);
+  let canned: Canned = demo;
+  if (q.get("firstrun") === "1") canned = { ...demo, brains: demo.brains?.map((b) => ({ ...b, signed_in: false })), settings: { ...demo.settings, first_run: firstRunSteps } };
+  if (q.get("onboarding") === "1") {
+    const nobrain = q.get("nobrain") === "1";
+    const chatgpt = q.get("chatgpt") === "1";
+    const rows: Brain[] = (canned.brains ?? []).map((b) =>
+      nobrain || b.id === "gemini"
+        ? { ...b, signed_in: false, limits: [], limits_note: "" }
+        : b.id === "codex" && !chatgpt
+          ? { ...b, signed_in: false, limits: [], limits_note: "the Codex login was refused: run codex login to sign in again" }
+          : b,
+    );
+    // Grok signed in is the case where it must not be offered: the router sends it no questions.
+    if (q.get("grok") === "1") rows.push({ id: "grok", name: "Grok", signed_in: true, account: "", models: [], model: "", note: "", default: false, limits: [], limits_note: "" });
+    // Marked default the way GET /brains marks it with nothing picked: the first signed in of automaticRank (internal/ipc/brains.go), which is the one the router answers on.
+    const answering = ["codex", "antigravity", "claude"].find((id) => rows.some((b) => b.id === id && b.signed_in)) ?? "";
+    canned = {
+      ...canned,
+      setup: { ...finishedSetup, done: false, version: "0.2.0", brain_ready: answering !== "", default_brain: answering, data_dir: "C:\\Users\\you\\AppData\\Local\\june" },
+      brains: rows.map((b) => ({ ...b, default: b.id === answering })),
+      components: featuresFixture(q.get("gpu") !== "none"),
+      mic:
+        q.get("mic") === "blocked"
+          ? { device: "", heard: false, peak: 0, consent: "blocked" }
+          : q.get("mic") === "denied"
+            ? { device: "Microphone Array (Realtek Audio)", heard: false, peak: 0, consent: "blocked", error: "IAudioClient::Initialize failed: E_ACCESSDENIED" }
+            : q.get("mic") === "silent"
+              ? { device: "Microphone Array (Realtek Audio)", heard: false, peak: 0.002, consent: "allowed" }
+              : undefined,
+      completeFails: q.get("done") === "fail",
+    };
+  }
+  const upd = q.get("update");
+  if (upd) canned = { ...canned, update: { ...newerRelease, can_install: upd !== "linux" }, updateFails: upd === "fail", updateLater: upd === "later" };
+  if (q.get("restart") === "fail") canned = { ...canned, restartFails: true };
+  if (q.get("restart") === "slow") canned = { ...canned, stopMs: 20_000 };
+  if (q.get("recording") === "1") canned = { ...canned, recording: true };
+  return canned;
+}
+
+/** Puts the fake daemon in fetch's place for a page opened with ?mock=1, so the window can be looked at in a plain browser tab with no daemon running. Input: the page's location. Output: true when the fake was installed. Called once from main.tsx before anything is rendered; on any other URL it does nothing and the window talks to the real daemon as always. What else the query string can ask for is in fixtureFor. */
 export function installMock(loc: { search: string } = location): boolean {
   if (!wantsMock(loc.search)) return false;
-  const canned = new URLSearchParams(loc.search).get("firstrun") === "1" ? { ...demo, brains: demo.brains?.map((b) => ({ ...b, signed_in: false })), settings: { ...demo.settings, first_run: firstRunSteps } } : demo;
-  window.fetch = daemonFetch(canned);
+  const canned = fixtureFor(loc.search);
+  // The event stream is a fake too: whatever the fake daemon would broadcast is handed to every stream the window has open, through the same onmessage the real EventSource calls, so a download's progress or the microphone's level reaches the store by the window's own path.
+  const streams = new Set<{ onmessage: ((e: MessageEvent) => void) | null }>();
+  const emit = (ev: DaemonEvent) => {
+    for (const s of streams) s.onmessage?.({ data: JSON.stringify(ev) } as MessageEvent);
+  };
+  window.fetch = daemonFetch(canned, [], emit);
   // A job in flight belongs in the store, not in fetch's fake answers, so this reaches the store directly rather than growing a second daemon fake that only ever plays back one fixed script. Loaded lazily and only here: daemonFetch above is also what the vitest suite imports for its own fake daemon, and it never triggers this path, so the test suite never pulls Redux in by way of a fixture.
   if (canned.runningJob) {
     const job = canned.runningJob;
@@ -621,9 +1056,19 @@ export function installMock(loc: { search: string } = location): boolean {
       }, 300);
     });
   }
-  // The window opens one SSE connection at start-up and there is no fake daemon behind it; a stub that connects to nothing keeps the page from retrying against a closed port.
+  // A stream that connects to nothing over the network keeps the page from retrying against a closed port; it only ever carries what emit above hands it.
   window.EventSource = class {
-    close() {}
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor() {
+      streams.add(this);
+      // The real daemon only says "recording" when one starts, so this stands in for a window that was open then.
+      if (canned.recording) setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: "recording", text: "on" }) } as MessageEvent), 0);
+    }
+    close() {
+      streams.delete(this);
+    }
     addEventListener() {}
     removeEventListener() {}
   } as unknown as typeof EventSource;

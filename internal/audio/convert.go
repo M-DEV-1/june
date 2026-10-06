@@ -2,10 +2,12 @@ package audio
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"math"
+	"time"
 )
 
-// The helpers here turn what a Windows audio device hands over into the 16-bit mono stream the rest of June reads. They carry no build tag so their tests run on Linux.
+// The helpers here turn what a Windows audio device hands over into the 16-bit mono stream the rest of June reads; the resampler also serves the speaker, which converts the other way (outConverter, player_windows.go). They carry no build tag so their tests run on Linux.
 
 // toMono averages interleaved frames into one channel on the int16 scale.
 // Input: raw little-endian samples, the channel count, and whether they are float32 (else int16). Output: one value per frame.
@@ -84,6 +86,8 @@ const clockJitter = hns / 20
 type packetClock struct {
 	rate int   // the output rate, in frames per second
 	next int64 // where the next packet should start, in 100 ns performance-counter units
+	// lead is how far the performance counter has run ahead of the unbiased interrupt time, which stops while the machine sleeps, as the read loop last measured it (see sleepLead); cut is what lead was when sleep was last taken out of a gap. lead-cut is sleep this stream has not written a gap for yet. Both stay 0 where nothing measures them, and no gap is then taken for sleep.
+	lead, cut int64
 }
 
 // silenceBefore returns how many output frames of silence belong before one packet, and moves the clock past that packet.
@@ -100,7 +104,55 @@ func (c *packetClock) silenceBefore(stamp int64, frames, srcRate int, stampBad b
 	if gap < clockJitter {
 		return 0
 	}
-	return gap * int64(c.rate) / hns
+	return c.framesFor(gap)
+}
+
+// sleepBreak is the silence a recording gets in place of the time the machine slept, one second: enough that whisper does not run the last words before the sleep into the first ones after it, and the same on both streams of a meeting, so the two stay lined up with each other. The performance counter keeps counting through standby and hibernation, so a recording left running over a sleep has a gap as long as the sleep; written as silence, a night's sleep in the middle of a call was some 32 KB a second per stream, hours of nothing for whisper to decode, and over a weekend more than a WAV's 4 GB can hold.
+const sleepBreak = hns
+
+// minSleep is the shortest measured sleep taken out of a gap, one second. The unbiased interrupt time moves only on a clock interrupt, up to 15.6 ms apart, so lead wobbles by that much with no sleep at all.
+const minSleep = hns
+
+// maxAwakeGap is the longest stretch the machine was measured awake that a recording still writes back as silence, five minutes. A recording's real gaps are a loopback's quiet between two polls and a lost device's reopen, a few seconds at most, so a longer one is a suspension the unbiased interrupt time did not see, such as an app frozen in modern standby, and is cut to sleepBreak like a sleep.
+const maxAwakeGap = 5 * 60 * hns
+
+// framesFor turns a gap the clock has already moved past into the frames of silence to write for it. The part of it the machine slept through is measured (lead-cut) rather than guessed from the gap's length, and becomes one sleepBreak; the rest, time the machine was awake and the device gave nothing, is written in full. Measured, a headset that takes seconds to reopen after the machine wakes still gets those seconds, while the other stream of the meeting records through them, so the two stay in step.
+// Input: the gap, in 100 ns units. Output: the frames to write.
+func (c *packetClock) framesFor(gap int64) int64 {
+	awake, broken := gap, false
+	if asleep := min(gap, c.lead-c.cut); asleep >= minSleep {
+		c.cut += asleep
+		awake -= asleep
+		broken = true
+		slog.Info("the machine slept during a recording; writing a short break instead of the sleep as silence", "slept", time.Duration(asleep*100))
+	}
+	if awake >= maxAwakeGap {
+		slog.Warn("a recording's device gave nothing for longer than an awake device does; writing a short break instead", "gap", time.Duration(awake*100))
+		awake, broken = 0, true
+	}
+	if broken {
+		awake += sleepBreak
+	}
+	return awake * int64(c.rate) / hns
+}
+
+// silenceLag is how far behind now a recording writes the silence of a device that delivers nothing, half a second. A packet reaches the read loop up to a poll and an engine period after the stamp it carries, so silence written right up to now would take the place that packet belongs in.
+const silenceLag = hns / 2
+
+// idle returns how many frames of silence bring the clock up to silenceLag before now, for a device that has delivered nothing while time went on (a loopback while nothing plays), and moves the clock past them. Without it a recording of a device that never plays anything stays empty, and one that goes quiet gets its silence only once the next sound arrives, if one ever does.
+// Input: the performance counter now, in 100 ns units, read after a poll that found the device's buffer empty. Output: the frames to write; 0 while the clock is within silenceLag of now.
+func (c *packetClock) idle(now int64) int64 {
+	behind := now - silenceLag - c.next
+	if behind <= 0 {
+		return 0
+	}
+	if c.lead-c.cut >= minSleep || behind >= maxAwakeGap {
+		c.next = now - silenceLag
+		return c.framesFor(behind)
+	}
+	frames := behind * int64(c.rate) / hns
+	c.next += frames * hns / int64(c.rate)
+	return frames
 }
 
 // level is the loudness of a chunk of 16-bit little-endian PCM for the waveform: RMS scaled by three, since speech RMS sits about three times below its peak, and capped at 1.

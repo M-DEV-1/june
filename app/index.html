@@ -6,6 +6,7 @@
     <title>June</title>
     <!-- Geist Variable is bundled with the app (see styles.css's @import) rather than fetched, the same as the main window, so nothing here depends on the network. -->
     <link rel="stylesheet" href="/src/styles.css" />
+    <!-- The packaged window's Content-Security-Policy (tauri.conf.json) lets inline styles through and stops Tauri adding a style nonce, which would switch 'unsafe-inline' off: main.ts writes style="" attributes into this card's innerHTML, and the React window's dialogs inject a style element of their own. Scripts, images and connections stay locked to this page, the daemon on 127.0.0.1:6942 and Tauri's own IPC. -->
     <script type="module" src="/src/main.ts" defer></script>
   </head>
 

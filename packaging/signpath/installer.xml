@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reference copy of the "installer" artifact configuration of SignPath project "june". SignPath reads the copy kept in its own web UI, not this file: change both together.
+  A second signing request after "exes", because Inno Setup packs the already-signed programs into June-Setup-x64.exe, and SignPath cannot open an Inno Setup file to sign inside it.
+  The installer reaches SignPath as a GitHub artifact, which is a zip, hence the zip-file root.
+  Inno Setup does not write its version strings the way a resource compiler does: it overwrites placeholders of fixed width in its Setup program and leaves the rest of each one as spaces, so Windows reads this file's ProductName as "June" followed by 56 spaces and its ProductVersion as the version followed by spaces up to 50 characters (the same in uninst-*.e64.exe; see exes.xml). The SignPath Foundation requires both restrictions on every file it signs, so they stay, but SignPath's documentation does not say whether it trims a value before comparing it.
+  The first run of the release workflow with SignPath set up therefore has to be a dry run (Actions > release > Run workflow, which signs under test-signing) before any tag is pushed. If SignPath rejects this file or the uninstaller over product-name or product-version, it compares exactly. Then either spell the restrictions with the same padding (XML keeps spaces inside an attribute value; the version would come from a second parameter that release.yml fills with the version padded to 50 characters), or ask SignPath support how they want Inno Setup's values restricted. Record the answer here and in exes.xml.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="June-Setup-x64.exe" product-name="June" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

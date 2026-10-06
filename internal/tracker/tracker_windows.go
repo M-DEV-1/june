@@ -18,7 +18,6 @@ var (
 	kernel32                       = windows.NewLazySystemDLL("kernel32.dll")       // system core info
 	procGetForegroundWindow        = user32.NewProc("GetForegroundWindow")          // current active window
 	procGetWindowTextW             = user32.NewProc("GetWindowTextW")               // title bar text
-	procGetWindowThreadProcessId   = user32.NewProc("GetWindowThreadProcessId")     // return pid for window
 	procOpenProcess                = kernel32.NewProc("OpenProcess")                // given process id, get details
 	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW") // name of .exe for this process
 	procCloseHandle                = kernel32.NewProc("CloseHandle")                // close the handler
@@ -52,14 +51,17 @@ func (w *winTracker) GetActiveWindow() (*Activity, error) {
 	procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), uintptr(len(titleBuf)))
 	title := windows.UTF16ToString(titleBuf)
 
-	return Normalize(windowApp(hwnd), title), nil
+	app := windowApp(hwnd)
+	// The desktop, a taskbar, Start, search and the task switcher take the foreground like any window, but none of them is something the user is doing. They read as the one application windowsShell, which the daemon skips without disturbing the activity it was dwelling on, since the user is on their way to another window or back to the same one, while a capture still running for that activity sees the user left it.
+	if winShell(windows.HWND(hwnd), app, title) {
+		return Normalize(windowsShell, title), nil
+	}
+	return Normalize(app, title), nil
 }
 
-// windowApp names the application that owns a window: its executable's file name without ".exe", so June's own window reads "june" the way IsJuneWindow expects and app names match Linux's bare names. Input: a window handle. Output: the name, or "" when the process cannot be opened (an elevated process denies a normal one).
+// windowApp names the application that owns a window: its executable's file name without ".exe" (for a store app, the app hosted in the frame rather than ApplicationFrameHost), so June's own window reads "june" the way IsJuneWindow expects and app names match Linux's bare names. Input: a window handle. Output: the name, or "" when the process cannot be opened (an elevated process denies a normal one).
 func windowApp(hwnd uintptr) string {
-	var pid uint32
-	// use unsafe only when you're crossing borders
-	procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	pid, _ := winPid(windows.HWND(hwnd))
 
 	// hProcess (handle to process)
 	// 0x1000 - windows constant for PROCESS_QUERY_LIMITED_INFORMATION

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "june",
-  "version": "0.1.0",
+  "productName": "June",
+  "version": "0.2.0-rc.1",
   "identifier": "dev.june.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -58,7 +58,17 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:6942",
+        "object-src": "'none'",
+        "base-uri": "'self'"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/util"
 )
 
 // The daemon owns the desktop window's lifetime, so a user starts and stops one thing rather than two. The login entry launches the daemon (see autostart.go), the daemon launches the window, and quitting the daemon takes the window with it.
@@ -121,6 +122,8 @@ func startWindow(ctx context.Context, path string) (*exec.Cmd, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// Windows has no parent-death signal, so a daemon that crashed or was ended with taskkill /F left the window running, holding the show-window hotkey and drawing a second overlay beside the next daemon's.
+	util.KillWithDaemon(cmd)
 	return cmd, nil
 }
 
@@ -204,7 +207,34 @@ func runWindow(ctx context.Context, want bool) {
 		slog.Info("no desktop window to run, running the daemon alone", "hint", "build it in app/ or point JUNE_WINDOW at it")
 		return
 	}
-	go superviseWindow(ctx, path, startWindow)
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	windowStop = func() {
+		cancel()
+		// The window is asked to close and killed after windowStopGrace (see startWindow), so this only runs out when even the kill did not end it.
+		select {
+		case <-done:
+		case <-time.After(windowStopGrace + 2*time.Second):
+			slog.Warn("the desktop window did not stop in time, leaving it")
+		}
+	}
+	go func() {
+		defer close(done)
+		superviseWindow(ctx, path, startWindow)
+	}()
+}
+
+// windowStop ends the supervised window and waits for it to exit; nil while there is no window, and again once it has been stopped.
+// It needs no lock: every runDaemonSupervisor sets it through startDaemonServices, which calls runWindow before returning, and reads it through the shutdown that function returns, later on that same goroutine. The tray's own goroutine only signals the quit and never touches it.
+var windowStop func()
+
+// stopWindow ends the desktop window and waits for it to exit. Input: none. Output: none; it does nothing when there is no window or it has already been stopped. The daemon's shutdown calls it, first for a quit and after the slow steps for a restart (see startDaemonServices).
+// The window does not end with the daemon's context, which a restart cancels at once while the window stays up, and the Quit menu item does not cancel the root one either: only runRoot's deferred cancel does, as the process is already exiting, and the process could be gone before the kill that cancel sets off had run. Nothing else ended the window then, so a Quit left it running, holding the hotkey.
+func stopWindow() {
+	if windowStop != nil {
+		windowStop()
+		windowStop = nil
+	}
 }
 
 // windowLogTail is how much of the end of window.log is read looking for the reason a run died. A panic and its message land well inside this; reading more would pull in the overlay's ordinary event-stream chatter.

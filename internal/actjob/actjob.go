@@ -132,7 +132,7 @@ type Step struct {
 	Args   map[string]any `json:"args"`
 	Expect act.Check      `json:"expect"`
 	Result string         `json:"result"`
-	// Outcome is "pass" or "fail", from the wait_for check alone. A check that was already satisfied before the action still reads "pass" here, with HeldBefore set beside it; there is no third word, so a reader that knows only the two still gets a true answer.
+	// Outcome is "pass" or "fail" for a step that was checked, from the wait_for check alone, and "fail" too for one whose action was refused or came back with an error, which is never checked. A check that was already satisfied before the action still reads "pass" here, with HeldBefore set beside it, so a reader that knows only the two words still gets a true answer. The two steps that are never checked say so instead: "read" for a read, and "stopped" for one the job ended during.
 	Outcome string `json:"outcome"`
 	// Why is what the check found, in plain words, whichever way it went.
 	Why string `json:"why"`
@@ -141,6 +141,18 @@ type Step struct {
 	// Burst is every action this step took, in order, when the round took more than one. Tool and Args above are the first of them, so a reader that knows nothing about bursts still reads the step correctly.
 	// Recorded because the checkpoint is the only thing a restarted daemon knows: a job that died mid-burst and came back believing one click had happened would take the rest again on the user's real screen. Arguments are redacted the same way Args is.
 	Burst []action `json:"burst,omitempty"`
+	// Tried is how many of a burst's actions were tried before it ended, the last of them being the one Result is from: a burst stops at its first refusal or error and at a stop, so Result is not always the last action's, and filing it under the first one's tool told the model and the user that the wrong action had answered. Zero for a step that was not a burst.
+	Tried int `json:"tried,omitempty"`
+	// Text is the line the step was announced with while it ran (see describeAction): the model's own words for it, or the tool and its redacted arguments. Kept so the words a job closes with can name the last step the way the user watched it go past rather than by a tool name.
+	Text string `json:"text,omitempty"`
+}
+
+// answeredBy is the tool of the action this step's Result is from. Output: the tool name.
+func (s Step) answeredBy() string {
+	if s.Tried > 0 && s.Tried <= len(s.Burst) {
+		return s.Burst[s.Tried-1].Tool
+	}
+	return s.Tool
 }
 
 // Job is the whole checkpoint: everything a fresh Runner needs to carry on where the last one stopped. It is stored as JSON in the act_runs row's job_json column and is the only place the full trail lives — the prompt sent each round carries a small part of it (see BuildPrompt).
@@ -235,6 +247,8 @@ type Runner struct {
 	// brain is the daemon's configured brain, used by a job that names none.
 	brain string
 	emit  func(Event)
+	// jobCtx, when set, dresses each run's context before any tool is called with it (see UseJobContext).
+	jobCtx func(ctx context.Context, jobID string) context.Context
 
 	nextID atomic.Uint64
 	mu     sync.Mutex
@@ -256,6 +270,11 @@ func New(store Store, exec Executor, models map[string]Model, defaultBrain strin
 		r.nextID.Store(most)
 	}
 	return r
+}
+
+// UseJobContext gives every run of every job a context of the caller's making to run its tool calls under. The daemon hangs on it the recorder that files each call in the tool_calls table, with the job's id as the turn the calls belong to: a job runs outside any request, so nothing else put one there, and not one step or check of a job was ever on record. Input: the function, called once per run with the run's context and the job's id. Set it before any job starts.
+func (r *Runner) UseJobContext(fn func(ctx context.Context, jobID string) context.Context) {
+	r.jobCtx = fn
 }
 
 // ErrNoGoal and ErrUnknownBrain are the two ways a caller can get Start wrong, as opposed to the ways the daemon itself can fail it (a store that will not take the checkpoint, an id that clashes with a live job). POST /act tells them apart with errors.Is to answer 400 rather than 500 — see internal/ipc/actjob.go.
@@ -494,6 +513,9 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 	if scoped, ok := r.exec.(ScreenScope); ok {
 		ctx = scoped.NewScreenScope(ctx)
 	}
+	if r.jobCtx != nil {
+		ctx = r.jobCtx(ctx, l.snapshot().ID)
+	}
 	// Once per run, before the first round: a resumed job keeps the history it already had rather than searching again on a goal that has not changed.
 	if ref, ok := r.exec.(Referencer); ok && l.snapshot().Reference == "" {
 		if block := ref.ActReferenceFor(ctx, l.snapshot().Goal, time.Now()); block != "" {
@@ -617,14 +639,14 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			d.Expect = act.Check{}
 		}
 		storedExpect := redactedExpect(d.Tool, d.Expect)
-		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect}
+		step := Step{N: len(job.Steps) + 1, Tool: d.Tool, Args: db.StorableArgs(d.Tool, d.Args), Expect: storedExpect, Text: describeAction(d)}
 		if actions := burst(d); len(actions) > 1 {
 			for _, a := range actions {
 				step.Burst = append(step.Burst, action{Tool: a.Tool, Args: db.StorableArgs(a.Tool, a.Args)})
 			}
 		}
 
-		// A stop or a pause decided while the model was still thinking takes effect here, before the mouse or the keyboard is touched: the input drivers take no context, so a click or a keystroke started after the stop really lands on the user's screen, and the checks after the tool call would only notice it afterwards.
+		// A stop or a pause decided while the model was still thinking takes effect here, before the mouse or the keyboard is touched: a click started after the stop really lands on the user's screen, and typing stops only between two characters (see input.Stopped), so the checks after the tool call would only notice it afterwards.
 		if r.ended(ctx, l) {
 			return
 		}
@@ -632,7 +654,7 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			continue
 		}
 		l.set(func(j *Job) { j.State = Stepping })
-		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: describeAction(d), Expect: storedExpect.Describe()})
+		r.emit(Event{Job: job.ID, Kind: "step", State: Stepping, Step: step.N, Text: step.Text, Expect: storedExpect.Describe()})
 
 		// The check is taken once before the action, so a verdict that was true either way cannot be counted as proof: a title_contains "Netflix" written after a click passes on a window that was already called that, and item_absent passes on an item that was never there. One poll, no waiting.
 		if !read {
@@ -645,24 +667,32 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		// Every action of the burst in order, with no round trip and no reading between them. The first failure ends the burst: the actions after it were predicted against a screen that is now somewhere else, and taking them anyway is how a wrong guess turns into several wrong guesses on the user's real screen.
 		actions := burst(d)
 		var result string
+		// failedAt is the action that came back refused or with an error, which ends the burst, and -1 when every action went through.
+		failedAt := -1
 		for i, a := range actions {
 			result = r.exec.ExecuteAskTool(ctx, a.Tool, a.Args)
+			if len(actions) > 1 {
+				step.Tried = i + 1
+			}
 			if strings.HasPrefix(result, stopLineRefusal) || strings.HasPrefix(result, "error") {
 				if i > 0 {
 					slog.Info("burst stopped early", "job", job.ID, "action", i+1, "of", len(actions), "tool", a.Tool, "result", result)
 				}
+				failedAt = i
 				break
 			}
-			if r.ended(ctx, l) {
-				return
+			// A stop that came while this action ran ends the burst here, and the step is still recorded below: the action reached the screen whether or not anything checks it now.
+			if ctx.Err() != nil {
+				break
 			}
 		}
 		step.Result = util.Runes(result, resultCap)
 		step.Why = "the action ran, and the check had not answered yet"
+		stopLine := strings.HasPrefix(result, stopLineRefusal)
 
 		// Nothing was clicked, typed or pressed, and no rewording of the same action gets past the stop line, so the refusal goes to the user as the job's one question rather than back to the model as a result to try around — which is what the ask loop does with the same sentinel (see ask.go).
 		// ponytail: the user's answer is kept with the goal and shown to the model, but it is not put on the context the next tool call runs with, so a guarded control still cannot be clicked and the job will ask again; carrying agent.WithGo through the Executor seam is the upgrade path.
-		if strings.HasPrefix(result, stopLineRefusal) {
+		if stopLine && failedAt == 0 {
 			if !r.askUser(ctx, l, result) {
 				r.endedWaiting(ctx, l)
 				return
@@ -671,9 +701,24 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		}
 
 		// The step goes on disk the moment its action has run, before it is checked: a daemon that dies between the two comes back knowing the action happened, rather than taking it a second time on the real screen.
+		// A step the job ended during is recorded too, as never checked: the stop used to return before this, so 176 characters typed after a Stop left no step at all in the checkpoint, in GET /act or in the closing words.
+		// Neither branch below takes the check after the action, so the reading taken before it is no verdict on anything and is dropped: left set, a refused step went out as "fail" beside held_before, and the window, which reads held_before first, showed the refusal as "already held" rather than as a failure.
+		if ctx.Err() != nil {
+			step.Outcome, step.Why, step.HeldBefore = "stopped", "the job ended while this step ran, so nothing checked it", false
+			l.set(func(j *Job) {
+				j.Steps = append(j.Steps, step)
+				j.Results = pushCapped(j.Results, step.answeredBy()+": "+step.Result, keptResults, resultCap)
+			})
+			r.ended(ctx, l)
+			return
+		}
+		// An action that was refused or failed did not get the screen to where the check was written for, so the check is not taken: a check that already held would otherwise have filed the refusal as a passed step, which is what a job's refused switch_window was.
+		if failedAt >= 0 {
+			step.Outcome, step.Why, step.HeldBefore = "fail", util.Runes(failedWhy(actions, failedAt, result), resultCap), false
+		}
 		job = l.set(func(j *Job) {
 			j.Steps = append(j.Steps, step)
-			if !l.paused.Load() {
+			if !l.paused.Load() && step.Outcome == "" {
 				j.State = Verifying
 			}
 		})
@@ -682,23 +727,25 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 			return
 		}
 
-		if read {
+		switch {
+		case step.Outcome != "":
+		case read:
 			step.Outcome, step.Why = "read", "a read, nothing to check"
-		} else {
+		default:
 			verdict := r.exec.ExecuteAskTool(ctx, "wait_for", map[string]any{"kind": d.Expect.Kind, "value": d.Expect.Value, "timeout_ms": float64(waitTimeoutMS)})
 			if r.ended(ctx, l) {
 				return
 			}
 			step.Outcome, step.Why = readVerdict(verdict)
 		}
-		toldNothing := (step.Outcome == "pass" && step.HeldBefore) || read
-		if toldNothing && !read {
+		toldNothing := (step.Outcome == "pass" && step.HeldBefore) || step.Outcome == "read"
+		if toldNothing && step.Outcome != "read" {
 			step.Why += alreadyHeldNote
 		}
 
 		job = l.set(func(j *Job) {
 			j.Steps[len(j.Steps)-1] = step
-			j.Results = pushCapped(j.Results, step.Tool+": "+step.Result, keptResults, resultCap)
+			j.Results = pushCapped(j.Results, step.answeredBy()+": "+step.Result, keptResults, resultCap)
 			// A check that already held is neither a pass nor a failure: it told us nothing about the action, so it neither clears the stuck counter nor moves it on. Counting it as a failure is what used to stop a job whose every check was the same window title after three ordinary steps.
 			switch {
 			case toldNothing:
@@ -715,6 +762,14 @@ func (r *Runner) loop(ctx context.Context, l *live) {
 		r.emit(Event{Job: job.ID, Kind: "verified", State: job.State, Step: step.N, Text: step.Why, Expect: step.Expect.Describe(), Outcome: step.Outcome, HeldBefore: step.HeldBefore})
 		r.save(l, job)
 
+		// The stop line refused an action part way through a burst, after the ones before it had gone out: those are on record above, and the refusal goes to the user as it would have on its own.
+		if stopLine {
+			if !r.askUser(ctx, l, result) {
+				r.endedWaiting(ctx, l)
+				return
+			}
+			continue
+		}
 		if job.FailsInARow >= stuckAfter {
 			if !r.askUser(ctx, l, stuckQuestion(job)) {
 				r.endedWaiting(ctx, l)
@@ -734,7 +789,7 @@ func (r *Runner) ended(ctx context.Context, l *live) bool {
 		return false
 	}
 	if l.stopped.Load() {
-		r.end(l, Stopped, "", "I stopped there.")
+		r.end(l, Stopped, "", stoppedSay(l.snapshot()))
 		return true
 	}
 	job := l.snapshot()
@@ -747,7 +802,7 @@ func (r *Runner) endedWaiting(ctx context.Context, l *live) {
 	if r.ended(ctx, l) {
 		return
 	}
-	r.end(l, Stopped, "", "I stopped there.")
+	r.end(l, Stopped, "", stoppedSay(l.snapshot()))
 }
 
 // askUser puts the job in stuck with one plain question and waits for the answer, which is kept with the goal so every later round sees it. Input: the job's context, the live job and the question. Output: true when an answer came, false when the job was stopped or its time ran out while waiting.

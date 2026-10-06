@@ -19,6 +19,7 @@ func OpenCommand(rawURL string) error {
 	default:
 		cmd = exec.Command("xdg-open", rawURL)
 	}
+	letOpenedComeForward()
 	if err := cmd.Start(); err != nil {
 		return err
 	}

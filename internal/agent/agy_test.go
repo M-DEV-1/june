@@ -66,14 +66,16 @@ func TestAskAgy_RecordsWhatTheRunCost(t *testing.T) {
 	}
 }
 
-// Antigravity reports its own plan allowance to whatever statusline command it is given, on every run including a --print one, and nowhere else: the stream-json events carry token counts only, and the endpoint behind the numbers (v1internal:retrieveUserQuotaSummary) needs the OAuth token out of the user's keyring. So June supplies the statusline command itself, in the throwaway HOME it already builds for every agy run, and reads the payload agy pipes to it. That works on any machine with agy installed, whether or not the user has a statusline of their own, and costs nothing beyond the ask that was happening anyway.
-// This is the payload agy 1.2.3 wrote on 2026-09-15, trimmed to the fields read. Four windows: five-hour and weekly, each split between the Gemini models and the third-party ones the Antigravity plan also carries.
+// Antigravity reports its own plan allowance through its /usage command and nowhere else June can read: the stream-json events carry token counts only, the statusline command June used to install is never run in print or stream-json mode, and the endpoint behind the numbers needs the OAuth token out of the user's keyring. `agy -p /usage --output-format json` answers locally, with no agent turn and no tokens spent.
+// This is what agy printed on 2026-10-03, trimmed to the fields read. Four windows: five-hour and weekly, each split between the Gemini models and the third-party ones the Antigravity plan also carries; the gemini-5h value is made up so the inversion can be checked against a round number.
 func TestAgyQuotaLimits_ReadsBothWindowsForBothModelFamilies(t *testing.T) {
-	payload := `{"product":"antigravity","plan_tier":"Google AI Pro","quota":{
-		"3p-5h":{"remaining_fraction":1,"reset_time":"2026-09-15T15:46:20Z"},
-		"3p-weekly":{"remaining_fraction":0.98339945,"reset_time":"2026-09-17T11:36:03Z"},
-		"gemini-5h":{"remaining_fraction":0.961293,"reset_time":"2026-09-15T10:59:10Z"},
-		"gemini-weekly":{"remaining_fraction":0.9560392,"reset_time":"2026-09-19T09:13:44Z"}}}`
+	payload := `{"conversation_id":"","status":"SUCCESS","num_turns":0,"command":{"name":"usage","data":{"groups":[
+		{"name":"Gemini Models","buckets":[
+			{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.9347510933876038,"reset_time":"2026-10-07T10:53:35Z"},
+			{"id":"gemini-5h","window":"5h","remaining_fraction":0.961293,"reset_time":"2026-10-03T14:23:40Z"}]},
+		{"name":"Claude and GPT models","buckets":[
+			{"id":"3p-weekly","window":"weekly","remaining_fraction":1,"reset_time":"2026-10-10T09:36:29Z"},
+			{"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-10-03T14:36:29Z"}]}]}}}`
 
 	limits := agyQuotaLimits([]byte(payload))
 	byWindow := map[string]UsageLimit{}

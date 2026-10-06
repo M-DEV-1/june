@@ -41,20 +41,28 @@ type OverlayRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
-// OverlayResult is the body of a 202 from POST /overlay. Drawn is true when at least one client was reading the event stream at the moment the drawing went out, and false when none was, in which case Reason says so. A 202 on its own only ever meant the request validated, so a drawing that reached nobody was indistinguishable from one that reached the screen; this is the difference, said out loud.
+// OverlayResult is the body of a 202 from POST /overlay. Drawn is true when the drawing layer was reading the event stream at the moment the drawing went out, and false when it was not, in which case Reason says so. A 202 on its own only ever meant the request validated, so a drawing that reached nobody was indistinguishable from one that reached the screen; this is the difference, said out loud.
 type OverlayResult struct {
 	Drawn  bool   `json:"drawn"`
 	Reason string `json:"reason,omitempty"`
 }
 
-// overlayNoWindow is the reason a drawing was not drawn: nothing was reading the daemon's event stream, so there was no overlay window to draw it.
+// overlayNoWindow is the reason a drawing was not drawn: the drawing layer was not reading the daemon's event stream, so there was no overlay window to draw it.
 const overlayNoWindow = "no overlay window"
 
-// ErrNoOverlayWindow is what every drawing call returns when nothing was reading the event stream at the moment it went out. The drawing was still broadcast; there was simply nobody there to put it on the screen. Callers that report back to a person or a model must say so rather than claiming the drawing was made (see errors.Is).
+// overlayRole is the role the drawing layer names when it opens /events (app/src-tauri/src/overlay.rs dials /events?role=overlay). It is the one client that puts a drawing on the screen: the main window's stream, a browser tab on the dev server and a curl reading the stream all receive the event too and draw nothing, and counting them had POST /overlay answer drawn:true with no overlay running at all.
+const overlayRole = "overlay"
+
+// ErrNoOverlayWindow is what every drawing call returns when the drawing layer was not reading the event stream at the moment it went out. The drawing was still broadcast; there was simply nobody there to put it on the screen. Callers that report back to a person or a model must say so rather than claiming the drawing was made (see errors.Is).
 var ErrNoOverlayWindow = errors.New("the drawing reached no window, so nothing appeared on the screen")
 
 // Overlay handles POST /overlay. Input: an OverlayRequest as JSON. Output: 202 and an OverlayResult saying whether anything was listening, once the request has been broadcast on the hub as an event of type "overlay" whose text is the validated request re-encoded as JSON, or 400 when the body is not JSON, names a kind other than ring, marks, arrow, line, path, box, circle or clear, carries no rectangles for a ring, marks or box, carries a rectangle count other than one for a circle, carries a rectangle with a width or height that is not positive, carries fewer than two points for an arrow or line, carries fewer than three points for a path, or carries a point with a negative coordinate. A ttl above maxOverlayTTLMs is capped rather than refused, and a missing one becomes defaultOverlayTTLMs.
 func (s *Server) Overlay(w http.ResponseWriter, r *http.Request) {
+	// Any other method went straight to the decoder, which met an empty body and answered a bare 400 "EOF".
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	var req OverlayRequest
 	if !DecodeJSON(w, r, &req) {
 		return
@@ -155,7 +163,7 @@ func (s *Server) Draw(group, shape string, points [][2]int, x, y, w, h int, labe
 	return s.drew(s.DrawingAsk(), req)
 }
 
-// drew is draw with its answer turned into an error, for the callers that hand one back. Input: the ask's id and the request. Output: nil once the drawing went out to at least one client, ErrNoOverlayWindow when it went to nobody.
+// drew is draw with its answer turned into an error, for the callers that hand one back. Input: the ask's id and the request. Output: nil once the drawing went out to the drawing layer, ErrNoOverlayWindow when that was not listening.
 func (s *Server) drew(askID string, req OverlayRequest) error {
 	if !s.draw(askID, req) {
 		return ErrNoOverlayWindow
@@ -163,15 +171,15 @@ func (s *Server) drew(askID string, req OverlayRequest) error {
 	return nil
 }
 
-// draw broadcasts a validated overlay request as an event of type "overlay" whose text is the request as JSON, under the id of the ask that drew it. Input: that ask's id, and the request. Output: true when at least one client was subscribed to the hub, false when the drawing went to nobody. An empty id becomes overlayNoAsk, so every overlay event has an id and no drawing is ever given one of the ask ids newID hands out.
-// Every drawing is logged with the number of clients it went to, because a drawing that never appeared on screen is otherwise silent at every step: a line reading clients=0 says the drawing was never on the wire and separates a daemon that did nothing from a window that did nothing.
+// draw broadcasts a validated overlay request as an event of type "overlay" whose text is the request as JSON, under the id of the ask that drew it. Input: that ask's id, and the request. Output: true when a client that connected as overlayRole was subscribed to the hub, false when none was. An empty id becomes overlayNoAsk, so every overlay event has an id and no drawing is ever given one of the ask ids newID hands out.
+// Every drawing is logged with the number of clients it went to and how many of them were the drawing layer, because a drawing that never appeared on screen is otherwise silent at every step: a line reading clients=0 says the drawing was never on the wire and separates a daemon that did nothing from a window that did nothing, and overlays=0 beside a non-zero clients says the stream was being read by everything but the one thing that draws.
 func (s *Server) draw(askID string, req OverlayRequest) bool {
 	if askID == "" {
 		askID = overlayNoAsk
 	}
 	body, _ := json.Marshal(req)
-	clients := s.hub.clientCount()
-	slog.Info("overlay: drawing", "ask", askID, "kind", req.Kind, "rects", len(req.Rects), "points", len(req.Points), "ttl_ms", req.TTLMs, "clients", clients)
+	clients, overlays := s.hub.clientCounts(overlayRole)
+	slog.Info("overlay: drawing", "ask", askID, "kind", req.Kind, "rects", len(req.Rects), "points", len(req.Points), "ttl_ms", req.TTLMs, "clients", clients, "overlays", overlays)
 	s.hub.broadcast(Event{ID: askID, Type: "overlay", Text: string(body), Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
-	return clients > 0
+	return overlays > 0
 }

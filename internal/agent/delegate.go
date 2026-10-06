@@ -39,7 +39,7 @@ const claudeCodeBinary = "claude"
 // ClaudeCodeRunner runs a delegate session through `claude -p` in the caller's project directory (the home directory when none is named), under auto permission mode — not the --restricted, no-tools sandbox AskClaude uses for its own asks, because a delegate call is a real hand-off to a collaborator. Auto mode has Claude Code's own classifier approve routine commands and block risky ones; the old default mode denied every approval-gated command, since a headless run has nobody to answer a prompt, so a delegate could not even list ~/Downloads. --bare is never passed (it would bill the API key instead of the subscription, the same reason claude.go never passes it), nor is --dangerously-skip-permissions. The classifier plus the "do not send, publish, pay for or delete" line BuildBrief writes into every brief are the guard.
 type ClaudeCodeRunner struct{}
 
-// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the home directory), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. WaitDelay still bounds how long Run waits for stdout to close once Cancel has fired.
+// newDelegateCmd builds (without starting) the `claude -p` command for one delegate run. Input: the context whose deadline bounds the run, the working directory (cwd, "" for the home directory), and the path of the system-prompt file already written to disk. Output: the exec.Cmd, not yet given stdin/stdout/stderr — a test can inspect its process-group and cancel wiring without ever starting the real claude binary. The child runs in its own process group and Cancel kills the whole group, not just the direct child, so a `npm run dev` or watcher the delegate started does not outlive the ten-minute wall or the caller's own context — killing only the direct process leaves such grandchildren running with nobody to stop them. On Windows the group is a Job Object, which only exists once the command is started with util.StartProcessGroup. WaitDelay still bounds how long Wait waits for stdout to close once Cancel has fired.
 func newDelegateCmd(ctx context.Context, cwd, promptPath string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, claudeCodeBinary, "-p", "--output-format", "text", "--system-prompt-file", promptPath, "--permission-mode", "auto")
 	// Claude Code only reads under its cwd, and the daemon's own cwd is wherever it was started, so a delegate given no directory runs in the home directory, where the user's files and clones are.
@@ -66,11 +66,19 @@ func (ClaudeCodeRunner) Run(ctx context.Context, cwd, systemPrompt, prompt strin
 	}
 
 	cmd := newDelegateCmd(ctx, cwd, promptPath)
+	if err := util.CheckCommandLine(cmd); err != nil {
+		return "", fmt.Errorf("delegate: %w", err)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	release, err := util.StartProcessGroup(cmd)
+	if err == nil {
+		defer release()
+		err = cmd.Wait()
+	}
+	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", errors.New("delegate: the run timed out")
 		}

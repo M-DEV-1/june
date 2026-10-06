@@ -69,7 +69,7 @@ func TestTranscribeWAV_SerialisesWhisperCPPRuns(t *testing.T) {
 	}
 }
 
-// A GPU decode waits for the embedding server to yield the card instead of falling back to the CPU: the releaser is retried until it reports the server is down, and only then does whisper run.
+// A GPU decode waits for the card's other tenant to yield instead of falling back to the CPU: the releaser is retried until it reports the tenant is gone, and only then does whisper run. The daemon's own releaser, the local text server's, never says no; this pins the wait for one that can.
 func TestTranscribeWAV_WaitsForTheGPUUntilTheEmbedderYields(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	bin := fakeWhisperBin(t, true)
@@ -84,11 +84,11 @@ func TestTranscribeWAV_WaitsForTheGPUUntilTheEmbedderYields(t *testing.T) {
 		t.Fatalf("transcribeWAV: %v", err)
 	}
 	if calls < 3 {
-		t.Errorf("whisper ran after %d release attempts, want it to keep waiting until the embedder yields", calls)
+		t.Errorf("whisper ran after %d release attempts, want it to keep waiting until the card's other tenant yields", calls)
 	}
 }
 
-// Five of eleven dictations in the six days to 2026-09-13 died for want of card memory and were redone on the CPU, costing 12.9 to 20.7 seconds each while the user waited. The releaser that asks the embedding server off the card existed the whole time and only the meeting path called it, so a dictation walked onto a full card, crashed, and paid for the retry. Asking is the first thing a run does now, whoever started it.
+// Five of eleven dictations in the six days to 2026-09-13 died for want of card memory and were redone on the CPU, costing 12.9 to 20.7 seconds each while the user waited. The releaser that asks the card's other tenant (the embedding server then, the local text server now) to leave existed the whole time and only the meeting path called it, so a dictation walked onto a full card, crashed, and paid for the retry. Asking is the first thing a run does now, whoever started it.
 func TestRunWhisper_AsksTheCardsOtherTenantToLeaveFirst(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	bin := fakeWhisperBin(t, false)

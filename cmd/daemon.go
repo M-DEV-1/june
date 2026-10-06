@@ -17,6 +17,7 @@ import (
 	"june/internal/actjob"
 	"june/internal/agent"
 	"june/internal/brain"
+	"june/internal/components"
 	"june/internal/config"
 	"june/internal/db"
 	"june/internal/dream"
@@ -76,7 +77,12 @@ func pickPlacedWindow(windows []window.Window, pid uint32, title string) (window
 }
 
 // pingHandler answers with this process's build identity — the client compares it against its own to detect a daemon that's been running since before the most recent rebuild (see checkDaemonBuildMismatch in root.go). Extracted as a named function so it's testable in isolation from the rest of the daemon's mux.
+// A daemon that is quitting answers 503 {"quitting":true,"pid":N} instead. It holds the port through its slow steps, the recording's close and the activity flush, for up to a minute or more after its window has gone; answered 200, a click on June in that time found it alive, asked it for a window it no longer had, and nothing appeared however often the user clicked. With the pid the client can start the June that follows it (see startAfterQuit), and `june --quit` can wait for it.
 func pingHandler(w http.ResponseWriter, r *http.Request) {
+	if goingAway() {
+		writeLifecycleJSON(w, http.StatusServiceUnavailable, map[string]any{"quitting": true, "pid": os.Getpid()})
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(buildIdentity))
 }
@@ -96,15 +102,36 @@ func runDaemon(ctx context.Context, shutdownObs func(context.Context) error) err
 	// port binding instance lock to prevent double spawning
 	listener, err := net.Listen("tcp", "127.0.0.1:"+DaemonPort)
 	if err != nil {
-		// A bind failure means another daemon already holds the port, and this one must say so on stderr and exit non-zero. Returning nil made the process exit 0, so systemd called a restart a success and the /ping that followed was answered by the old daemon still running the old build.
-		fmt.Fprintf(os.Stderr, "june: port %s is already in use, so another daemon is still running: %v\n", DaemonPort, err)
-		slog.Error("failed to bind daemon port", "port", DaemonPort, "error", err)
+		// A bind failure must say so on stderr and exit non-zero. Returning nil made the process exit 0, so systemd called a restart a success and the /ping that followed was answered by the old daemon still running the old build.
+		fmt.Fprintln(os.Stderr, "june: "+bindFailure(DaemonPort, err))
+		// A port another socket holds is the ordinary second start beside a running daemon, so it is a warning; a port the system refused is not, and stays an error.
+		level := slog.LevelError
+		if portInUse(err) {
+			level = slog.LevelWarn
+		}
+		slog.Log(ctx, level, "daemon not started: could not bind its port", "port", DaemonPort, "error", err, "in_use", portInUse(err), "refused", portRefused(err))
 		return fmt.Errorf("bind daemon port %s: %w", DaemonPort, err)
 	}
 
 	setCrashLog()
 	runDaemonSupervisor(ctx, listener)
 	return nil
+}
+
+// bindFailure says why the daemon's port could not be bound. Input: the port and the error net.Listen returned. Output: one line for the user.
+// Not every failure is another daemon: on Windows, Hyper-V, WSL and Docker reserve ranges of ports at boot, and a bind inside one is refused with nothing listening there at all, so blaming a running daemon sent the user looking for a process that did not exist.
+func bindFailure(port string, err error) string {
+	switch {
+	case portInUse(err):
+		// The advice to quit it from here cannot reach a June another account is running.
+		if message, other := otherAccountProblem(port, pingOnce); other {
+			return message
+		}
+		return fmt.Sprintf("port %s is already in use, most likely by another June daemon that is still running (%s): %v", port, stopDaemonHint, err)
+	case portRefused(err):
+		return fmt.Sprintf("the system refused port %s, which is not another June daemon holding it. %s (%v)", port, portRefusedHint(port), err)
+	}
+	return fmt.Sprintf("could not listen on port %s: %v", port, err)
 }
 
 // setCrashLog has the runtime write a fatal panic to crash.log in the data directory as well as to stderr. junew.exe is built without a console and has no stderr at all, so without this a crash leaves no trace anywhere.
@@ -127,6 +154,10 @@ func setCrashLog() {
 // The returned *tracker.Daemon allows the tray to pause/resume tracking.
 func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(), daemonOut *tracker.Daemon, err error) {
 	startTime := time.Now()
+	// The throwaway HOMEs agy runs in that a killed daemon or a failed removal left in the temp directory are swept off the startup path. Only ones untouched for hours go, so a run this daemon starts meanwhile is never one of them.
+	go agent.SweepAgyHomes()
+	// The config is loaded before the store is opened: a config from a June older than first-run setup has its setup_done decided on load by whether a store is already there (see config.LoadConfig), and opened first, the store a new install's first daemon creates would count as one from an earlier June and skip setup.
+	appConfig := config.LoadConfig()
 	store, err := db.New(filepath.Join(config.DataDir(), "db"))
 	if err != nil {
 		slog.Error("failed to init db", "error", err)
@@ -147,17 +178,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return nil, nil, err
 	}
 
-	appConfig := config.LoadConfig()
-
 	// Every unattended job reads its model through config.BackgroundModel, so the choice lives in the config file rather than in each call site. Without this they all run on DefaultBackgroundModel.
 	config.SetBackgroundModels(appConfig.BackgroundModels)
 	// The Live model the voice session dials is a choice rather than a constant: 3.1 answers in about two seconds with one tone, 2.5 takes five to eight and carries affective dialog and proactive audio. A name the config gets wrong falls back to the default rather than dialling a model that does not exist.
 	if appConfig.LiveModel != "" && !config.SetVoiceModel(appConfig.LiveModel) {
 		slog.Warn("unknown live voice model in config, using the default", "model", appConfig.LiveModel, "using", config.VoiceModel())
 	}
-
-	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting.
-	reconcileAutostart(appConfig.Autostart)
 
 	apiKey := os.Getenv("GEMINI_API_KEY")
 
@@ -168,6 +194,14 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// brainUsage keeps what each provider says about the user's own allowance, so the brain picker can draw a bar per brain. Codex fills it from the rate-limit headers of every response June already makes; Claude is read from its OAuth usage endpoint when the picker is opened; Gemini's is computed from geminiQuota below. It persists under the data dir beside brain_quota.json, so the bars are there the moment the window opens after a restart.
 	brainUsage := brain.NewUsageStore(config.DataDir())
 	agent.SetUsageRecorder(brainUsage)
+	// A Claude row an earlier run greyed out stays greyed until something clears it; telling the agent when it was greyed lets a login the user renewed in the meantime clear it on the first look. A mark from before its time was kept is dated now, so only a login written after this start counts.
+	if snap, ok := brainUsage.Get(agent.ProviderClaude); ok && snap.SignedOut {
+		at := snap.SignedOutAt
+		if at.IsZero() {
+			at = time.Now()
+		}
+		agent.NoteClaudeRefused(at)
+	}
 
 	// Every Exa or Tavily call web_search makes files its own row on the same token ledger a model call does, so the cost view shows a search counting against the account's quota. See defaultWebSearch and recordSearchUse in internal/agent/websearch.go.
 	agent.SetSearchUsageRecorder(func(u db.TokenUse) {
@@ -185,6 +219,19 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		go recorder.WatchForMeetings(ctx, meetingRecorder, appConfig.Meetings.AutoRecord)
 	}
 
+	// The embedding server below answers only /v1/embeddings, so it cannot write the working state; this is a second llama-server on its own port running the instruction-tuned GGUF, spawned on the first derive and reaped when it goes idle. Built ahead of the summarizer because, with no Gemini key, it is what the memory duties run on.
+	textEngine := embed.NewTextEngine(appConfig)
+	if textEngine == nil {
+		slog.Warn("no local text model configured (local_text.model_path / dream.model_path), the working-state derive stays on the metered API")
+	}
+	// localMemory is a machine with no Gemini key and a local text model: every memory duty that is text in and text out runs on the local model. Before, the whole summarizer was built only with a key, so a configured local model was never launched, the working state was never derived and the memory compiled to raw activity logs only (2026-10-03). memoryOn is whether the memory duties have anything to run on at all.
+	localMemory := apiKey == "" && textEngine != nil
+	memoryOn := apiKey != "" || localMemory
+	if apiKey == "" && !localMemory {
+		slog.Warn("no GEMINI_API_KEY and no local text model: memory is kept as raw activity logs, with no working state, threads or notes")
+	}
+
+	// Built with or without a key: without one it has no Gemini client, and a duty runs only on a backend installed below.
 	summarizer, err := memory.NewGeminiSummarizer(apiKey)
 	if err != nil {
 		slog.Warn("failed to init summarizer, semantic memory disabled", "error", err)
@@ -208,7 +255,12 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			return ""
 		})
 	}
-	compiler := memory.NewCompiler(summarizer, store)
+	// A nil *GeminiSummarizer passed straight in would be a non-nil Summarizer, and the first flush would call through it and crash the daemon. With nothing to run the duties on, the compiler keeps the raw activity log rather than failing a model call on every flush.
+	var compilerLLM memory.Summarizer
+	if summarizer != nil && memoryOn {
+		compilerLLM = summarizer
+	}
+	compiler := memory.NewCompiler(compilerLLM, store)
 
 	// embedsFree says the embedder is the local llama-server rather than a metered API. Declared out here because it is set inside the block below and read by the reconciliation sweeps further down, which size their budget by it.
 	embedsFree := false
@@ -217,12 +269,6 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	embedEngine := embed.NewEngine(appConfig.Embed)
 	if embedEngine == nil {
 		slog.Warn("no local embedder configured (embed.llama_server / embed.model_path), hybrid search degrades to lexical-only")
-	}
-
-	// The embedding server above answers only /v1/embeddings, so it cannot write the working state; this is a second llama-server on its own port running the instruction-tuned GGUF, spawned on the first derive and reaped when it goes idle.
-	textEngine := embed.NewTextEngine(appConfig)
-	if textEngine == nil {
-		slog.Warn("no local text model configured (local_text.model_path / dream.model_path), the working-state derive stays on the metered API")
 	}
 
 	// The text server yields to a whisper decode and does not climb back on until it is done. The embedding server stays: measured on this card, it holds 662 MiB of 4096 against whisper-medium's ~2.2 GB, so the two fit together with room over, and evicting it only cost every embed that arrived during a decode — hybrid search fell back to lexical and the reconcile sweep dropped its work. The text server is the one that does not fit: 1851 MiB, which with whisper on the card leaves nothing for the embedder.
@@ -261,10 +307,23 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 
 	eventChan := make(chan tracker.Activity, 100)
 	daemon := tracker.NewDaemon(trackerImpl, 2*time.Second, time.Duration(appConfig.Tracker.DwellTime)*time.Millisecond, appConfig.Tracker.Blocklist, eventChan)
+	// Paused before the loop starts, so not one window is read: until first-run setup is done, which POST /setup/complete resumes it for, and while the user has it paused, which a restart, a quit or a reboot does not undo. The pause is taken up before setup is looked at, so one for a while still ends on time, but its end never turns observation on before setup is done (see pauseControl.watch).
+	pauses.bind(daemon, func() bool { return !setupWaits() })
+	userPaused := pauses.restore()
+	switch {
+	case !appConfig.SetupDone && !appConfig.Window:
+		daemon.Pause()
+		slog.Info(`first-run setup is not finished, and it runs in June's window, which "window": false turns off; screen observation stays paused until Resume Observation in the tray, or POST /resume, turns it on`)
+	case !appConfig.SetupDone:
+		daemon.Pause()
+		slog.Info("first-run setup is not finished, so screen observation stays paused until it is")
+	case userPaused:
+		slog.Info("screen observation stays paused, as the user left it", "until", pauses.pausedUntil())
+	}
 
 	// vision tier: when accessibility text is too thin (browsers, video, games), the tracker grabs a screenshot and asks the model to describe it.
-	// Gated by cost guards inside the daemon (thinTextThreshold + minVisionInterval). Disabled when no model is available.
-	if summarizer != nil {
+	// Gated by cost guards inside the daemon (thinTextThreshold + minVisionInterval). Disabled when no model is available, and with no Gemini key: the picture goes to the multimodal API, and no local or command-line backend here takes an image.
+	if summarizer != nil && apiKey != "" {
 		daemon.SetVisionFn(func(ctx context.Context, png []byte) tracker.Sight {
 			s := summarizer.AnalyzeScreen(ctx, png)
 			return tracker.Sight{UserActivity: s.UserActivity, VisibleText: s.VisibleText, Summary: s.Summary}
@@ -287,8 +346,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	})
 
 	// roll up fine-grained summaries older than 7 days into daily digests every 12 h.
-	// skipped when no API key is available (summarizer == nil).
-	if summarizer != nil {
+	// skipped when the memory duties have nothing to run on: no Gemini key and no local text model.
+	if summarizer != nil && memoryOn {
 		compactor := memory.NewCompactor(summarizer, store)
 		// Metered: one Digest call per day-group older than seven days that has not been rolled up yet, so a restart that finds a backlog pays for it again.
 		go everyMetered(ctx, store, 12*time.Hour, "episodic-compaction", func() {
@@ -404,19 +463,46 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 				c.Model, c.Binary = "", ""
 			}
 			c.Provider = provider
-			// The tally is inside the routing rather than around it, so a duty that was handed on is counted against the provider that actually answered it and not against the one that refused.
-			return tally.Wrap(brainProviderName(c), brain.Metered(config.BackgroundBrainConfig(c, job), apiKey, geminiQuota, false, geminiQuotaOpts, codexAsker), store)
+			// The tally is inside the routing rather than around it, so a duty that was handed on is counted against the provider that actually answered it and not against the one that refused. A job round is filed under the same name, for the same reason (see routedJobModel).
+			return reportAnswerer(brainProviderName(c), tally.Wrap(brainProviderName(c), brain.Metered(config.BackgroundBrainConfig(c, job), apiKey, geminiQuota, false, geminiQuotaOpts, codexAsker), store))
 		}
 		// cfg.Provider is asked first: a background_brains entry pins a duty to a plan on purpose, and the router's global order must not answer it somewhere the user did not choose.
 		return brain.RoutedFor(cfg.Provider, build)
 	}
-	mainBrain := meteredJobBrain(appConfig.Brain, "proactive")
+	// One accessor over the config the request goroutines share, so POST /settings writing ClaudeUsageFromLogin and the /brains and /usage handlers reading it are not touching the same struct from several goroutines at once. It is made here, ahead of the duties, because they read the picked brain through it.
+	liveConfig := ipc.NewLiveConfig(&appConfig, config.ReadConfig, config.SaveConfig)
+	// The tray's status line, POST /resume and a pause that ends by itself read whether observation waits for setup as it is now, since finishing setup does not restart June.
+	setupWaits = func() bool {
+		c := liveConfig.Get()
+		return !c.SetupDone && c.Window
+	}
+	go pauses.watch(ctx)
+	// The config file is the switch for start-on-login: make the on-disk login entry agree with it on every daemon start, so a config edited by hand (or an entry left behind by an older build) is corrected here rather than drifting. Windows' own startup switch is read first, and a change made there is taken into the config (see reconcileAutostart).
+	reconcileAutostart(liveConfig)
+	// liveJobBrain is meteredJobBrain on the brain picked in Settings as it is when the duty runs, not as it was at startup: built once here, a pick or a switch back to automatic moved the asks at once but left minutes, dreams and the brief on the old brain until the next start, while Settings already named the new one. Input: the duty's background-model job name. Output: the brain.
+	liveJobBrain := func(job string) brain.Brain {
+		return func(ctx context.Context, prompt string) (string, error) {
+			return meteredJobBrain(liveConfig.Get().Brain, job)(ctx, prompt)
+		}
+	}
+	mainBrain := liveJobBrain("proactive")
 	// Every memory duty the config names a provider for is pointed at it here; a duty named nowhere stays on the Gemini API. StripFence is applied because three of these duties parse the answer as JSON and a CLI login wraps JSON in a markdown fence where the SDK could simply be told to answer in JSON, and this is the one place that knows a CLI is involved.
 	// JobScreenSight is not offered: it sends a screenshot rather than a prompt, and a text seam cannot carry an image.
 	if summarizer != nil {
 		if textEngine != nil {
 			// This is what takes the five-minute working-state job off the user's free-tier daily request allowance. A derive the local model cannot answer — the card is held by a whisper decode, or the server would not start — goes through the router instead of being lost. A background_brains entry for the same job overrides both, because naming a provider in the config is the more deliberate act.
-			summarizer.SetJobBackend(config.JobWorkingState, memory.TextBackend(fallThrough(textEngine.Generate, meteredJobBrain(appConfig.Brain, config.JobWorkingState))))
+			summarizer.SetJobBackend(config.JobWorkingState, memory.TextBackend(fallThrough(textEngine.Generate, liveJobBrain(config.JobWorkingState))))
+		}
+		if localMemory {
+			// With no key the compiler's own duties run on the local model too: attributing a flush to threads, reconciling the notes it names, and the periodic consolidation and compaction. They are not handed on to the router when the local model cannot answer — a flush happens many times an hour and each would be a full command-line run on the user's plan — and a duty that fails keeps its raw activity log and runs again on its next tick.
+			local := memory.TextBackend(func(ctx context.Context, prompt string) (string, error) {
+				text, err := textEngine.Generate(ctx, prompt)
+				return brain.StripFence(text), err
+			})
+			for _, job := range []string{config.JobEpisodeSummary, config.JobPersonalContext, config.JobNoteConsolidation, config.JobEpisodicCompaction} {
+				summarizer.SetJobBackend(job, local)
+			}
+			slog.Info("no GEMINI_API_KEY: the memory duties run on the local text model", "jobs", []string{config.JobWorkingState, config.JobEpisodeSummary, config.JobPersonalContext, config.JobNoteConsolidation, config.JobEpisodicCompaction})
 		}
 		for job, cfg := range appConfig.BackgroundBrains {
 			if job == config.JobScreenSight {
@@ -433,7 +519,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 	// Meeting minutes previously built their own unmetered brain per meeting; pinning to the meeting-minutes job's own model (as defaultBrain did unmetered) and metering it against the same shared quota means an unattended write-up spends the day's allowance in the same place it always spent it, just counted now.
 	// Minutes go through the router like every other duty. They used to be one brain with a Codex-only hand-over behind them, which caught nothing once Codex itself was at its monthly limit: on 2026-09-15 a broken Antigravity login lost every write-up while Grok and Claude sat signed in on the same machine.
-	meetingRecorder.SetBrain(meteredJobBrain(appConfig.Brain, config.JobMeetingMinutes))
+	meetingRecorder.SetBrain(liveJobBrain(config.JobMeetingMinutes))
 	scheduler := proactive.New(store, mainBrain, proactive.NotifySend, appConfig.Proactive)
 	// The evening close makes two brain calls, so its deadline is sized from the limit this machine's config puts on one of them rather than from a fixed number.
 	scheduler.SetBrainTimeout(appConfig.Brain.Timeout())
@@ -489,7 +575,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// overnight dreaming: while the machine idles on mains between the dream hour and the morning brief, test the diary's accumulated hypotheses, adopt new ones, rewrite the understanding doc, and leave a morning report in the diary. Judge-only this slice — every call goes to the brain.
 	dreamBriefHour, _ := appConfig.Proactive.Hours()
 	// The dream brain gets the dream job's own background model and the same routing the configured-dream-brain branch below gets, since a night of stages left on config.TextModel spends the next day's 20 requests before the morning brief runs.
-	dreamer := dream.New(store, meteredJobBrain(appConfig.Brain, config.JobDream), dream.Probes{
+	dreamer := dream.New(store, liveJobBrain(config.JobDream), dream.Probes{
 		OnAC:              recorder.OnACPower,
 		SessionLocked:     tracker.SessionLocked,
 		RecorderQuiescent: meetingRecorder.Quiescent,
@@ -563,7 +649,9 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// The window's read routes draw on the same store the daemon writes, on the compiler's live activity buffer for what is on screen this second, and on the tracker's own active-window read for what has focus right now: the buffer only updates on the tracker's sampling interval, so a hotkey pressed between samples would otherwise name a window the user has already left.
 	// The brain picked in Settings answers first; the router otherwise ranks by cost and left the pick last.
 	agent.SetPreferredProvider(appConfig.Brain.Provider)
-	ipcServer := ipc.New(askAgent, store, func() []tracker.Activity {
+	// What the user is in the middle of, which restartBlocker reads (see busyState): every asker is counted, so an answer being written holds off a restart nobody asked for.
+	busy := &busyState{}
+	ipcServer := ipc.New(countedAsker{inner: askAgent, busy: busy}, store, func() []tracker.Activity {
 		if compiler == nil {
 			return nil
 		}
@@ -576,6 +664,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		}
 		return *a, true
 	})
+	eventServer.Store(ipcServer)
 	// June's own hover is drawn over whatever the user was looking at, so a picture of the screen taken while it is up has June's card sitting in the middle of the thing the question was about. The window takes itself off the screen for the moment the picture is taken and puts itself back exactly as it was — a window already hidden stays hidden, so this costs nothing when the hover is not up.
 	// ponytail: a fixed settle wait rather than an acknowledgement from the window. The instruction reaches it over the event stream in a millisecond or two and the compositor needs a frame to redraw; if that ever proves too short the window should answer that it is hidden and this should wait for that instead.
 	tracker.SetScreenGuard(func() func() {
@@ -588,7 +677,7 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		return func() { ipcServer.Tell("reveal") }
 	})
 	// The faces both windows show for what the daemon is doing on its own: a meeting being captured, and the nightly run.
-	meetingRecorder.SetOnStateChange(func() {
+	meetingRecorder.AddStateObserver(func() {
 		ipcServer.Announce("recording", onOff(meetingRecorder.Active()))
 	})
 	dreamer.OnNight = func(running bool) { ipcServer.Announce("dreaming", onOff(running)) }
@@ -669,26 +758,36 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		windowRaiser.publish(raiser)
 	}()
 	// Codex answers asks the window routes to it by calling the ChatGPT backend directly with the user's own login, running the same tools through the same gate as the Gemini text path.
-	ipcServer.AddBrain("codex", agent.CodexBrain{Agent: askAgent})
+	ipcServer.AddBrain("codex", countedAsker{inner: agent.CodexBrain{Agent: askAgent}, busy: busy})
 	// Claude answers through the Claude Code command line on the user's own subscription, with June's tools offered to it over MCP, so working on the screen does not depend on Codex's smaller monthly allowance.
-	ipcServer.AddBrain("claude", agent.ClaudeBrain{Agent: askAgent})
+	ipcServer.AddBrain("claude", countedAsker{inner: agent.ClaudeBrain{Agent: askAgent}, busy: busy})
 	// Antigravity answers through the agy command line on the user's own Google plan, with June's tools offered to it over MCP the same way Claude gets them. The brain id is "antigravity" because that is the id GET /brains publishes and the window's picker posts back; the CLI it runs is called agy.
-	ipcServer.AddBrain("antigravity", agent.AgyBrain{Agent: askAgent})
-	// Gemini is the default asker's own first choice, so naming it routes through that same path; without this line GET /brains offers Gemini while POST /ask refuses the name with a 400, which is what the window's picker hit on 2026-09-05.
-	ipcServer.AddBrain("gemini", askAgent)
+	ipcServer.AddBrain("antigravity", countedAsker{inner: agent.AgyBrain{Agent: askAgent}, busy: busy})
+	// Without this line GET /brains offers Gemini while POST /ask refuses the name with a 400, which is what the window's picker hit on 2026-09-05. It is Gemini alone, not the routed default: a conversation pinned to Gemini on a machine with no key was answered by Antigravity under Gemini's name (2026-10-03), where it now says this brain has no key.
+	ipcServer.AddBrain("gemini", countedAsker{inner: agent.GeminiBrain{Agent: askAgent}, busy: busy})
 
 	// A long computer-use goal runs as a job in the daemon rather than inside one HTTP request (see internal/actjob): it plans, takes one checked step at a time, and can be stopped, paused, answered and resumed. Its rounds go to a plain prompt-in, text-out brain, never through an ask — an ask would run a second tool loop inside the job's own — and its steps go through the ask's own gated tool path, so the tool gate and the stop line have one copy.
 	// The default is the daemon's own configured brain, metered and tallied like every other call it makes; the CLI logins are offered by name so the same goal can be run on each and the cost compared. No API-key path is ever picked by default.
 	// The default job brain is the configured chain with the Claude CLI behind it, so a spent Codex allowance moves a job to Claude the way an ask already moves.
 	// mainBrain is routed, so a spent or signed-out brain is handed on from inside it. The Claude tail stays on top of that, because a job the user is watching hands over on any failure at all and not only on the two the router acts on — see fallThrough, and the three jobs that died in a row on 2026-09-08.
-	claudeJobBrain := brain.FromConfig(config.BrainConfig{Provider: config.BrainClaudeCLI}, apiKey)
-	actModels := map[string]actjob.Model{"default": actjob.FromPromptFunc(brainProviderName(appConfig.Brain), fallThrough(mainBrain, claudeJobBrain))}
+	// The tail is skipped while the router knows Claude is signed out or spent, and a round it answers is filed under its own name.
+	claudeJobBrain := whenUsable(agent.ProviderClaude, reportAnswerer(config.BrainClaudeCLI, brain.FromConfig(config.BrainConfig{Provider: config.BrainClaudeCLI}, apiKey)))
+	// A round is filed under whichever provider answered it; one that nobody answered is filed under the configured brain, or "routed" when none is picked and the router chose.
+	unanswered := brainProviderName(appConfig.Brain)
+	if appConfig.Brain.Provider == "" {
+		unanswered = "routed"
+	}
+	actModels := map[string]actjob.Model{"default": routedJobModel(unanswered, fallThrough(mainBrain, claudeJobBrain))}
 	for _, provider := range []string{config.BrainClaudeCLI, config.BrainAgyCLI, config.BrainGrokCLI} {
 		actModels[provider] = actjob.FromPromptFunc(provider, brain.FromConfig(config.BrainConfig{Provider: provider}, apiKey))
 	}
 	// askAgent is the job runner's executor, and it also carries the past-run reference block a job plans against: the runner picks that up by asserting actjob.Referencer off the executor it was given, so nothing here passes it explicitly. Asserted at compile time because a silent failure of that assertion looks exactly like a job with no history to plan against, which is what it did before 2026-09-12.
 	var _ actjob.Referencer = askAgent
-	actRunner := actjob.New(store, askAgent, actModels, "default", ipc.ActEmitter(ipcServer))
+	actRunner := actjob.New(store, askAgent, actModels, "default", busy.trackJobs(ipc.ActEmitter(ipcServer)))
+	// Every tool call a job makes is filed with the ask's and the voice session's, under path "act" and the job's id as its turn.
+	actRunner.UseJobContext(func(ctx context.Context, id string) context.Context {
+		return agent.WithTurnID(agent.WithToolRecorder(ctx, ipc.JobToolRecorder(store)), id)
+	})
 	actJobs := ipc.NewActJobs(actRunner)
 	// A job the last daemon left in flight is never picked up by itself: resuming one moves things on the user's screen, so it waits to be asked for by name.
 	if unfinished, err := store.UnfinishedActJobs(ctx); err == nil {
@@ -709,11 +808,24 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	// local http for IPC between the daemon and its clients (window, tray, the june command)
 	mux := http.NewServeMux()
 
-	// One accessor over the config the request goroutines share, so POST /settings writing ClaudeUsageFromLogin and the /brains and /usage handlers reading it are not touching the same struct from several goroutines at once.
-	liveConfig := ipc.NewLiveConfig(&appConfig, config.SaveConfig)
 	brainLimits := brainLimitsFrom(brainUsage, geminiQuota, liveConfig, geminiQuotaOpts)
 
+	// The local-features downloader is made here rather than with its routes, because the restart guard asks it whether a download is running and the shutdown stops it.
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	features := components.New(components.Options{
+		DataDir:      config.DataDir(),
+		ExeDir:       exeDir,
+		UpdateConfig: liveConfig.Update,
+		Publish: func(typ, id, text, detail string, failed bool) {
+			ipcServer.Publish(ipc.Event{ID: id, Type: typ, Text: text, Detail: detail, Failed: failed})
+		},
+	})
+
 	registerDaemonRoutes(mux, routeDependencies{
+		ctx:             ctx,
 		auth:            auth,
 		daemon:          daemon,
 		ipcServer:       ipcServer,
@@ -726,6 +838,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 		brainLimits:     brainLimits,
 		appConfig:       appConfig,
 		startTime:       startTime,
+		features:        features,
+		exeDir:          exeDir,
+		restartBlocker:  restartBlocker(features, busy),
+		busy:            busy,
 	})
 
 	server := &http.Server{
@@ -747,10 +863,20 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 	}
 
 	// The desktop window runs as the daemon's child, so the login entry starts one thing and stopping the daemon takes the window with it. It is started here, last, because the window reads the IPC token file once at startup: started any earlier it would read the token of the daemon that just exited, and every request it made would be refused for the life of the window.
-	runWindow(ctx, appConfig.Window)
+	// Its life is ended by stop below and not by the daemon's context, because a restart keeps the window up after that context has ended (see stop).
+	runWindow(context.WithoutCancel(ctx), appConfig.Window)
+	// The window starts hidden. It is shown when the start was a click (--open) or a restart the user asked for (the marker it leaves), and on every start until first-run setup is done, since a paused June waiting on setup has nothing else to show the user that it needs them.
+	if appConfig.Window && (openWindowOnStart || !appConfig.SetupDone) {
+		go openWhenWindowListens(ctx, ipcServer, openWindowOnStart, func() bool { return liveConfig.Get().SetupDone })
+	}
 
 	stop = func() {
+		shuttingDown.Store(true)
 		// Every step here gets a bound, because shutdown runs them one after another and a step that never finishes keeps the process alive holding port 6942, which is the one thing that stops the next daemon from starting.
+		// A quit takes the window down first, so it goes the moment it is asked to. A restart keeps it up, saying "Restarting June…", through the recording's close and the activity flush, which after a busy hour can take most of a minute: the replacement's window only comes up once this process has exited, and taking this one down first left no sign of June at all for that long.
+		if !restartWanted.Load() {
+			stopWindow()
+		}
 		// A recording in progress is closed first, before anything it depends on goes away. Nothing did this until a daemon restart on 2026-09-01 abandoned a meeting fourteen minutes in.
 		// Five seconds: this stops the audio capture, closes mic.wav and system.wav, and calls the tray's state observer, which emits over D-Bus. All of it is local and takes milliseconds; the bound is there for a wedged session bus, not for the work.
 		within("closing the running meeting recording", 5*time.Second, func() {
@@ -769,6 +895,13 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 				compiler.ForceFlush(flushCtx)
 			}
 		})
+		// Local features downloading or installing stop next. A restart never finds one running, as restartBlocker refuses it; a quit does, and a component part-way into place is finished rather than left half-replaced.
+		within("stopping local feature downloads", featureStopBound, func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), featureStopBound)
+			defer cancelClose()
+			features.Close(closeCtx)
+		})
+		stopWindow()
 		// The event streams are ended first: Shutdown waits for open handlers but never cancels their requests, so a daemon with the window connected would otherwise hold its port for the whole timeout and the next daemon could not bind.
 		ipcServer.CloseStreams()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -783,8 +916,8 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			}
 		})
 		// Five seconds: database/sql's Close waits for every connection in use to come back, and the daemon's background sweeps — vector reconciliation, note consolidation, episodic compaction — hold one for the length of their query. Five is long enough for a statement to finish and short enough that a sweep caught mid-flight does not keep the port bound.
-		// The Antigravity process an ask keeps alive is this daemon's child too; left running it would hold June's tool server and answer nobody. Three seconds: the kill is immediate and the reap runs in the background.
-		within("stopping the agy session", 3*time.Second, askAgent.CloseAgySession)
+		// The Antigravity processes asks keep alive are this daemon's children too; left running they would hold June's tool server and answer nobody. Three seconds: the kills are immediate, and CloseAgySession waits up to two and a half for their throwaway HOMEs to be removed once the processes are gone.
+		within("stopping the agy sessions", 3*time.Second, askAgent.CloseAgySession)
 		within("closing the store", 5*time.Second, func() { store.Close() })
 		// The window raiser's session-bus connection is this process's too, so it is released here rather than left to process exit. Two seconds: closing a D-Bus connection is local and takes microseconds; the bound is there for a wedged bus, not for the work.
 		within("closing the window raiser", 2*time.Second, func() {

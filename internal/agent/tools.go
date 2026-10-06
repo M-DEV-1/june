@@ -17,6 +17,7 @@ import (
 
 	"june/internal/act"
 	"june/internal/db"
+	"june/internal/input"
 	"june/internal/memory"
 	"june/internal/tracker"
 	"june/internal/util"
@@ -128,17 +129,22 @@ func optionalWindow(args map[string]any, now time.Time) (time.Time, time.Time, b
 const queryMemoryHits = 10
 
 // sensitivePathSubstrings/sensitivePathSuffixes are the paths read_file refuses — credentials, SSH/GPG/cloud keys, and june's own IPC token, all of which the model could otherwise read and ship to the Gemini API with zero user involvement. Matched against the path as given plus its absolute form, so both a relative "id_rsa" and "~/.ssh/id_rsa" (which filepath.Abs can't expand "~" in, but still contains the ".ssh/" substring literally) get caught.
-var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "june-db/ipc-token"}
+// The token is matched by its file name alone: it lives at ipc-token in the data directory (ipctoken.DefaultPath), which is %LOCALAPPDATA%\june on Windows, ~/.local/share/june on Linux and wherever JUNE_DATA_DIR says, and the old "june-db/ipc-token" pattern matched none of them, only the relative fallback for a machine with no home directory.
+var sensitivePathSubstrings = []string{".ssh/", ".gnupg/", ".aws/", ".env", "id_rsa", "id_ed25519", "credentials", "shadow", "ipc-token"}
 var sensitivePathSuffixes = []string{".pem", ".key"}
 
-// isSensitivePath reports whether path matches one of the patterns above.
+// isSensitivePath reports whether path matches one of the patterns above. It only looks at the string and never touches the filesystem, since redactLine runs it on every line of free text that goes into a delegate brief; isSensitiveFile is the version that also resolves the path.
 func isSensitivePath(path string) bool {
-	// Both forms are compared with forward slashes, so a Windows path such as C:\Users\me\.aws\config meets the same patterns.
-	candidates := []string{filepath.ToSlash(path)}
+	candidates := []string{path}
 	if abs, err := filepath.Abs(path); err == nil {
-		candidates = append(candidates, filepath.ToSlash(abs))
+		candidates = append(candidates, abs)
 	}
 	for _, c := range candidates {
+		// Compared with forward slashes, so a Windows path such as C:\Users\me\.aws\config meets the same patterns, and on Windows in lower case as well, since its file names are not case-sensitive: C:\Users\me\.SSH\ID_RSA is the same key as .ssh\id_rsa.
+		c = filepath.ToSlash(c)
+		if runtime.GOOS == "windows" {
+			c = strings.ToLower(c)
+		}
 		for _, sub := range sensitivePathSubstrings {
 			if strings.Contains(c, sub) {
 				return true
@@ -151,6 +157,19 @@ func isSensitivePath(path string) bool {
 		}
 	}
 	return false
+}
+
+// isSensitiveFile is isSensitivePath for a path read_file is about to open, and also checks the file the path really is: a path can reach a key through a symbolic link, or on Windows through an 8.3 short name (C:\Users\me\AWS~1\CREDEN~1), and neither spells out a pattern. Resolving a path does filesystem I/O, and on Windows a //host/share path opens an SMB connection to that host, which is why only read_file does it, on a path it is about to open anyway, and not redactLine on every line of a brief. Only an existing path resolves, and read_file can only read one of those.
+func isSensitiveFile(path string) bool {
+	if isSensitivePath(path) {
+		return true
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	return err == nil && isSensitivePath(real)
 }
 
 // openURLCommand builds the command that hands a url to the desktop's browser, per platform. A var so a test can swap it and never launch a real browser. Input: the url, already checked to be http or https. Output: the command, not yet started.
@@ -204,7 +223,7 @@ func (a *Agent) executeTool(ctx context.Context, name string, args map[string]an
 	if rec := recorderFrom(ctx); rec != nil {
 		rec(ToolRecord{
 			Name:     name,
-			Args:     toolActivitySummary(name, args),
+			Args:     recordedArgs(name, args),
 			Outcome:  outcome,
 			Result:   resultSummary(name, result),
 			Output:   util.UTF8Bytes(result, toolOutputCap),
@@ -227,7 +246,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if !ok {
 			return toolError("read_file needs a path")
 		}
-		if isSensitivePath(path) {
+		if isSensitiveFile(path) {
 			return refuseApproval("read file: " + path)
 		}
 		data, err := os.ReadFile(path)
@@ -272,13 +291,16 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		previous := a.lastScreen(ctx)
 		if len(items) == 0 {
 			a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title})
-			return app + " · " + title + "\n(nothing actionable is showing)" + frameOnlyHint
+			return app + " · " + title + "\n(nothing actionable is showing)" + frameOnlyNote(inJob(ctx))
 		}
 		lines := strings.Split(act.Format(items), "\n")
 		a.rememberScreen(ctx, items, screenSnapshot{app: app, title: title, lines: lines})
-		return observeResult(app, title, lines, previous)
+		return observeResult(app, title, lines, previous, inJob(ctx))
 
 	case "look":
+		if inJob(ctx) {
+			return toolError(jobSeesNoPictures)
+		}
 		if a.capture == nil {
 			return toolError("this session cannot see the screen")
 		}
@@ -460,21 +482,12 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 }) {
 			return toolError("type_text will not type control characters; use press_key for Enter, Tab or Backspace, or the enter argument to press Enter after the text")
 		}
-		// The field the last successful click acted on stands in for the one the keyboard is in — "click the field first" is the documented way to reach type_text anyway — and keyboardField then reads who really holds the keys, so the checks below are put against the field the text will actually reach. Before any click, this is the zero act.Item, which matches neither check below.
-		focused, known := a.focus(ctx)
-		landed := ""
-		window := a.currentWindow(ctx)
-		if known {
-			focused, known, landed = a.keyboardField(ctx, focused)
-		} else {
-			// A click at a point, or a focus-moving key, left the click itself saying nothing about the field, so the tree is asked who holds the keyboard now. A readable place to type is the field; a readable control that is no place to type is refused by name below; nothing readable at all (a window without a tree) types on the click alone, and the press check and the next look are what verify it, which is the same unknown keyboardField goes ahead on.
-			if holder, ok := keyboardHolder(ctx); ok {
-				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, typingPlaces[holder.Role]
-			} else {
-				slog.Warn("nothing readable holds the keyboard after a point click, so typing goes ahead where the focus is")
-				known = true
-			}
+		// The checks below are put against the field the text will actually reach and the window it is in now, read fresh (see keysGoTo), and the text is not sent at all when that window is not the one observe_screen last looked at.
+		target, errText := a.keysGoTo(ctx, true)
+		if errText != "" {
+			return errText
 		}
+		focused, known, window := target.field, target.known, target.window
 		if !known && !blindConsent(questionFrom(ctx)) && !goAllowed(ctx) {
 			// press_key is named because it is the only way in that the model itself can take. The other two ways past this line — the phrase in the question and the go field on the request — are both the user's, and a model that has hit this mid-task cannot reach either. On 2026-09-20 a GNOME Clocks run was refused here twice, told to ask for something it could not ask for, and found press_key on its own eighty seconds later.
 			return fmt.Sprintf("Stopped before typing: the keyboard is held by %s %q in %q, which is no place to type. Click the field first. If this window draws its own fields and publishes none of them, send the characters one at a time with press_key instead.", focused.Role, focused.Label, window)
@@ -494,29 +507,27 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			return errText
 		}
 		if err := dev.TypeText(text); err != nil {
+			// A stop that came part way through says how much went in, since those characters are in the field now and the next look will show them.
+			if stopped := (*input.Stopped)(nil); errors.As(err, &stopped) {
+				return toolError(fmt.Sprintf("stopped after typing %d of %d characters%s, because the task was stopped", stopped.Sent, stopped.Of, keysLanded(target)))
+			}
 			return toolError("could not type: " + err.Error())
 		}
-		return fmt.Sprintf("typed %d characters%s; call observe_screen to see the result", len([]rune(text)), landed)
+		return fmt.Sprintf("typed %d characters%s; call observe_screen to see the result", len([]rune(text)), keysLanded(target))
 
 	case "press_key":
 		keys, _ := args["keys"].(string)
 		if keys == "" {
 			return toolError("press_key needs keys, like \"Enter\" or \"Ctrl+L\"")
 		}
+		// Every key goes to the window in front, so every press faces the window check, not only the ones that press the focused control: Escape or Ctrl+W sent to a window that came forward since the last look acts on that window.
+		target, errText := a.keysGoTo(ctx, false)
+		if errText != "" {
+			return errText
+		}
 		if pressesFocused(keys) {
-			// Enter, Space and the Send chords press whatever has keyboard focus, which is a click by another name, so they go through the same stop line the click tool does — against the control keyboardField says the keys will reach, which is the one the last click focused unless the accessibility read names another.
-			focused, known := a.focus(ctx)
-			if known {
-				focused, known, _ = a.keyboardField(ctx, focused)
-			} else if holder, ok := keyboardHolder(ctx); ok {
-				// After a point click the tree says who holds the keyboard, and the stop line below is put against that control, whatever it is.
-				focused, known = act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}, true
-			}
-			window := a.currentWindow(ctx)
-			if !known {
-				// Nothing readable holds the keyboard and the last click was at a point: the window publishes no tree, so the press goes ahead on the click, checked against the window's own title below.
-				slog.Warn("nothing readable holds the keyboard after a point click, so the key press goes ahead where the focus is", "keys", keys)
-			}
+			// Enter, Space and the Send chords press whatever has keyboard focus, which is a click by another name, so they go through the same stop line the click tool does — against the control the keys will reach (see keysGoTo), checked against the window's own title as well when nothing readable holds the keyboard.
+			focused, window := target.field, target.window
 			if irreversible(focused, window, false) && !consented(questionFrom(ctx), matchedVerb(focused, window)) && !goAllowed(ctx) {
 				return fmt.Sprintf("Stopped before pressing %s on %s %q in %q. %s", keys, focused.Role, focused.Label, window, consentPrompt(matchedVerb(focused, window)))
 			}
@@ -526,13 +537,16 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 			return errText
 		}
 		if err := dev.PressKey(keys); err != nil {
+			if stopped := (*input.Stopped)(nil); errors.As(err, &stopped) {
+				return toolError(fmt.Sprintf("stopped before %s was pressed, because the task was stopped; no key was left held", keys))
+			}
 			return toolError(fmt.Sprintf("could not press %s: %v", keys, err))
 		}
 		// Tab, Shift+Tab and the arrows move the keyboard off whatever the last click focused, and nothing here can say where to, so the next Enter or Space has to be refused rather than checked against a control this session can no longer vouch for.
 		if movesFocus(keys) {
 			a.focusLost(ctx)
 		}
-		return fmt.Sprintf("pressed %s; call observe_screen to see what it did", keys)
+		return fmt.Sprintf("pressed %s%s; call observe_screen to see what it did", keys, keysLanded(keysTarget{window: target.window}))
 
 	case "scroll_at":
 		x, y, errText := a.picturePoint(ctx, args)
@@ -584,7 +598,7 @@ func (a *Agent) runTool(ctx context.Context, name string, args map[string]any) s
 		if how := a.raiseBrowser(ctx); how != "" {
 			return fmt.Sprintf("opened %s in browser and brought the browser to the front (%s)", raw, how)
 		}
-		return fmt.Sprintf("opened %s in browser; the browser window was not brought to the front, so it may be behind the window that was in front, switch_window to it before reading the page", raw)
+		return fmt.Sprintf("opened %s in browser; the browser window was not brought to the front, so it may be behind the window that was in front; bring the browser forward with open_app before reading the page", raw)
 
 	case "query_memory":
 		if msg := checkArgs(args, "query", "domain", "app", "since", "until", "kind"); msg != "" {
@@ -1013,6 +1027,14 @@ func quoteArg(s string) string {
 	return fmt.Sprintf("%q", util.RunesEllipsis(s, toolArgSummaryRunes))
 }
 
+// recordedArgs is the argument summary a tool call is filed under (see ToolRecord): toolActivitySummary's, except that what was typed is filed as how long it was. The tool line shows the text to someone watching it go in, but the record is kept on disk, where a job's own steps and an act run's never keep it (see db.StorableArgs) — a passphrase dictated once would otherwise sit in tool_calls for good, under the act path and the ask path alike. Input: the tool's name and arguments. Output: the summary.
+func recordedArgs(name string, args map[string]any) string {
+	if text, ok := args["text"].(string); ok && name == "type_text" {
+		return fmt.Sprintf("%d characters", len([]rune(text)))
+	}
+	return toolActivitySummary(name, args)
+}
+
 // toolActivitySummary pre-formats a tool call's primary argument into a short display literal for the UI (e.g. `"Riddler puzzles"` for query_memory), so the UI never needs to know each tool's arg-shape — that knowledge already lives here, next to executeTool/toolDefinitions.
 // Unknown tools and no-arg tools summarize to "".
 func toolActivitySummary(name string, args map[string]any) string {
@@ -1243,21 +1265,146 @@ var typingPlaces = map[string]bool{"entry": true, "text": true, "password text":
 // keyboardHolder reads which element of the window in front holds the keyboard. The tracker's read in production, a stand-in in the tests; it is a package variable rather than a field on Agent because the stop lines it serves are the package's, not one session's.
 var keyboardHolder = tracker.FocusedElement
 
-// keyboardField says which control the keys are about to reach and whether this session can vouch for the answer. Input: the call's context and the item the last numbered click acted on. Output: the control to put the stop lines against, false when the keyboard is provably somewhere the keys have no place to land, and a note naming where they are going when that is not the clicked control.
+// holderItem is the element keyboardHolder read, as the item the stop lines and the result line are put against. A label that is only the box's own contents is dropped: UI Automation names a box that has no name by its value, so that label is what is in the box, up to an observe line's 500 characters, which the stop lines would quote back and a job's result would keep. Input: the element read. Output: the item.
+func holderItem(n act.Node) act.Item {
+	label := n.Label
+	if v := strings.TrimSpace(n.Value); v != "" && label == v {
+		label = ""
+	}
+	return act.Item{Role: n.Role, Label: label, Ref: n.Ref}
+}
+
+// keyboardField says which control the keys are about to reach and whether this session can vouch for the answer. Input: the call's context and the item the last numbered click acted on. Output: the control to put the stop lines against, false when the keyboard is provably somewhere the keys have no place to land, a note naming where they are going when that is not the clicked control, and whether that control was read as holding the keyboard rather than assumed to.
 // The clicked control still holding the keyboard is the ordinary case and focusHeld answers it, a descendant of it holding the keyboard included, which is how Chromium and Electron publish a focused text input. Only when that read says a definite no is the window in front asked who does hold the keys: another box to type in is a legitimate landing place — a page that moved the focus into its own search box is the case this refused on the user's screen — and a readable holder that is no place to type is the proof this stop line exists for.
-func (a *Agent) keyboardField(ctx context.Context, it act.Item) (act.Item, bool, string) {
-	if a.focusHeld(ctx, it) {
-		return it, true, ""
+func (a *Agent) keyboardField(ctx context.Context, it act.Item) (act.Item, bool, string, bool) {
+	if held, read := a.focusHeld(ctx, it); held {
+		return it, true, "", read
 	}
 	holder, ok := keyboardHolder(ctx)
 	if !ok {
 		// Nothing readable holds the keyboard, which is not the same as the keys going astray: the window may publish no tree at all. This is the same unknown the failed read of the clicked field is, and it goes ahead on the remembered click.
 		slog.Warn("nothing readable holds the keyboard in the window in front, so typing goes ahead on the remembered click", "ref", it.Ref)
-		return it, true, ""
+		return it, true, "", false
 	}
-	got := act.Item{Role: holder.Role, Label: holder.Label, Ref: holder.Ref}
+	got := holderItem(holder)
 	if !typingPlaces[holder.Role] {
-		return got, false, ""
+		return got, false, "", true
 	}
-	return got, true, fmt.Sprintf(" into the %s %q, which holds the keyboard, not the %s %q that was clicked", got.Role, got.Label, it.Role, it.Label)
+	into := "the " + got.Role
+	if got.Label != "" {
+		into = fmt.Sprintf("the %s %q", got.Role, got.Label)
+	}
+	return got, true, fmt.Sprintf(" into %s, which holds the keyboard, not the %s %q that was clicked", into, it.Role, it.Label), true
+}
+
+// keysTarget is where the keys of one type_text or press_key are about to land: the control the stop lines are put against (the zero item when nothing readable holds the keyboard), whether this session can vouch that it is a place to type, keyboardField's note when it is not the control the last click acted on, and the window it is in.
+type keysTarget struct {
+	field  act.Item
+	known  bool
+	landed string
+	window string
+}
+
+// keysGoTo works out where the keys of a type_text or press_key will land, and refuses to send them anywhere but the window this session last looked at. Input: the call's context, and whether text is about to be typed rather than a key pressed. Output: the target, or a tool error naming the window in front and the one observe_screen listed.
+// The field the last numbered click acted on stands in for the one the keyboard is in — "click the field first" is the documented way to reach type_text — and keyboardField reads who really holds the keys. With no such click, the tree is asked who holds the keyboard now. That used to be done only after a click at a point: with nothing clicked at all the checks were put against an empty item and the last listing's title, so a password box or a Send box in a window that had just come forward was checked against neither, and the keys went into it.
+func (a *Agent) keysGoTo(ctx context.Context, typing bool) (keysTarget, string) {
+	t := keysTarget{known: true}
+	// held is the ref of the control read as holding the keyboard, "" when none was: a click remembered but not read back (no focus reader, a failed read, nothing readable holding the keys) is only assumed to still have them, and the window is then read fresh rather than taken on its word.
+	held := ""
+	clicked, vouched := a.focus(ctx)
+	if vouched && clicked.Ref != "" {
+		var read bool
+		t.field, t.known, t.landed, read = a.keyboardField(ctx, clicked)
+		if read {
+			held = t.field.Ref
+		}
+	} else if holder, ok := keyboardHolder(ctx); ok {
+		t.field = holderItem(holder)
+		held = holder.Ref
+		// After a click at a point, or a key that moved the focus, the click says nothing about the field, so a readable control that is no place to type is refused by name. With nothing clicked at all the keys have always gone wherever the focus is, and the holder is read for the stop lines and the window alone.
+		if !vouched && typing {
+			t.known = typingPlaces[holder.Role]
+		}
+	} else if !vouched {
+		// Nothing readable at all (a window without a tree) goes ahead on the click alone, and the press check and the next look are what verify it, which is the same unknown keyboardField goes ahead on.
+		slog.Warn("nothing readable holds the keyboard after a point click, so the keys go where the focus is")
+	}
+	window, errText := a.keysWindow(ctx, held)
+	t.window = window
+	return t, errText
+}
+
+// keysWindow names the window the keys are about to reach, and refuses keys bound for any window but the one observe_screen last listed, or the one of the same application the last numbered click was seen to leave in front. Keys go to whatever window has the focus: a job that read one window and typed a moment later put its text into a second window of the same application that had come forward in between, and reported only "typed 19 characters". A click faces frontWindowChanged for the same reason; the keys face a stricter version of it, the title as well as the application, since stillThere checks a click's element and nothing checks where a key lands.
+// A control the last list showed is in that list's window, so a keyboard read as held by one needs no fresh read and survives a title the typing itself changed (Notepad's unsaved mark). So does a holder or a window in front that the tracker's own handle shows to be the window listed (see tracker.RefWindow, which Windows refs carry and Linux refs do not): a terminal titled after the command it runs, or a chat counting its unread messages in its title, retitles itself with nothing having come forward. Anything else is checked against a fresh read of the window in front, title and all. Input: the call's context and the ref of the control read as holding the keyboard, "" when none was. Output: the window in "app · title" form, and a tool error when it is not one this session looked at and the question that started the task does not name it.
+func (a *Agent) keysWindow(ctx context.Context, ref string) (string, string) {
+	looked := a.currentWindow(ctx)
+	seen := a.seen(ctx)
+	if ref != "" && slices.ContainsFunc(seen, func(it act.Item) bool { return it.Ref == ref }) {
+		return looked, ""
+	}
+	listed := itemsWindow(seen)
+	if listed != "" && tracker.RefWindow(ref) == listed {
+		return looked, ""
+	}
+	app, title, nodes, err := a.observe(ctx)
+	if err != nil || app == "" {
+		// Nothing can say the window moved on, which is where frontWindowChanged lets a click go ahead too.
+		return looked, ""
+	}
+	front := app
+	if title != "" {
+		front = app + " · " + title
+	}
+	if looked == "" || front == looked || (listed != "" && nodesWindow(nodes) == listed) {
+		return front, ""
+	}
+	// The window the last numbered click was seen to leave in front stands in for the one looked at only when it is of the same application: a click can retitle the window it lands in, but another program that took the focus between the click and the read after it was recorded all the same, and nothing this session listed is in it.
+	sameApp := strings.EqualFold(frontApp(front), frontApp(looked))
+	if sameApp && front == a.actedIn(ctx) {
+		return front, ""
+	}
+	// A question that names the window is the user asking for it. In a second window of the application looked at, the application's name names both — "type hello in notepad" — so there only a word of the new title that the looked-at title does not share counts.
+	asked := mentionsWindow(questionFrom(ctx), app, title)
+	if sameApp {
+		asked = mentionsTitle(questionFrom(ctx), title, a.lastScreen(ctx).title)
+	}
+	if asked {
+		return front, ""
+	}
+	return front, toolError(fmt.Sprintf("the window in front is now %q, not %q where observe_screen last looked, so nothing was sent to it; call observe_screen again, or say which window to use", front, looked))
+}
+
+// itemsWindow and nodesWindow are the window a listing was read from, by the tracker's handle on it (see tracker.RefWindow). Output: "" when no ref of the listing says, which is every Linux listing.
+func itemsWindow(items []act.Item) string {
+	for _, it := range items {
+		if w := tracker.RefWindow(it.Ref); w != "" {
+			return w
+		}
+	}
+	return ""
+}
+
+func nodesWindow(nodes []act.Node) string {
+	for _, n := range nodes {
+		if w := tracker.RefWindow(n.Ref); w != "" {
+			return w
+		}
+	}
+	return ""
+}
+
+// keysLanded says where keys went, for the result line: the control, then the window. A control whose label may be its own contents (see act.ContentRole) is named by its role alone, since the result is kept in a job's checkpoint and the box just typed into holds what was typed. Input: the target keysGoTo worked out. Output: a phrase such as ` into the entry in "Notepad · Untitled"`, "" when neither is known.
+func keysLanded(t keysTarget) string {
+	out := t.landed
+	if out == "" && t.field.Role != "" {
+		if t.field.Label == "" || act.ContentRole(t.field.Role) {
+			out = " into the " + t.field.Role
+		} else {
+			out = fmt.Sprintf(" into the %s %q", t.field.Role, t.field.Label)
+		}
+	}
+	if t.window != "" {
+		out += fmt.Sprintf(" in %q", t.window)
+	}
+	return out
 }

@@ -1,0 +1,265 @@
+# Builds June's downloads and makes the GitHub release that carries them: the Windows installer June-Setup-x64.exe, the portable june-windows-x86_64.zip, the Linux june-linux-x86_64.tar.gz and one SHA256SUMS over all three.
+# A tag v* is a release: built, signed when SignPath is set up, attested, and left as a draft for a human to publish after trying it. A tag with a "-" (v0.2.0-rc.1) is a pre-release and is published at once, so testers can download it without access to drafts; GitHub never counts a pre-release as the latest release, which is all the README's download link, install.sh, install.ps1 and June's updater look at.
+# Run by hand (workflow_dispatch) it is a dry run, whichever branch or tag it is started on: everything is built and, with SignPath set up, signed under the test policy, and nothing is released; the files stay as workflow artifacts.
+# Signing: the repository variable SIGNPATH_ORGANIZATION_ID and the secret SIGNPATH_API_TOKEN turn it on (see packaging/signpath/ for the two artifact configurations). Without them the Windows files ship unsigned and the release notes say how to get past SmartScreen. SignPath only signs builds from GitHub-hosted runners, so every job here runs on one.
+# Every action is pinned to a commit, not a tag that can be moved: whatever runs in these jobs before signing ends up inside files signed in June's name. Nothing updates the pins by itself: moving one to a newer release means replacing the commit and the version comment beside it together, after checking that the commit is the one that release's tag points at.
+# No build cache is restored either. A job on any branch can write the Actions cache that a tag run would read, and go build trusts what it finds in GOCACHE and GOMODCACHE without checking it again, so a poisoned entry would be compiled into the signed programs. The release builds from scratch, with modules checked against go.sum as they download.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      numeric: ${{ steps.check.outputs.numeric }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # A tag must name the version the tree carries; a dry run only checks that the files agree with each other.
+      - id: check
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || '' }}
+        run: bash packaging/check-version.sh "$TAG"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      # SignPath's action reads this run's details and downloads the uploaded artifact with the job's token.
+      actions: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      SIGNPATH_ENABLED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      # The release policy needs a human's approval in SignPath for every request; the test policy signs a dry run with a certificate nobody trusts. A dry run started on a tag is still a dry run, hence the event and not only the ref.
+      SIGNING_POLICY: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'release-signing' || 'test-signing' }}
+    outputs:
+      signed: ${{ steps.collect.outputs.signed }}
+    defaults:
+      run:
+        # PowerShell 7: Windows PowerShell 5.1 can turn a native tool's progress on stderr into a terminating error.
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          # The version used to write pnpm-lock.yaml; see ci.yml.
+          version: 11.1.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      # go-winres writes a .syso into the main package for the build; untracked, it would stamp both programs as built from a modified tree.
+      - run: |
+          New-Item -ItemType Directory -Force .git/info | Out-Null
+          Add-Content -Path .git/info/exclude -Value '/rsrc_windows_*.syso'
+      # Before the build: with signing on, the build stage has Inno write out its Setup program to be signed with June's.
+      - name: Install Inno Setup
+        run: |
+          $iscc = ./packaging/windows/get-inno.ps1 -Dir (Join-Path $env:RUNNER_TEMP 'inno')
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+      - name: Build
+        run: ./packaging/release-windows.ps1 -Stage build -Out dist/windows -Iscc $env:ISCC -SignUninstaller:($env:SIGNPATH_ENABLED -eq 'true')
+
+      - id: upload-exes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-exes-unsigned
+          path: dist/windows/exes/*.exe
+          if-no-files-found: error
+      - name: Sign the programs
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: june
+          signing-policy-slug: ${{ env.SIGNING_POLICY }}
+          artifact-configuration-slug: exes
+          github-artifact-id: ${{ steps.upload-exes.outputs.artifact-id }}
+          wait-for-completion: true
+          # A person approves each release-signing request, which can take a while.
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/exes
+          parameters: |
+            version: ${{ toJSON(env.VERSION) }}
+      - id: pick
+        name: Pick the programs to package
+        run: |
+          if ($env:SIGNPATH_ENABLED -ne 'true') {
+            "exes=dist/windows/exes" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $uninstaller = @(Get-ChildItem dist/windows/exes -Filter 'uninst-*.exe' | ForEach-Object Name)
+          if ($uninstaller.Count -ne 1) { throw "the build left $($uninstaller.Count) uninst-*.exe files; expected one" }
+          foreach ($name in @('june.exe', 'junew.exe', 'june-window.exe') + $uninstaller) {
+            $file = Join-Path signed/exes $name
+            if (-not (Test-Path $file)) { throw "SignPath returned no $name" }
+            $sig = Get-AuthenticodeSignature $file
+            # A test-signing certificate is not trusted by Windows, so only a release signature has to validate; under either policy every file must come back with a signature on it.
+            if ($env:SIGNING_POLICY -eq 'release-signing' -and $sig.Status -ne 'Valid') { throw "$name came back from SignPath with signature status $($sig.Status)" }
+            if (-not $sig.SignerCertificate) { throw "$name came back from SignPath unsigned" }
+            Write-Host "$name signed by $($sig.SignerCertificate.Subject)"
+          }
+          "exes=signed/exes" >> $env:GITHUB_OUTPUT
+      - name: Package
+        env:
+          EXES: ${{ steps.pick.outputs.exes }}
+        run: ./packaging/release-windows.ps1 -Stage package -Out dist/windows -Exes $env:EXES -Iscc $env:ISCC
+
+      - id: upload-installer
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-installer-unsigned
+          path: dist/windows/June-Setup-x64.exe
+          if-no-files-found: error
+      # Inno Setup packs the signed programs into the installer, so the installer itself is a second signing request.
+      - name: Sign the installer
+        if: env.SIGNPATH_ENABLED == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: june
+          signing-policy-slug: ${{ env.SIGNING_POLICY }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.upload-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed/installer
+          parameters: |
+            version: ${{ toJSON(env.VERSION) }}
+      - id: collect
+        name: Collect the downloads
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $installer = 'dist/windows/June-Setup-x64.exe'
+          if ($env:SIGNPATH_ENABLED -eq 'true') {
+            $installer = 'signed/installer/June-Setup-x64.exe'
+            if (-not (Test-Path $installer)) { throw 'SignPath returned no June-Setup-x64.exe' }
+          }
+          Copy-Item $installer, dist/windows/june-windows-x86_64.zip out/
+          # Only a release signature makes the files trusted; the notes leave out the SmartScreen help only then.
+          $signed = ($env:SIGNPATH_ENABLED -eq 'true' -and $env:SIGNING_POLICY -eq 'release-signing' -and (Get-AuthenticodeSignature out/June-Setup-x64.exe).Status -eq 'Valid')
+          "signed=$($signed.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          Get-ChildItem out | ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower(), $_.Name }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-dist
+          path: out/*
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    # The oldest supported Ubuntu, so the binaries' glibc baseline is one most desktops meet.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11.1.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libx11-dev imagemagick
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - name: Build
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          CGO_ENABLED: "0"
+        run: bash packaging/release.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-dist
+          path: dist/june-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [version, windows, linux]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "*-dist"
+          path: assets
+          merge-multiple: true
+      # One file for every download: the root install.sh and install.ps1 and June's updater each look up their own line in it.
+      - name: Checksums
+        working-directory: assets
+        run: |
+          sha256sum June-Setup-x64.exe june-windows-x86_64.zip june-linux-x86_64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            assets/June-Setup-x64.exe
+            assets/june-windows-x86_64.zip
+            assets/june-linux-x86_64.tar.gz
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          SIGNED: ${{ needs.windows.outputs.signed }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          sed -e "s|{{VERSION}}|$VERSION|g" -e "s|{{REPO}}|$GITHUB_REPOSITORY|g" -e '1{/^<!--.*-->$/d;}' packaging/release-notes.md > "$notes"
+          if [ "$SIGNED" = true ]; then
+            sed -i '/<!-- unsigned:start -->/,/<!-- unsigned:end -->/d' "$notes"
+          else
+            sed -i '/<!-- unsigned:\(start\|end\) -->/d' "$notes"
+          fi
+          files=(assets/June-Setup-x64.exe assets/june-windows-x86_64.zip assets/june-linux-x86_64.tar.gz assets/SHA256SUMS)
+          # A re-run after a failure part way, such as an upload that broke off once gh had made the draft, finds that draft and replaces its files and notes instead of stopping at "release already exists". A release someone has published is never changed here.
+          if draft=$(gh release view "v$VERSION" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "v$VERSION is already published; a re-run never changes a published release" >&2
+              exit 1
+            fi
+            echo "updating the existing draft of v$VERSION"
+            # gh release edit cannot generate notes itself, so they come from the same API create --generate-notes uses.
+            printf '\n' >> "$notes"
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="v$VERSION" --jq .body >> "$notes"
+            gh release edit "v$VERSION" --draft --title "June $VERSION" --notes-file "$notes" --prerelease="$PRERELEASE"
+            gh release upload "v$VERSION" --clobber "${files[@]}"
+            # Only once every file is up, so nobody downloads a pre-release with one missing.
+            if [ "$PRERELEASE" = true ]; then
+              gh release edit "v$VERSION" --draft=false
+            fi
+          else
+            flags=(--verify-tag --title "June $VERSION" --notes-file "$notes" --generate-notes)
+            # For a pre-release gh uploads the files to a draft and publishes it only after the last one, so it is never out with a file missing; a failed upload deletes that draft again, and a run cut off part way leaves it for the branch above.
+            if [ "$PRERELEASE" = true ]; then
+              flags+=(--prerelease)
+            else
+              flags+=(--draft)
+            fi
+            gh release create "v$VERSION" "${flags[@]}" "${files[@]}"
+          fi

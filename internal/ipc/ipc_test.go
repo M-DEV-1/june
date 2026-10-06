@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,9 @@ func (f *fakeAsker) AskText(ctx context.Context, question string) (agent.TurnTra
 	}
 	return f.trace, f.err
 }
+
+// subscribe registers a hub client that named no role, the way a window or a curl reading /events does, and returns its event channel. A test seam: the daemon's own subscriptions all go through Events, which passes the role the client named.
+func (h *hub) subscribe() chan Event { return h.subscribeAs("") }
 
 // newTestServer wires a Server behind a real HTTP server (httptest.NewServer, not a Recorder) because /events needs a live connection two clients can read concurrently while /ask runs in the background. Every route is registered, under the same names cmd/daemon.go gives them.
 func newTestServer(t *testing.T, asker Asker, store *db.Store, screen func() []tracker.Activity, focused func(context.Context) (tracker.Activity, bool)) *httptest.Server {
@@ -306,6 +310,9 @@ func TestAsk_HandsTheConversationSoFarToTheModel(t *testing.T) {
 	if h := asker.got[0]; len(h) != 0 {
 		t.Errorf("the first question must carry no history, got %d entries", len(h))
 	}
+	// The window asks a follow-up only after "done", which comes after the answer is stored; asking the moment the model was called raced that store and read an empty thread.
+	id, _ := strconv.ParseInt(convID, 10, 64)
+	waitFor(t, func() bool { turns, _ := store.ConversationTurns(context.Background(), id); return len(turns) >= 2 })
 
 	ask(`{"question":"do it again","conversation_id":"` + convID + `"}`)
 	waitFor(t, func() bool { asker.mu.Lock(); defer asker.mu.Unlock(); return len(asker.got) == 2 })

@@ -1,9 +1,9 @@
-/** The window's Redux store: what the user is looking at, what they have half-typed or half-done, what they have chosen in Settings, and what the daemon is saying about the question in flight. Everything the daemon holds is server state and lives in the RTK Query cache in api.ts instead; nothing is kept in two places. Component state is only for what is genuinely local, such as whether a menu is open, which the Radix components own themselves. */
+/** The window's Redux store: what the user is looking at, what they have half-typed or half-done, what they have chosen in Settings, what the daemon is saying about the question in flight, and what it says on the stream about setup's microphone test, a local feature's download, an update's install and a restart under way. Everything the daemon holds is server state and lives in the RTK Query cache in api.ts instead; nothing is kept in two places. Component state is only for what is genuinely local, such as whether a menu is open, which the Radix components own themselves. */
 
 import { configureStore, createAction, createListenerMiddleware, createSlice, isAnyOf, type PayloadAction } from "@reduxjs/toolkit";
 import { useDispatch, useSelector } from "react-redux";
 
-import { events, juneApi } from "./api";
+import { MIC_TEST_ID, events, juneApi, keyRefused } from "./api";
 import type { DaemonEvent, Evidence, Notice, Spend } from "../shared/wire";
 import { isJobLive, parseActDetail } from "../shared/job";
 import { jobStateWord, noticeActionMessage } from "./format";
@@ -237,6 +237,8 @@ export type Run = {
   evidence: Evidence[];
   /** Whether the daemon has already said this question is over. Only ever set for a question whose "done" beat POST /ask's own reply, which is the one case the finish cannot be carried out where it arrives. */
   finished?: boolean;
+  /** The "done" and "error" events that arrived before POST /ask had answered, by ask id, true for a done. Until then there is no id to tell this question's end from another client's — the hover window, a curl, a routine all finish on the same stream — so each is kept here and askAccepted settles whether one of them was this question's. */
+  endings?: Record<string, boolean>;
 };
 
 /** One step of a computer-use job's live list: the action it took (or is taking), the change it was written down to produce, and, once wait_for has checked it, whether that change came and why. Input on the wire is one "act" event per step (kind "step"), closed by the next one for it (kind "verified") — see the eventArrived reducer below. */
@@ -269,14 +271,23 @@ export type JobRun = {
   startedAt: number;
 };
 
-/** What the daemon is doing right now: the one question in flight, the computer-use jobs in flight keyed by the conversation each was started from, the transcript of a dictation the daemon closed by itself, and whether the event stream is open. Jobs are keyed rather than held one at a time because a job runs for minutes and the user goes on to another chat while it does; a single slot would lose the first job the moment a second was started and fold the first's events into the second. */
+/** What the daemon is doing right now: the one question in flight, the computer-use jobs in flight keyed by the conversation each was started from, the recording this window has open on the daemon's microphone and its words once they arrive, and whether the event stream is open. Jobs are keyed rather than held one at a time because a job runs for minutes and the user goes on to another chat while it does; a single slot would lose the first job the moment a second was started and fold the first's events into the second. */
 /** What a live voice session is doing, off the daemon's "state" events; unset when no session runs. */
 type VoiceState = "listening" | "thinking" | "speaking";
 type ProgressState = {
   run?: Run;
   jobs: Record<string, JobRun>;
+  /** The recording this window opened on the daemon's microphone, from the moment /dictate/start answered until its words have arrived; transcribing once Stop was pressed and whisper is still on it. Kept here rather than in the composer so the face can say June is listening while one is open, and so the words still land if the composer was swapped for another while whisper ran. */
+  dictating?: { id: string; transcribing: boolean };
+  /** The words of that recording, set only by its own stop reply or "dictation" event (another client's dictation finishing is not this window's) and held until a composer takes them into the box (dictationTaken). */
   dictation?: { id: string; text: string };
+  /** A recording this window stopped waiting on without giving it up (dictationOverdue), whose words are still taken if they come. Its decode can queue behind a whole meeting's on the GPU (recorder.GPURun in internal/ipc/dictate.go), so no fixed wait bounds when they arrive. */
+  dictationLate?: string;
+  /** The id of a recording of this window's that the daemon said it could not transcribe, held until the composer has said so (dictationFailureSaid). */
+  dictationFailed?: string;
   streaming: boolean;
+  /** Whether the daemon answered this window's last request 401 or 403 even after the key was read afresh: it is running, but will not take this window's key. Set by the base query in api.ts through keyRefused; an empty pane reads it to say so rather than that nothing is answering. */
+  refused?: boolean;
   voice?: VoiceState;
   /** Whether a meeting is being captured, and whether the nightly dream run is under way, off the daemon's "recording" and "dreaming" events. */
   recording?: boolean;
@@ -284,6 +295,24 @@ type ProgressState = {
   /** How the last question ended and when, so the face can say done or refused for a moment after. */
   ended?: { ok: boolean; at: number };
 };
+
+/** Lets a recording of this window's go when the daemon says it could not be transcribed, and records that for the composer to say. Input: the progress state and the recording's id. Output: nothing; another client's failure changes nothing. Kept apart from takeHeard so a failure's text is never typed into the box as though it were the words. */
+function failHeard(s: ProgressState, id: string): void {
+  const open = s.dictating?.id === id;
+  if (!open && s.dictationLate !== id) return;
+  if (open) s.dictating = undefined;
+  else s.dictationLate = undefined;
+  s.dictationFailed = id;
+}
+
+/** Holds a recording's words for the composer when the recording is this window's: the one open now, or one it stopped waiting on (dictationLate). Input: the progress state, the recording's id and its transcript. Output: nothing; the recording is let go, and words for any other id are left alone. */
+function takeHeard(s: ProgressState, id: string, text: string): void {
+  const open = s.dictating?.id === id;
+  if (!open && s.dictationLate !== id) return;
+  s.dictation = { id, text };
+  if (open) s.dictating = undefined;
+  else s.dictationLate = undefined;
+}
 
 const progressSlice = createSlice({
   name: "progress",
@@ -302,6 +331,12 @@ const progressSlice = createSlice({
       if (!s.run) return;
       s.run.askId = a.payload.askId;
       if (a.payload.conversationId) s.run.conversationId = a.payload.conversationId;
+      // A "done" or "error" that beat this reply is only now known to be this question's own; the listener below finishes the run off the flag, and every other ending held here belonged to some other client's question and is let go.
+      const ok = s.run.endings?.[a.payload.askId];
+      s.run.endings = undefined;
+      if (ok === undefined) return;
+      s.run.finished = true;
+      s.ended = { ok, at: Date.now() };
     },
     /** Gives up on a question the daemon never accepted. */
     askFailed(s) {
@@ -328,12 +363,44 @@ const progressSlice = createSlice({
     jobFailed(s, a: PayloadAction<string>) {
       delete s.jobs[a.payload];
     },
-    /** Folds one message from the stream into the question, the job or the dictation it belongs to. "status" sets the working line, "tool" adds a step and says what it is doing, and "answer" is the reply; "done" and "error" are left to the middleware below, which reads the finished turn back before giving the run up. "act" is a job's progress, folded into that job in state.progress.jobs rather than into run — a job is never the answer to a chat turn, only something the window shows beside one. "dictation" is a recording the daemon closed by itself. A message carrying another ask's or another job's id, or arriving with no question or job in flight, changes nothing. */
+    /** Records the recording /dictate/start just opened. Input: its id, which its own "dictation" event and /dictate/stop both carry. Words from an earlier recording that no composer took are dropped, since they would otherwise land in the box ahead of these. */
+    dictationStarted(s, a: PayloadAction<string>) {
+      s.dictating = { id: a.payload, transcribing: false };
+      s.dictation = undefined;
+    },
+    /** Records that Stop was pressed and the words are on their way, so the box says so instead of going quietly back to empty while whisper runs. */
+    dictationStopping(s) {
+      if (s.dictating) s.dictating.transcribing = true;
+    },
+    /** Lets the recording go with nothing more to come from it: the stop failed, or the user gave up waiting on its words. Words that arrive for it later are not this window's any more and are dropped. */
+    dictationEnded(s) {
+      s.dictating = undefined;
+    },
+    /** Stops waiting on the open recording without giving up its words: Stop found it already closed and nothing came back in time, or the stream dropped while it was open. The face and the box go back to idle, and the words still go into the box if they arrive after all. */
+    dictationOverdue(s) {
+      if (!s.dictating) return;
+      s.dictationLate = s.dictating.id;
+      s.dictating = undefined;
+    },
+    /** Takes the words of a recording this window opened, whether off its stop reply or its own "dictation" event: whichever lands first lets the recording go, and the other then finds nothing of its own open and changes nothing, so the words are typed once. Input: the recording's id and its transcript, "" when it heard nothing. */
+    dictationHeard(s, a: PayloadAction<{ id: string; text: string }>) {
+      takeHeard(s, a.payload.id, a.payload.text);
+    },
+    /** Records that a composer has put the words of the recording into its box, so no later composer puts them there again. */
+    dictationTaken(s) {
+      s.dictation = undefined;
+    },
+    /** Records that a composer has said a recording could not be transcribed, so it is said once. */
+    dictationFailureSaid(s) {
+      s.dictationFailed = undefined;
+    },
+    /** Folds one message from the stream into the question, the job or the dictation it belongs to. "status" sets the working line, "tool" adds a step and says what it is doing, and "answer" is the reply; "done" and "error" only say how the question ended, and ending the run is left to the middleware below, which reads the finished turn back before giving it up. "act" is a job's progress, folded into that job in state.progress.jobs rather than into run — a job is never the answer to a chat turn, only something the window shows beside one. "dictation" is the words of a recording this window opened. A message carrying another ask's or another job's id, or arriving with no question or job in flight, changes nothing. */
     eventArrived(s, a: PayloadAction<DaemonEvent>) {
       const ev = a.payload;
-      // The daemon ends a dictation itself once it has heard 1.2s of silence, and the words come back on this event rather than on the stop reply, which by then answers 404 (see finish in internal/ipc/dictate.go). The composer takes them from here into whatever is half-typed.
+      // The daemon ends a dictation itself once it has heard 1.2s of silence, and the words come back on this event rather than on the stop reply, which by then answers 404 (see finish in internal/ipc/dictate.go). The composer takes them from here into whatever is half-typed. Every client's dictation is broadcast, so only the one this window opened is taken: keeping any of them left the face saying "listening" for good after the first.
       if (ev.type === "dictation") {
-        s.dictation = { id: ev.id, text: ev.text ?? "" };
+        if (ev.failed) failHeard(s, ev.id);
+        else takeHeard(s, ev.id, ev.text ?? "");
         return;
       }
       // The three things the face is told about that belong to no question: a voice session's own state, a meeting being captured, the nightly run.
@@ -345,7 +412,14 @@ const progressSlice = createSlice({
         s[ev.type] = ev.text === "on";
         return;
       }
-      if ((ev.type === "done" || ev.type === "error") && s.run) s.ended = { ok: ev.type === "done", at: Date.now() };
+      // Every ask's end is broadcast to every client, so only this question's own says done or refused on the face; another client's failure flipped it to refused while this one was still being answered. Before POST /ask has answered there is no id to compare, so the ending is held for askAccepted to settle.
+      if (ev.type === "done" || ev.type === "error") {
+        const run = s.run;
+        if (!run) return;
+        if (!run.askId) run.endings = { ...run.endings, [ev.id]: ev.type === "done" };
+        else if (ev.id === run.askId) s.ended = { ok: ev.type === "done", at: Date.now() };
+        return;
+      }
       if (ev.type === "act") {
         // The job this belongs to is the one whose id matches; a job whose POST /act has not answered yet has no id to match, and takes what arrives, the same tolerance an ask's own id race gets.
         const jobs = Object.values(s.jobs);
@@ -413,12 +487,14 @@ const progressSlice = createSlice({
           if (ev.evidence?.length) run.evidence = ev.evidence;
           break;
         default:
-          // "done" and "error" end the run, but not here: the middleware below reads the conversation back first and dispatches runEnded once the finished turn is in the thread.
           break;
       }
     },
   },
   extraReducers: (build) => {
+    build.addCase(keyRefused, (s, a) => {
+      s.refused = a.payload;
+    });
     // A job started from a fresh draft is filed under the draft key and nothing else ever moves it, so the next New chat would open showing the last draft's finished job. The draft key is one slot the window reuses, unlike a conversation's own.
     build.addCase(uiSlice.actions.chatDraftOpened, (s) => {
       delete s.jobs[DRAFT_CHAT];
@@ -426,13 +502,138 @@ const progressSlice = createSlice({
   },
 });
 
+/** Where one local feature's download has got to, off its last "component" event: the stage word ("downloading", "verifying", "extracting", "testing"), the file and the bytes so far, and the rate. Dropped once the feature ends either way, after which GET /components is the truth again. */
+export type FeatureProgress = { text: string; file: string; done: number; total: number; bps: number };
+
+/** Where installing a newer June has got to, off its last "update" event. */
+export type UpdateProgress = { text: string; done: number; total: number };
+
+/** Why the window is waiting on the daemon to come back: a Gemini key was saved or removed, a restart was asked for, or a newer June is installing over this one — which takes longer, and is only over once the old daemon has actually gone. */
+export type RestartWhy = "key" | "restart" | "update";
+
+/** A restart the window is waiting on. slow is set once it has taken long enough that the screen should say what to do if June never comes back; failed, once the daemon has said it could not restart (or never went down at all), holds why, "" when it gave no reason, and keeps the screen up saying so until the person goes back to June. */
+type RestartWait = { why: RestartWhy; since: number; slow: boolean; failed?: string };
+
+/** What first-run setup and its descendants in Settings are waiting on that the daemon only says on the stream: the microphone test's level, each feature's download, the update's install, and a restart under way. */
+type SetupState = {
+  /** The microphone test's latest amplitude, 0 to 1. */
+  micLevel: number;
+  features: Record<string, FeatureProgress>;
+  update?: UpdateProgress;
+  restart?: RestartWait;
+  /** A "restart_failed" that came while no restart was being waited on, and when. The event can beat the reply of the very request that set the restart off — a key saved, setup finished — so the wait that reply begins takes it up if it is recent (see restartBegan). */
+  unclaimedFailure?: { error: string; at: number };
+};
+
+/** How long a "restart_failed" with no wait to land in is held for one about to begin, and then how long before it is said on the rail's notice line instead. */
+const RESTART_FAILED_GRACE_MS = 3000;
+
+/** Reads an event's JSON detail. Input: the detail string, or undefined. Output: the object, or an empty one for anything that does not parse, so a reader only ever has to default missing fields. */
+function detailOf(detail?: string): Record<string, unknown> {
+  try {
+    const d: unknown = JSON.parse(detail ?? "");
+    return d && typeof d === "object" ? (d as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** A field of a detail as a number, 0 when it is missing or not one. */
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+const setupSlice = createSlice({
+  name: "setup",
+  initialState: { micLevel: 0, features: {} } as SetupState,
+  reducers: {
+    /** Records one "level" event of the microphone test. Input: its detail, which carries the amplitude as "mic" the way a voice session's does. */
+    micLevelHeard(s, a: PayloadAction<string | undefined>) {
+      const d = detailOf(a.payload);
+      s.micLevel = Math.min(1, Math.max(0, num(d.mic ?? d.level)));
+    },
+    /** Puts the meter back at nothing, before a test starts and once it has ended. */
+    micLevelReset(s) {
+      s.micLevel = 0;
+    },
+    /** Folds one "component" event into that feature's progress. A feature that has ended — installed, failed or cancelled — leaves the map, because GET /components, which the middleware reads again on that event, then says what state it is in and why it failed. */
+    featureEvent(s, a: PayloadAction<DaemonEvent>) {
+      const ev = a.payload;
+      if (!ev.id) return;
+      const text = ev.text ?? "";
+      if (ev.failed || text === "installed" || text === "failed" || text === "cancelled") {
+        delete s.features[ev.id];
+        return;
+      }
+      const d = detailOf(ev.detail);
+      const was = s.features[ev.id];
+      // A stage after the download carries no byte counts of its own, and the bar would otherwise drop back to nothing while the file is checked.
+      s.features[ev.id] = {
+        text,
+        file: typeof d.file === "string" ? d.file : (was?.file ?? ""),
+        done: d.done === undefined ? (was?.done ?? 0) : num(d.done),
+        total: d.total === undefined ? (was?.total ?? 0) : num(d.total),
+        bps: num(d.bps),
+      };
+    },
+    /** Folds one "update" event in. A failure ends the wait on a restart that the install would have caused, since there will be none. Only the install's own steps are progress: "available" is the daily check, and holding it here would stand in front of GET /update's state, which is what the strip reads until the first step of an install arrives. */
+    updateEvent(s, a: PayloadAction<DaemonEvent>) {
+      const ev = a.payload;
+      const text = ev.text ?? "";
+      if (ev.failed || text === "failed") {
+        s.update = undefined;
+        if (s.restart?.why === "update") s.restart = undefined;
+        return;
+      }
+      if (text !== "downloading" && text !== "verifying" && text !== "installing") return;
+      const d = detailOf(ev.detail);
+      s.update = { text, done: d.done === undefined ? (s.update?.done ?? 0) : num(d.done), total: d.total === undefined ? (s.update?.total ?? 0) : num(d.total) };
+    },
+    /** Starts waiting on the daemon to restart; the listener below does the waiting. A failure the daemon reported a moment ago, before this wait began, was this restart's. */
+    restartBegan(s, a: PayloadAction<RestartWhy>) {
+      const f = s.unclaimedFailure;
+      s.unclaimedFailure = undefined;
+      s.restart = { why: a.payload, since: Date.now(), slow: false, failed: f && Date.now() - f.at < RESTART_FAILED_GRACE_MS ? f.error : undefined };
+    },
+    restartSlow(s) {
+      if (s.restart) s.restart.slow = true;
+    },
+    /** Records that the restart did not happen. Input: the reason, "" when there is none to give. The wait showing keeps its screen up, saying so; with no wait showing it is held for one about to begin (see unclaimedFailure). */
+    restartFailed(s, a: PayloadAction<string>) {
+      if (s.restart) s.restart.failed = a.payload;
+      else s.unclaimedFailure = { error: a.payload, at: Date.now() };
+    },
+    /** Records that a "restart_failed" no wait took up has been said, by the button whose own refusal said it (POST /restart answers the failure as well as announcing it) or by the notice line below, so it is said once. */
+    restartFailureSaid(s) {
+      s.unclaimedFailure = undefined;
+    },
+    restartEnded(s) {
+      s.restart = undefined;
+      s.update = undefined;
+    },
+  },
+});
+
 export const ui = uiSlice.actions;
 export const conversationsUi = conversationsSlice.actions;
 export const settings = settingsSlice.actions;
 export const progress = progressSlice.actions;
+export const setupUi = setupSlice.actions;
+
+/** Every tag the window reads, for the moments everything on screen may be stale at once: the stream coming back after a drop, and a restarted daemon. */
+const EVERY_TAG = ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Setup", "Component", "Update"] as const;
+
+/** How often a restart is checked on. */
+const RESTART_POLL_MS = 600;
+/** How long a restart may take before the screen says what to do if June never comes back. The old daemon keeps answering through its whole shutdown — closing a recording, flushing the last activity through a model call, bounded at 45 seconds alone (shutdownFlushBound in cmd/daemon_workers.go) — so most of a minute is still an ordinary restart after a busy hour. */
+const RESTART_SLOW_MS = 45_000;
+/** How long a daemon that never stops answering is waited on before the restart is taken not to be happening. Past the replacement's own wait for its predecessor (predecessorWait in cmd/lifecycle.go, 150 seconds), the daemon still answering is the old one with no restart under way. */
+const RESTART_UNSEEN_MS = 180_000;
 
 /** What a "notice" event does outside the progress slice. One arriving fresh, with no action yet, becomes the sidebar's liveNotice — the rail line's own Done/1h/Evening/Tomorrow buttons, wired through useActOnNoticeMutation in sidebar.tsx. Once its action is set — the daemon's answer to one of those buttons, or to the desktop notification's own — it says so on the rail line instead (the one surface every notice already reaches, alongside the routine run result "Could not add that routine" and the rest of ui.notice's callers), clears liveNotice so the buttons are gone, and, for a task notice pressed Done, tells the Tasks screen's cache to read the list again, since the daemon closed that task through its own task-done path (see internal/proactive/notify.go's markDone) without this window's POST /tasks/{id}/done ever running to invalidate it. */
 function reactToNotice(n: Notice, api: { dispatch: AppDispatch }): void {
+  // A meeting's moments ("Recording saved", "Transcribing meeting", "Meeting summary ready") are the only word this window gets that minutes were filed and their action items lifted, and the meetings list is subscribed for the life of the window, so nothing else would read it again until the window lost and regained focus.
+  if (n.kind === "meeting") api.dispatch(juneApi.util.invalidateTags(["Meeting", "Task", "Day"]));
   if (!n.action) {
     api.dispatch(uiSlice.actions.liveNoticeSet({ kind: n.kind, id: n.id, title: n.title, body: n.body, actions: n.actions, expires: n.expires, at: Date.now() }));
     return;
@@ -470,23 +671,118 @@ export function streamMiddleware(open: typeof events = events) {
       if (stop) return;
       stop = open(
         async (ev) => {
-          // A live voice session sends up to twenty of these a second and nothing in this window draws them; dropping them here keeps them out of both listener matchers and the sidebar patch below.
-          if (ev.type === "level") return;
+          // A live voice session sends up to twenty of these a second and nothing in this window draws them; dropping them here keeps them out of both listener matchers and the sidebar patch below. The microphone test's own are the one meter this window does draw.
+          if (ev.type === "level") {
+            if (ev.id === MIC_TEST_ID) api.dispatch(setupSlice.actions.micLevelHeard(ev.detail));
+            return;
+          }
+          // A download's progress and an update's are not an ask's or a job's, and arrive several times a second, so they go to their own slice rather than through eventArrived and every listener on it. The feature or the update that has just ended is read again, since GET /components and GET /update are what say how it ended and why.
+          if (ev.type === "component") {
+            api.dispatch(setupSlice.actions.featureEvent(ev));
+            const text = ev.text ?? "";
+            if (ev.failed || text === "installed" || text === "failed" || text === "cancelled") api.dispatch(juneApi.util.invalidateTags(["Component", "Setup", "Settings"]));
+            return;
+          }
+          if (ev.type === "update") {
+            api.dispatch(setupSlice.actions.updateEvent(ev));
+            // "available" is the daily check finding a release, which only GET /update describes, so the strip shows the moment it is found rather than at the next focus or poll.
+            if (ev.failed || ev.text === "failed" || ev.text === "available") api.dispatch(juneApi.util.invalidateTags(["Update"]));
+            // The installer closes this daemon, and in the desktop app this window with it; in a browser tab the window is still here to wait for the new one.
+            else if (ev.text === "installing") api.dispatch(setupSlice.actions.restartBegan("update"));
+            return;
+          }
+          if (ev.type === "lifecycle") {
+            const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+            const d = detailOf(ev.detail);
+            if (ev.text === "restart_failed") {
+              api.dispatch(setupSlice.actions.restartFailed(typeof d.error === "string" ? d.error : ""));
+              return;
+            }
+            if (ev.text !== "restarting") return;
+            // A restart this window did not ask for — the one finishing setup put off until a download ended — would otherwise take the window away mid-sentence with nothing on it saying why.
+            if (!typed.getState().setup.restart) api.dispatch(setupSlice.actions.restartBegan("restart"));
+            // That restart brings its replacement up hidden, so a window the person is looking at would vanish until the hotkey. Asking for the restart again while it is under way only leaves the marker that shows the replacement's window (beginRestart in cmd/lifecycle.go), so it is asked again; a hidden window is left to come back hidden.
+            if (d.reopen === false && typeof document !== "undefined" && document.visibilityState === "visible") {
+              const again = typed.dispatch(juneApi.endpoints.restartJune.initiate());
+              void again
+                .unwrap()
+                .catch(() => undefined)
+                .finally(() => again.reset());
+            }
+            return;
+          }
           api.dispatch(progressSlice.actions.eventArrived(ev));
           if (ev.type !== "done" && ev.type !== "error") return;
           // A finished ask is what changes the conversation list, the turns inside it and what has been spent, so the cache is told to read them again rather than polling on a timer. The conversation the question landed in is read back first and the run given up only then: the thread draws the question and the streamed answer out of the run alone, so giving it up on the event itself blanks the exchange until the refetch lands.
-          await finishRun(api as unknown as { dispatch: AppDispatch; getState: () => RootState });
           // The list is named by its own id rather than by the bare type: the type alone matches every open conversation as well, including the one finishRun has just read, which would read it a second time for nothing.
-          api.dispatch(juneApi.util.invalidateTags([{ type: "Conversation", id: "LIST" }, "Task", "Usage"]));
+          const tags: Parameters<typeof juneApi.util.invalidateTags>[0] = [{ type: "Conversation", id: "LIST" }, "Task", "Usage"];
+          const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+          const run = typed.getState().progress.run;
+          // Only this window's own question is finished here. Every client's done and error reach every window, and finishing on any of them gave up this window's question while it was still being answered, so its own answer never reached the open thread. One that ended before POST /ask said which it was is settled by askAccepted below.
+          if (run?.askId && ev.id === run.askId) await finishRun(typed);
+          // Another client's question — the hover's, a routine's, a curl — may have landed in the conversation open here, so that one is read again: by its id when the event names it, and otherwise every conversation on screen, which is the open thread and the list. Not while this window's own question is still unaccepted, since that one is read back the moment askAccepted names it.
+          else if (ev.conversation_id) tags.push({ type: "Conversation", id: ev.conversation_id });
+          else if (!run || run.askId) tags.push("Conversation");
+          api.dispatch(juneApi.util.invalidateTags(tags));
         },
         async () => {
           // The stream opening again is this window's one signal that the daemon it had lost is answering, so everything that failed while it was gone is read once more. Without it a window left open across a daemon restart keeps showing "Nothing is answering" until something happens to focus it.
           // A question in flight across the drop is given up the way a finished one is: a restarted daemon will never send its "done", and the composer holds Send disabled until one arrives.
           const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+          // A recording open across the drop is let go the same way: a restarted daemon has closed its microphone and will never send its words, and the box and the face would otherwise say listening or transcribing until the window closed. Its words are still taken if the drop was only the stream's and they come after all.
+          if (typed.getState().progress.dictating) {
+            api.dispatch(progressSlice.actions.dictationOverdue());
+            api.dispatch(uiSlice.actions.noticed({ text: "Dictation was cut off", kind: "error" }));
+          }
           if (typed.getState().progress.run) await finishRun(typed);
-          api.dispatch(juneApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job"]));
+          api.dispatch(juneApi.util.invalidateTags([...EVERY_TAG]));
         },
       );
+    },
+  });
+  // Waits for a restarting daemon to come back: first for it to stop answering, then for it to answer again, reading GET /setup each time. A probe that got any HTTP answer at all, a refusal included, is a daemon that is up; only a request that reached nothing is one that is down. Polling rather than leaning on the stream coming back, because the stream is shared with every other reason it can drop, and a key saved during setup has nothing else open to notice by. The old daemon answers right through its shutdown, so a daemon still answering is never taken for the restarted one: only a "restart_failed", or one that has not gone down long past any shutdown, ends the wait without it, and then the screen says the restart did not happen.
+  listener.startListening({
+    actionCreator: setupSlice.actions.restartBegan,
+    effect: async (_action, api) => {
+      api.cancelActiveListeners();
+      const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+      const began = Date.now();
+      let down = false;
+      for (;;) {
+        await api.delay(RESTART_POLL_MS);
+        const wait = typed.getState().setup.restart;
+        if (!wait || wait.failed !== undefined) return;
+        const waited = Date.now() - began;
+        if (waited > RESTART_SLOW_MS && !wait.slow) api.dispatch(setupSlice.actions.restartSlow());
+        if (!down && waited > RESTART_UNSEEN_MS) {
+          api.dispatch(setupSlice.actions.restartFailed(""));
+          api.dispatch(juneApi.util.invalidateTags([...EVERY_TAG]));
+          return;
+        }
+        const probe = await typed.dispatch(juneApi.endpoints.setup.initiate(undefined, { subscribe: false, forceRefetch: true }));
+        const status = probe.error && "status" in probe.error ? probe.error.status : undefined;
+        const answered = !probe.error || typeof status === "number" || status === "PARSING_ERROR";
+        if (!answered) {
+          down = true;
+          continue;
+        }
+        if (down) break;
+      }
+      api.dispatch(juneApi.util.invalidateTags([...EVERY_TAG]));
+      api.dispatch(setupSlice.actions.restartEnded());
+    },
+  });
+  // A failure that no wait took up within the grace — a restart nobody here was waiting on, such as the one setup put off — is said on the rail's notice line, since nothing else would ever say it.
+  listener.startListening({
+    actionCreator: setupSlice.actions.restartFailed,
+    effect: async (action, api) => {
+      const typed = api as unknown as { dispatch: AppDispatch; getState: () => RootState };
+      if (typed.getState().setup.restart) return;
+      await api.delay(RESTART_FAILED_GRACE_MS);
+      if (typed.getState().setup.restart || !typed.getState().setup.unclaimedFailure) return;
+      api.dispatch(setupSlice.actions.restartFailureSaid());
+      const why = action.payload.trim().replace(/\.$/, "");
+      api.dispatch(uiSlice.actions.noticed({ text: why ? `June couldn't restart: ${why}` : "June couldn't restart", kind: "error" }));
     },
   });
   // A live job is not a conversation the daemon knows about, so nothing tells the sidebar's own GET /conversations to say what it is doing; this patches the row's subtitle straight into the RTK Query cache instead; every other field is left as the daemon last sent it, and a job with no row to find (a fresh draft, before the first message opened one) patches nothing.
@@ -536,6 +832,7 @@ export function makeStore(preloaded?: { ui?: Partial<UiState>; settings?: Partia
       conversations: conversationsSlice.reducer,
       settings: settingsSlice.reducer,
       progress: progressSlice.reducer,
+      setup: setupSlice.reducer,
       [juneApi.reducerPath]: juneApi.reducer,
     },
     preloadedState: preloaded

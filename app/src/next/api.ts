@@ -1,5 +1,6 @@
 /** The React window's whole connection to the local daemon at http://127.0.0.1:6942: the IPC token, the RTK Query API over the daemon's routes, and the SSE stream. The token is read here and nowhere else, so every request in the window authenticates the same way and there is one place to fix when the daemon changes its secret. The stream reader and its message shapes are shared with the hover's src/daemon.ts through shared/wire.ts. */
 
+import { createAction } from "@reduxjs/toolkit";
 import { createApi, fetchBaseQuery, type BaseQueryFn, type FetchArgs, type FetchBaseQueryError } from "@reduxjs/toolkit/query/react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -27,6 +28,15 @@ export async function refreshToken(): Promise<string | undefined> {
   return token;
 }
 
+/** Whether the window's own global shortcut could not be registered (hotkey_status in src-tauri/src/lib.rs). Input: none. Output: true only when the window tried and another program holds the keys; false when it worked, on Linux, where the desktop's keybinding is the shortcut, and outside Tauri. */
+export async function hotkeyFailed(): Promise<boolean> {
+  try {
+    return Boolean((await invoke<{ failed: boolean }>("hotkey_status"))?.failed);
+  } catch {
+    return false;
+  }
+}
+
 /** The token to send, reading one if this window has never had one. Input: none. Output: the token, or undefined when none could be read. */
 async function ensureToken(): Promise<string | undefined> {
   if (!token) await refreshToken();
@@ -43,12 +53,25 @@ const rawBaseQuery = fetchBaseQuery({
   },
 });
 
+/** Says whether the daemon refused this window's key on its last answer, even after the key was read afresh. Input: true for a 401 or 403 that a fresh key did not cure, false for any other answer. Dispatched by the base query below only when the answer changes, and kept in the store as progress.refused, so an empty pane can tell a daemon that will not take this window's key from one that is not there at all — both used to read "Nothing is answering". */
+export const keyRefused = createAction<boolean>("june/keyRefused");
+
+/** What keyRefused last said, so it is dispatched on a change rather than after every request. */
+let refusedLast = false;
+
 /** The query every endpoint below runs through: the plain one, plus a single retry with a freshly read token when the daemon answers 401. Input and output are RTK Query's own — the endpoint's arguments in, the parsed body or an error out. A 401 means the daemon restarted and wrote a new token since this window read one, which is the ordinary case after the daemon relaunches the window, so it is worth exactly one silent retry and not an error on screen. */
 const baseQueryWithFreshToken: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryError> = async (args, api, extra) => {
+  const used = await ensureToken();
   let result = await rawBaseQuery(args, api, extra);
   if (result.error?.status === 401) {
-    await refreshToken();
-    result = await rawBaseQuery(args, api, extra);
+    // Only a key that actually changed is worth another try: sending the one just refused straight back doubled every request a window with a wrong key made, for the same 401.
+    const fresh = await refreshToken();
+    if (fresh !== used) result = await rawBaseQuery(args, api, extra);
+  }
+  const refused = result.error?.status === 401 || result.error?.status === 403;
+  if (refused !== refusedLast) {
+    refusedLast = refused;
+    api.dispatch(keyRefused(refused));
   }
   return result;
 };
@@ -167,7 +190,22 @@ export type SettingsView = {
   first_run?: FirstRun;
   /** Whether GET /brains may read the Claude row's usage bars from the undocumented Anthropic endpoint using the Claude Code login's own token. POST /settings with this field writes it back. */
   claude_usage_from_login: boolean;
+  /** Whether June asks GitHub once a day for a newer version. Optional, as are the two below, because a daemon older than the field sends nothing and the window then draws no control for it. */
+  update_check?: boolean;
+  /** Whether June's background work (note upkeep, meeting write-ups) may go to the user's other signed-in brains when the chosen one cannot do it. Questions are not covered: the router hands those on regardless. */
+  allow_fallback?: boolean;
+  /** Whether June offers to record when another app has held the microphone long enough to be a call. */
+  meetings_offer?: "ask" | "off";
 };
+
+/** What POST /settings may change, any subset at once: a field left out is left as it is. autostart is the start-at-sign-in choice GET /setup reports. */
+export type SettingsChange = Partial<{
+  claude_usage_from_login: boolean;
+  update_check: boolean;
+  allow_fallback: boolean;
+  meetings_offer: "ask" | "off";
+  autostart: boolean;
+}>;
 
 /** One allowance window a brain's provider reports for the user's own account: a five-hour or weekly subscription window, a daily request ceiling. Mirrors internal/agent.UsageLimit (aliased as brain.UsageLimit). used_fraction is 0 to 1; resets_at is RFC3339. */
 export type UsageLimit = { window: string; used_fraction: number; resets_at: string; source: string };
@@ -187,6 +225,17 @@ export type Brain = {
   /** Why this brain has no usage bars: Grok's names what its CLI has no reading for, Claude's says the usage source was turned off in Settings. Empty when the daemon has nothing to say, or the brain does report limits. */
   limits_note?: string;
 };
+
+/** GET and POST /brains' whole body: every brain, and whether no brain is pinned and the daemon's router picks one per question. automatic is false from a daemon too old to send it, which is what such a daemon means — it always pinned whichever brain was last picked. */
+export type Brains = { brains: Brain[]; automatic: boolean };
+
+/** What POST /brains takes to put the daemon back on its own routing instead of a pinned brain, and what the picker sends for its "Automatic" row. */
+export const AUTOMATIC_BRAIN = "auto";
+
+/** Reads GET or POST /brains' body into Brains. */
+function brainsBody(r: Partial<Brains>): Brains {
+  return { brains: r.brains ?? [], automatic: r.automatic ?? false };
+}
 
 /** What one provider has cost in tokens over a window. Mirrors ipc.ProviderTotal. */
 export type UsageProvider = { provider: string; calls: number; input_tokens: number; output_tokens: number; total_tokens: number };
@@ -234,8 +283,8 @@ export type Usage = {
   limits?: Record<string, ProviderLimits>;
 };
 
-/** GET /status: whether the tracker is paused right now. POST /pause and POST /resume are what change it. */
-export type TrackerStatus = { paused: boolean };
+/** GET /status: whether the tracker is paused right now, and when a pause for a set time ends by itself (RFC3339; "" or absent for a pause that lasts until resumed). POST /pause and POST /resume are what change it. */
+export type TrackerStatus = { paused: boolean; paused_until?: string };
 
 /** One of Gemini Live's thirty prebuilt voices, on GET or POST /voices. Mirrors ipc.VoiceView. trait is Google's own one-word description of how it sounds ("Bright", "Gravelly"), shown beside the name because thirty star names say nothing on their own about how any of them sounds. current marks the one a live session dials with next; exactly one row carries it. */
 export type Voice = { name: string; trait: string; current: boolean };
@@ -270,6 +319,68 @@ export type ActJob = {
   elapsed_ms: number;
 };
 
+/** GET /setup: whether first-run setup is finished, and what its screens say. Mirrors ipc.SetupView. brain_ready is true once anything can answer (a key or a signed-in login); restart_pending says a change is waiting on a restart; hotkey is spelled the way a person reads it ("Ctrl+Alt+Space"). */
+export type SetupView = {
+  done: boolean;
+  version: string;
+  gemini_key: boolean;
+  brain_ready: boolean;
+  default_brain: string;
+  autostart: boolean;
+  hotkey: string;
+  restart_pending: boolean;
+  data_dir: string;
+  /** Linux only: whether June's GNOME extension answers with window frames, which screen control needs. false until the first logout after installing; absent where there is no such check. */
+  window_frames?: boolean;
+};
+
+/** What POST and DELETE /setup/gemini-key answer once the key is written: the daemon restarts itself straight after, because the key is read once at start and threaded into everything built then. Both refuse 409 with "recording", "processing" or "downloading" as the error word while that restart would cut a meeting or a download short, with nothing changed. */
+export type KeySaved = { ok: boolean; restarting: boolean };
+
+/** POST /setup/mic-test's verdict after three seconds of listening. consent is what Windows' privacy settings say about desktop apps using the microphone, "unknown" anywhere that has no such switch; error is why the microphone would not open, "" (or absent, from a daemon that never sends it) when it did. */
+export type MicTest = { device: string; heard: boolean; peak: number; consent: "allowed" | "blocked" | "unknown"; error?: string };
+
+/** The id the microphone test's "level" events carry, which is how they are told apart from a voice session's. */
+export const MIC_TEST_ID = "mic-test";
+
+/** What GET /components found about this machine. gpu is absent when none was read; vram_mb and ram_mb are 0 when unknown. */
+export type Platform = {
+  os: string;
+  gpu?: { vendor: string; name: string; vram_mb: number; driver: string };
+  vulkan: boolean;
+  free_bytes: number;
+  ram_mb: number;
+  /** Windows' Smart App Control, which blocks unsigned programs outright — the ones these features download among them. Absent off Windows and from an older daemon. */
+  smart_app_control?: "on" | "evaluation" | "off" | "unknown";
+};
+
+/** One optional local feature on GET /components. variant is the build that suits this machine ("cuda", "cpu", "vulkan"); requires names the features it builds on; needs_restart says June only picks it up after a restart; error is set only while state is "failed". "external" is a feature whose files were put there by hand, which June uses but will not remove. */
+export type Feature = {
+  id: string;
+  title: string;
+  variant: string;
+  download_bytes: number;
+  disk_bytes: number;
+  state: "not_installed" | "queued" | "installing" | "installed" | "external" | "update_available" | "failed";
+  error: string;
+  requires: string[];
+  needs_restart: boolean;
+};
+
+/** GET /components' whole body. */
+export type Components = { platform: Platform; features: Feature[]; restart_pending: boolean };
+
+/** GET /update: the running version, the newest release, and where installing it has got to. can_install is false where June cannot replace itself (Linux, or a build with no version), and the window links to release_url instead. */
+export type UpdateView = {
+  current: string;
+  latest: string;
+  available: boolean;
+  release_url: string;
+  can_install: boolean;
+  state: "idle" | "checking" | "downloading" | "ready" | "installing" | "failed";
+  error: string;
+};
+
 /** Reads the HTTP status out of whatever .unwrap() threw. Input: the caught value. Output: the status code, or undefined when there is none to read. The daemon's error routes answer plain text through http.Error, which fetchBaseQuery cannot parse as JSON, so it reports the real code as a PARSING_ERROR carrying originalStatus rather than as status itself. Also what stopDictation reads its 404 through. */
 export function errorStatus(e: unknown): number | undefined {
   if (!e || typeof e !== "object" || !("status" in e)) return undefined;
@@ -278,11 +389,36 @@ export function errorStatus(e: unknown): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
+/** Reads what a refusal said. Input: the caught value. Output: the "error" field of a JSON body such as {"error":"invalid_key"}, or the first line of a plain-text one, or "" when it carried neither. The setup and component routes answer JSON and the older routes plain text through http.Error, and a route that is still a stub answers neither, so all three are read the same way here. */
+export function errorWord(e: unknown): string {
+  if (!e || typeof e !== "object" || !("data" in e)) return "";
+  let data = (e as { data: unknown }).data;
+  if (typeof data === "string") {
+    const text = data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return text.split("\n")[0].trim();
+    }
+  }
+  if (data && typeof data === "object" && "error" in data) return String((data as { error: unknown }).error ?? "");
+  return "";
+}
+
+/** Reads the sentence a refusal carried for a person. Input: the caught value. Output: the "message" field the setup, component and update routes put beside their "error" word, capitalised, or "" when there is none — in which case the caller says something of its own rather than show the bare word. */
+export function errorMessage(e: unknown): string {
+  if (!e || typeof e !== "object" || !("data" in e)) return "";
+  const data = (e as { data: unknown }).data;
+  if (!data || typeof data !== "object" || !("message" in data)) return "";
+  const text = String((data as { message: unknown }).message ?? "").trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** Every daemon route the window reads or writes, as one RTK Query API. The daemon wraps its lists in an object named after the list ("conversations", "tasks", "days", "meetings", "brains"), so each list endpoint unwraps that here and components get a plain array. */
 export const juneApi = createApi({
   reducerPath: "june",
   baseQuery: baseQueryWithFreshToken,
-  tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Voice"],
+  tagTypes: ["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Routine", "Job", "Voice", "Setup", "Component", "Update"],
   endpoints: (build) => ({
     /** The 50 most recently touched conversations, newest first. The list is tagged with an id of its own so it can be read again without every open conversation being read again with it: an invalidation naming the type alone still matches this, which is what every mutation below relies on. */
     conversations: build.query<ConversationSummary[], void>({
@@ -435,21 +571,21 @@ export const juneApi = createApi({
       query: () => "/settings",
       providesTags: ["Settings"],
     }),
-    /** Turns the Claude row's undocumented usage-endpoint read on or off; the daemon writes it to config and answers with the same view GET would. */
-    setClaudeUsageFromLogin: build.mutation<SettingsView, boolean>({
-      query: (claude_usage_from_login) => ({ url: "/settings", method: "POST", body: { claude_usage_from_login } }),
-      invalidatesTags: ["Settings"],
+    /** Writes one or more settings; the daemon persists them and answers with the same view GET would. Setup is read again too, since start-at-sign-in is reported there. */
+    saveSettings: build.mutation<SettingsView, SettingsChange>({
+      query: (body) => ({ url: "/settings", method: "POST", body }),
+      invalidatesTags: ["Settings", "Setup"],
     }),
-    /** The brains June can call on this machine and which one is the default. */
-    brains: build.query<Brain[], void>({
+    /** The brains June can call on this machine, which one is the default, and whether none is and the daemon picks per question. */
+    brains: build.query<Brains, void>({
       query: () => "/brains",
-      transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
+      transformResponse: brainsBody,
       providesTags: ["Brain"],
     }),
-    /** Makes one brain the default and remembers the model to call it with; the daemon writes both to its config and answers with the whole list again. default false stores the model for that brain without making it the default, which is what a model chip in Settings sends. */
-    pickBrain: build.mutation<Brain[], { brain: string; model: string; default?: boolean }>({
+    /** Makes one brain the default and remembers the model to call it with; the daemon writes both to its config and answers with the whole list again. model "" is the brain's own default model, not a pin. default false stores the model for that brain without making it the default, which is what a model chip in Settings sends. brain AUTOMATIC_BRAIN with no model unpins whichever brain was picked and hands the choice back to the daemon's router. */
+    pickBrain: build.mutation<Brains, { brain: string; model?: string; default?: boolean }>({
       query: (body) => ({ url: "/brains", method: "POST", body }),
-      transformResponse: (r: { brains: Brain[] }) => r.brains ?? [],
+      transformResponse: brainsBody,
       invalidatesTags: ["Brain", "Settings"],
     }),
     /** The whole voice roster and the Live models beside it: all thirty of Gemini Live's prebuilt voices, one carrying current true, and the models June can speak through, one of which also carries current true. */
@@ -489,6 +625,11 @@ export const juneApi = createApi({
       query: (on) => ({ url: on ? "/resume" : "/pause", method: "POST", responseHandler: "text" }),
       invalidatesTags: ["Tracker", "Settings"],
     }),
+    /** Stops watching the screen for a number of minutes, after which the daemon starts again by itself; 0 pauses until resumed, the same as setCapture(false). */
+    pauseFor: build.mutation<string, number>({
+      query: (minutes) => ({ url: "/pause", method: "POST", body: minutes > 0 ? { minutes } : undefined, responseHandler: "text" }),
+      invalidatesTags: ["Tracker", "Settings"],
+    }),
     /** Every routine the user has written. */
     routines: build.query<Routine[], void>({
       query: () => "/routines",
@@ -514,11 +655,11 @@ export const juneApi = createApi({
     startDictation: build.mutation<{ id: string }, void>({
       query: () => ({ url: "/dictate/start", method: "POST" }),
     }),
-    /** Closes the microphone and waits for the transcript. Input: the id startDictation returned. Output: the text, "" when the daemon has no such recording open any more — the silence gate or the two-minute cap already ended it and sent the text on the event stream instead, which is not an error worth showing. Any other failure is left to reject, same as every other mutation here. */
-    stopDictation: build.mutation<{ text: string }, string>({
+    /** Closes the microphone and waits for the transcript. Input: the id startDictation returned. Output: the text; or, with gone true and no text, word that the daemon has no such recording open any more — the silence gate or the two-minute cap already ended it and its words come on the event stream instead, possibly not yet, since it is still transcribing them. Neither is an error worth showing. Any other failure is left to reject, same as every other mutation here. */
+    stopDictation: build.mutation<{ text: string; gone?: boolean }, string>({
       async queryFn(id, _api, _extra, baseQuery) {
         const result = await baseQuery({ url: "/dictate/stop", method: "POST", body: { id } });
-        if (errorStatus(result.error) === 404) return { data: { text: "" } };
+        if (errorStatus(result.error) === 404) return { data: { text: "", gone: true } };
         if (result.error) return { error: result.error };
         return { data: result.data as { text: string } };
       },
@@ -526,6 +667,104 @@ export const juneApi = createApi({
     /** Opens a link in the system browser. The reply markdown's own links post here (see chat-markdown.tsx) instead of calling window.open, which a Tauri WebKitGTK webview does not reliably hand off to the real browser; the daemon runs the same xdg-open/open command its open_url tool uses. The daemon answers 204, and 400 for a url that is not http or https. */
     openUrl: build.mutation<void, string>({
       query: (href) => ({ url: "/open", method: "POST", body: { url: href } }),
+    }),
+    /** Whether first-run setup is finished, which is what decides whether the window opens on its setup screens or on Chats. */
+    setup: build.query<SetupView, void>({
+      query: () => "/setup",
+      providesTags: ["Setup"],
+    }),
+    /** The brains with every login checked again now rather than read off the ten-minute cache, for the setup screen a person has just signed in somewhere before opening. What it reads is written into the plain brains entry too, so every brain picker in the window agrees with it at once. */
+    freshBrains: build.query<Brains, void>({
+      query: () => "/brains?refresh=1",
+      transformResponse: brainsBody,
+      providesTags: ["Brain"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(juneApi.util.upsertQueryData("brains", undefined, data));
+        } catch {
+          // The plain list keeps whatever it last read.
+        }
+      },
+    }),
+    /** Checks a Gemini key with Google, writes it into June's env file and restarts the daemon. Refused 422 {"error":"invalid_key"} for a key Google turned down, 502 {"error":"unreachable"} when Google could not be asked (force true saves it unchecked), and 409 {"error":"env_var_set"} when the key comes from the computer's own environment, which a file cannot override. Every setup and component route below reads its body by content type, since a route the daemon has not grown yet answers 404 in plain text. */
+    saveGeminiKey: build.mutation<KeySaved, { key: string; force?: boolean }>({
+      query: (body) => ({ url: "/setup/gemini-key", method: "POST", body, responseHandler: "content-type" }),
+    }),
+    /** Takes the Gemini key back out of June's env file, which restarts the daemon the same way saving one does. */
+    removeGeminiKey: build.mutation<KeySaved, void>({
+      query: () => ({ url: "/setup/gemini-key", method: "DELETE", responseHandler: "content-type" }),
+    }),
+    /** Listens on the daemon's microphone for three seconds. The reply is the verdict; the meter while it listens comes off the "level" events carrying MIC_TEST_ID. */
+    micTest: build.mutation<MicTest, void>({
+      query: () => ({ url: "/setup/mic-test", method: "POST", responseHandler: "content-type" }),
+    }),
+    /** Opens the system's own microphone privacy page, the only place a blocked microphone can be allowed again. */
+    openMicSettings: build.mutation<unknown, void>({
+      query: () => ({ url: "/setup/mic-settings", method: "POST", responseHandler: "content-type" }),
+    }),
+    /** Marks setup finished, which also starts watching the screen. restarting is true when an earlier change was waiting on a restart and the daemon is now doing it; false also when one is owed but a download or a meeting would be cut short, which the daemon then carries out by itself once they are over. Nothing is invalidated here: whoever calls it decides whether the window waits for a restart first or goes straight to Chats. */
+    completeSetup: build.mutation<{ restarting: boolean }, void>({
+      query: () => ({ url: "/setup/complete", method: "POST", responseHandler: "content-type" }),
+    }),
+    /** The optional local features, what each would cost to download on this machine, and how far each has got. */
+    components: build.query<Components, void>({
+      query: () => "/components",
+      transformResponse: (r: Partial<Components>) => ({
+        platform: r.platform ?? { os: "", vulkan: false, free_bytes: 0, ram_mb: 0 },
+        features: r.features ?? [],
+        restart_pending: r.restart_pending ?? false,
+      }),
+      providesTags: ["Component"],
+    }),
+    /** Queues one feature's download; the daemon answers 202 and reports progress as "component" events. 507 when the disk is too full for it. */
+    installFeature: build.mutation<unknown, string>({
+      query: (id) => ({ url: `/components/${encodeURIComponent(id)}/install`, method: "POST", body: { variant: "auto" }, responseHandler: "content-type" }),
+      invalidatesTags: ["Component"],
+    }),
+    /** Stops a queued or running download; the part already fetched is kept so a later Set up resumes it. */
+    cancelFeature: build.mutation<unknown, string>({
+      query: (id) => ({ url: `/components/${encodeURIComponent(id)}/cancel`, method: "POST", responseHandler: "content-type" }),
+      invalidatesTags: ["Component"],
+    }),
+    /** Deletes a feature June installed. 409 while a meeting or a dictation is using its files. */
+    removeFeature: build.mutation<{ restart_pending: boolean }, string>({
+      query: (id) => ({ url: `/components/${encodeURIComponent(id)}`, method: "DELETE", responseHandler: "content-type" }),
+      invalidatesTags: ["Component", "Settings", "Setup"],
+    }),
+    /** Whether a newer June is out, read off the daemon's daily check. */
+    update: build.query<UpdateView, void>({
+      query: () => "/update",
+      providesTags: ["Update"],
+    }),
+    /** Asks GitHub now rather than waiting for the daily check, for the Check now button; what it finds becomes what GET /update says everywhere in the window. A check that could not reach GitHub comes back as state "failed" with the reason in error. */
+    checkUpdate: build.mutation<UpdateView, void>({
+      query: () => "/update?refresh=1",
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(juneApi.util.upsertQueryData("update", undefined, data));
+        } catch {
+          // GET /update keeps what it last read.
+        }
+      },
+    }),
+    /** Downloads the newest installer, checks it against the release's SHA256SUMS and runs it, which closes June and opens the new one. Answers 202 with what GET /update now says, state "downloading"; the steps come as "update" events. 409 {"error":"recording"|"processing"|"downloading","message":…} while quitting June would cut a recording, a write-up or a download short. The 202's body goes straight into GET /update's cache, since the first event only comes once the installer's download has begun, and until then the strip would read "is out" again. */
+    installUpdate: build.mutation<unknown, void>({
+      query: () => ({ url: "/update", method: "POST", responseHandler: "content-type" }),
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          if (data && typeof data === "object" && "state" in data) dispatch(juneApi.util.upsertQueryData("update", undefined, data as UpdateView));
+          else dispatch(juneApi.util.invalidateTags(["Update"]));
+        } catch {
+          // Refused: the strip says why, off the refusal itself.
+        }
+      },
+    }),
+    /** Restarts the daemon, and with it this window, so a change that only takes effect at start does. Refused 409 {"error":"recording"|"processing"|"downloading","message":…} while a restart would cut one of those short, and 500 {"error":"restart_failed","message":…} when the replacement could not be started, June still running. Asked again while a restart is under way it answers 202 and only makes the replacement show its window. */
+    restartJune: build.mutation<unknown, void>({
+      query: () => ({ url: "/restart", method: "POST", responseHandler: "content-type" }),
     }),
   }),
 });
@@ -554,7 +793,7 @@ export const {
   useDeleteMeetingMutation,
   useMeetingsQuery,
   useSettingsQuery,
-  useSetClaudeUsageFromLoginMutation,
+  useSaveSettingsMutation,
   useBrainsQuery,
   usePickBrainMutation,
   useVoicesQuery,
@@ -564,6 +803,7 @@ export const {
   useUsageQuery,
   useTrackerQuery,
   useSetCaptureMutation,
+  usePauseForMutation,
   useRoutinesQuery,
   useCreateRoutineMutation,
   useDeleteRoutineMutation,
@@ -571,6 +811,20 @@ export const {
   useStartDictationMutation,
   useStopDictationMutation,
   useOpenUrlMutation,
+  useSetupQuery,
+  useFreshBrainsQuery,
+  useSaveGeminiKeyMutation,
+  useRemoveGeminiKeyMutation,
+  useMicTestMutation,
+  useOpenMicSettingsMutation,
+  useComponentsQuery,
+  useInstallFeatureMutation,
+  useCancelFeatureMutation,
+  useRemoveFeatureMutation,
+  useUpdateQuery,
+  useCheckUpdateMutation,
+  useInstallUpdateMutation,
+  useRestartJuneMutation,
 } = juneApi;
 
 /** Opens the daemon's SSE stream for this window (see openStream in shared/wire.ts). Input: a callback for each event, and a callback for the stream opening again after it had dropped. Output: a stop function. The first connect reads the token this window already holds; a reconnect reads it again, because a dropped stream is also how a restarted daemon shows itself. */

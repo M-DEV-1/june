@@ -141,7 +141,7 @@ func (s *Server) getConversation(w http.ResponseWriter, r *http.Request, id int6
 	})
 }
 
-// ConversationTitle handles POST /conversations/{id}/title with body {"title": string}: renames the conversation. Output: 204 on success; 400 for a body that fails to decode or names a blank title; 404 when no conversation has that id.
+// ConversationTitle handles POST /conversations/{id}/title with body {"title": string}: renames the conversation, keeping no more of the title than the store does (see db.Store.RenameConversation). Output: 204 on success; 400 for a body that fails to decode or names a blank title; 404 when no conversation has that id.
 func (s *Server) ConversationTitle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -211,6 +211,16 @@ func errorReason(text string) string {
 		return "The model was overloaded (503)."
 	case askTooLong:
 		return "The model took too long."
+	case askNoKey:
+		return "The brain has no API key."
+	case askLoggedOut, askLoggedOutChatGPT, askLoggedOutClaude, askLoggedOutAntigravity:
+		return "The brain's login has expired."
+	case askNotInstalled:
+		return "The brain's program was not found."
+	case askNoAnswer:
+		return "The model gave no answer."
+	case askNoBrain:
+		return "No brain could answer."
 	}
 	// askSentence only reads these two out of a status code, but a stored error can carry the provider's status word with no numeric code beside it (the transcript keeps whatever text the failed call returned, unlike a live call's typed API error), so they are still checked directly here.
 	lower := strings.ToLower(text)

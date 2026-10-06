@@ -1,6 +1,6 @@
-/** The window itself: the rail on the left, whichever screen is showing beside it, and the three things that sit above every screen — the jump-to-a-chat palette, the rename box and the confirmation in front of a delete. The keys the whole window answers to are bound here as well: Ctrl+K opens the palette, Escape gives up whatever is half-done, and the arrows walk the list the screen showing has on its left. */
+/** The window itself: the rail on the left, whichever screen is showing beside it, and the three things that sit above every screen — the jump-to-a-chat palette, the rename box and the confirmation in front of a delete. The keys the whole window answers to are bound here as well: Ctrl+K opens the palette, Escape gives up whatever is half-done, and the arrows walk the list the screen showing has on its left. Until GET /setup says first-run setup is done, setup takes the whole window instead (onboarding.tsx), as does the screen shown while the daemon restarts; the strip offering a newer June sits above every screen (update.tsx), and so does the one saying June is paused (pause.tsx). */
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "react-redux";
 import { Calendar, ListTodo, MessageSquare, Repeat, Settings as SettingsIcon, Video } from "lucide-react";
 
@@ -21,6 +21,7 @@ import {
   AlertDialogTitle,
 } from "./alert-dialog";
 import {
+  errorStatus,
   juneApi,
   refreshToken,
   useConversationsQuery,
@@ -28,6 +29,7 @@ import {
   useDeleteConversationMutation,
   useMeetingsQuery,
   useRenameConversationMutation,
+  useSetupQuery,
   useTasksQuery,
 } from "./api";
 import { activeDays, chatsShown, daysShown, meetingsShown, shortWhen, step, tasksShown } from "./format";
@@ -36,11 +38,17 @@ import { ChatsScreen } from "./chats";
 import { TasksScreen } from "./tasks";
 import { DaysScreen } from "./days";
 import { MeetingsScreen } from "./meetings";
+import { Onboarding, RestartScreen, useFirstQuestionAfterRestart } from "./onboarding";
 import { RoutinesScreen } from "./routines";
 import { SettingsScreen } from "./settings";
 import { AppSidebar } from "./sidebar";
+import { UpdateBanner } from "./update";
+import { PausedBanner } from "./pause";
 import { applyTheme } from "../shared/theme";
 import { conversationsUi, escaped, settings, ui, useAppDispatch, useAppSelector, type Place, type RootState } from "./store";
+
+/** How often GET /setup is asked again while it has not answered at all — the daemon still starting, on a fresh install's first open — so the window moves onto setup the moment it can say whether setup is needed. */
+const SETUP_RETRY_MS = 2000;
 
 // What the palette offers besides the chats: the five screens, so Ctrl+K reaches a page and not only a conversation. Module scope so it is not rebuilt on every render — it closes over nothing.
 const PAGES: { place: Place; label: string; icon: typeof ListTodo }[] = [
@@ -84,7 +92,22 @@ export default function App() {
   const store = useStore<RootState>();
   const { renamingId, draftTitle, confirmingDeleteId } = useAppSelector((s) => s.conversations);
   const theme = useAppSelector((s) => s.settings.theme);
+  const restart = useAppSelector((s) => s.setup.restart);
   useOpenAtOnShow();
+
+  const [setupUnanswered, setSetupUnanswered] = useState(true);
+  const { data: setup, error: setupError } = useSetupQuery(undefined, { pollingInterval: setupUnanswered ? SETUP_RETRY_MS : 0 });
+  // Any HTTP answer settles it, a 404 from a daemon too old to have setup included, which reads as setup long finished — except a refusal of this window's key, which the next try (reading the token afresh) may well get past.
+  const setupStatus = errorStatus(setupError);
+  const setupAnswered = setup !== undefined || (setupStatus !== undefined && setupStatus !== 401 && setupStatus !== 403);
+  if (setupAnswered === setupUnanswered) setSetupUnanswered(!setupAnswered);
+  const onboarding = setup?.done === false;
+  // Until GET /setup has answered once the window cannot tell setup from Chats, and drawing Chats first would flash it in front of a fresh install's first screen. A daemon that is not there at all fails instead of answering, and then Chats draws with its own "Nothing is answering".
+  const deciding = setup === undefined && setupError === undefined;
+  // Setup and the restart screen cover the whole window, so the keys that walk the screen underneath it are not bound while either is up.
+  const covered = Boolean(restart) || onboarding || deciding;
+  // A restart takes the window down with it, so the first question setup ended on is asked here, by whichever window comes back. A feature's download needs nothing of the kind: the daemon keeps its queue in state.json and takes it up again itself (resume in internal/components).
+  useFirstQuestionAfterRestart(setup?.done === true, Boolean(restart));
 
   const { data: convs = [] } = useConversationsQuery();
   const { data: tasks = [] } = useTasksQuery();
@@ -102,7 +125,7 @@ export default function App() {
   useEffect(() => {
     const onShown = () => {
       if (document.visibilityState !== "visible") return;
-      void refreshToken().then(() => dispatch(juneApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker"])));
+      void refreshToken().then(() => dispatch(juneApi.util.invalidateTags(["Conversation", "Task", "Day", "Meeting", "Settings", "Brain", "Usage", "Tracker", "Setup", "Component", "Update"])));
     };
     document.addEventListener("visibilitychange", onShown);
     window.addEventListener("focus", onShown);
@@ -136,6 +159,7 @@ export default function App() {
   }, [place, convs, tasks, days, meetings, conversationId, taskId, date, meetingId]);
 
   useEffect(() => {
+    if (covered) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "k" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -159,10 +183,13 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [dispatch, walkOf, store]);
+  }, [dispatch, walkOf, store, covered]);
 
   const renaming = convs.find((c) => c.id === renamingId);
   const deleting = convs.find((c) => c.id === confirmingDeleteId);
+  // The confirmation keeps naming the chat while it fades out: deleting goes undefined the instant it is answered, and the closing dialog read “”? for the length of its animation.
+  const [deletingTitle, setDeletingTitle] = useState("");
+  if (deleting && deleting.title !== deletingTitle) setDeletingTitle(deleting.title);
   const now = new Date();
 
   /** Writes a new title, and says on one line when the daemon would not take it. */
@@ -191,6 +218,22 @@ export default function App() {
     }
   };
 
+  if (restart) {
+    return (
+      <TooltipProvider delayDuration={300}>
+        <RestartScreen why={restart.why} slow={restart.slow} failed={restart.failed} />
+      </TooltipProvider>
+    );
+  }
+  if (onboarding) {
+    return (
+      <TooltipProvider delayDuration={300}>
+        <Onboarding setup={setup} />
+      </TooltipProvider>
+    );
+  }
+  if (deciding) return <div className="h-svh bg-background" />;
+
   return (
     <TooltipProvider delayDuration={300}>
       {/* The window is exactly as tall as the desktop gives it and never grows past that: every screen inside scrolls its own reading region, and a long page must not push the composer or the header off the bottom. */}
@@ -198,6 +241,8 @@ export default function App() {
       <SidebarProvider className="h-svh overflow-hidden" style={{ "--sidebar-width": "15.5rem" } as React.CSSProperties}>
         <AppSidebar />
         <SidebarInset className="flex min-h-0 min-w-0 flex-col">
+          <UpdateBanner />
+          <PausedBanner />
           <Screen />
         </SidebarInset>
 
@@ -240,7 +285,7 @@ export default function App() {
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Rename chat</DialogTitle>
-              <DialogDescription>The daemon refuses a blank title, so the button below is off until there is one.</DialogDescription>
+              <DialogDescription>A chat needs a title.</DialogDescription>
             </DialogHeader>
             <Input
               value={draftTitle}
@@ -267,7 +312,7 @@ export default function App() {
         <AlertDialog open={Boolean(deleting)} onOpenChange={(open) => !open && dispatch(conversationsUi.deleteConfirmed(undefined))}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Delete “{deleting?.title}”?</AlertDialogTitle>
+              <AlertDialogTitle>Delete “{deleting?.title ?? deletingTitle}”?</AlertDialogTitle>
               <AlertDialogDescription>This removes the chat and every turn said in it. There is no undo.</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

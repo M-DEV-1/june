@@ -164,7 +164,20 @@ func TestOverlay_ReportsWhetherAnyoneWasListening(t *testing.T) {
 		t.Errorf("reason is empty, want a sentence naming why nothing was drawn")
 	}
 
-	ch := s.hub.subscribe()
+	// A stream reader that is not the drawing layer (the main window, a curl) receives the drawing and puts nothing on the screen.
+	window := s.hub.subscribe()
+	defer s.hub.unsubscribe(window)
+	rec = postOverlay(t, s, `{"kind":"ring","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
+	var unseen OverlayResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &unseen); err != nil {
+		t.Fatalf("body is not JSON: %v (%q)", err, rec.Body.String())
+	}
+	if unseen.Drawn {
+		t.Errorf("drawn = true with only a non-overlay client on the hub, want false")
+	}
+	waitOverlay(t, window)
+
+	ch := s.hub.subscribeAs(overlayRole)
 	defer s.hub.unsubscribe(ch)
 	rec = postOverlay(t, s, `{"kind":"ring","rects":[{"x":1,"y":2,"w":3,"h":4}]}`)
 	var heard OverlayResult

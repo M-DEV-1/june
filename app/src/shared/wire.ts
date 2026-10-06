@@ -30,14 +30,14 @@ export type Notice = {
 };
 
 /** One message off the daemon's SSE stream.
- * The first five types belong to an ask; "dictation" carries a finished transcript; "heard", "said", "state" and "level" belong to a live voice session; "notice" is June speaking first; "act" is one line of a computer-use job's progress; "overlay" and "window" tell the on-screen accessories and the app window what to do; "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way.
+ * The first five types belong to an ask; "dictation" carries a finished transcript; "heard", "said", "state" and "level" belong to a live voice session, and "level" also to first-run setup's microphone test (id "mic-test"); "notice" is June speaking first; "act" is one line of a computer-use job's progress; "overlay" and "window" tell the on-screen accessories and the app window what to do; "recording" and "dreaming" say ("on" or "off") that a meeting is being captured or the nightly run is under way; "component" is one step of a local feature's download (id is the feature, text the stage) and "update" one step of installing a newer June, or with text "available" the daily check finding one; "lifecycle" is the daemon itself restarting ("restarting") or failing to ("restart_failed"), see announce in cmd/lifecycle.go.
  * id is the ask's own id, or for "act" the job's id, which is how a message is tied to the thing that caused it.
  */
 export type DaemonEvent = {
   id: string;
-  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "notice" | "act" | "overlay" | "window" | "recording" | "dreaming";
+  type: "status" | "tool" | "answer" | "done" | "error" | "dictation" | "heard" | "said" | "state" | "level" | "notice" | "act" | "overlay" | "window" | "recording" | "dreaming" | "component" | "update" | "lifecycle";
   text?: string;
-  /** Carried on a "tool" event (a short summary of what that call is doing or found), on an "act" event (the job's actjob.Event as JSON, see parseActDetail in shared/job.ts) and on a "level" event (the session's mic/speaker amplitude as JSON, {"mic":0-1,"speaker":0-1}, see waveform.ts's renderLevelEvent). */
+  /** Carried on a "tool" event (a short summary of what that call is doing or found), on an "act" event (the job's actjob.Event as JSON, see parseActDetail in shared/job.ts) on a "level" event (the session's mic/speaker amplitude as JSON, {"mic":0-1,"speaker":0-1}, see waveform.ts's renderLevelEvent), on a "component" event ({"file","done","total","bps"}), on an "update" event ({"done","total"}) and on a "lifecycle" event ({"reopen":bool} on "restarting", saying whether the replacement shows its window; {"error":string} on "restart_failed"). */
   detail?: string;
   /** Only meaningful on the after-call "tool" event: true when that tool call's result was an error, so a step closes as failed instead of done. */
   failed?: boolean;

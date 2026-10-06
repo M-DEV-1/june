@@ -78,8 +78,8 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 	}
 	before := a.frontWindowNow(ctx)
 	// A task that began in one application stays there: a request about the window in front must not be answered by bringing some other application forward, whatever the model thought it needed. Carried over from switch_window, which is what this tool now also does.
-	if frontApp, _, _ := strings.Cut(before, windowSep); frontApp != "" && !namesApp(questionFrom(ctx), app) && namesApp(questionFrom(ctx), frontApp) {
-		return toolError(fmt.Sprintf("I won't switch to %q: what was asked is about %q, and this task stays in the window it started in", app, frontApp))
+	if inFront := frontApp(before); inFront != "" && !namesApp(questionFrom(ctx), app) && namesApp(questionFrom(ctx), inFront) {
+		return toolError(fmt.Sprintf("I won't switch to %q: what was asked is about %q, and this task stays in the window it started in", app, inFront))
 	}
 	entries := a.desktopEntries()
 	entry := pickDesktopEntry(entries, app)
@@ -106,7 +106,7 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 	if err := a.launchApp(entry); err != nil {
 		return toolError(fmt.Sprintf("could not start %q from %s: %v", app, entry, err))
 	}
-	// With no raiser there is no new window to find and nothing to raise, which is a desk without the GNOME extension and every Windows desk, so the front window is read once and the launch reported instead of waiting out launchWait for a window nothing can see. A raiser that is there but failed one List keeps the wait below, since a busy shell answers a later call.
+	// With no raiser there is no new window to find and nothing to raise, which is a desk without the GNOME extension, so the front window is read once and the launch reported instead of waiting out launchWait for a window nothing can see. A raiser that is there but failed one List keeps the wait below, since a busy shell answers a later call.
 	if known == nil && !a.raiserAvailable(ctx) {
 		if after := a.frontWindowAfterSwitch(ctx, app); frontIsApp(after, app) {
 			return fmt.Sprintf("switched to %q, launched from %s; call observe_screen to see it", after, filepath.Base(entry))
@@ -228,6 +228,9 @@ func (a *Agent) windowPids(ctx context.Context) map[uint32]bool {
 	for _, w := range windows {
 		out[w.Pid] = true
 	}
+	if pid := shellPid(); pid != 0 {
+		out[pid] = true
+	}
 	return out
 }
 
@@ -246,7 +249,7 @@ func (a *Agent) raiseNewWindow(ctx context.Context, known map[uint32]bool) (bool
 		if known[w.Pid] || w.Pid == 0 {
 			continue
 		}
-		if ok, err := a.raiser.ByPid(ctx, w.Pid); err == nil && ok {
+		if ok, err := a.raiseListed(ctx, w); err == nil && ok {
 			return true, fmt.Sprintf("pid %d", w.Pid)
 		}
 	}

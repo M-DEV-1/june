@@ -14,10 +14,15 @@ import (
 	"june/internal/config"
 )
 
-// withEmptyFirstRun points HOME at a fresh, empty temp directory and clears GEMINI_API_KEY, so a test that does not care about first-run detection gets the same "nothing set up" answer regardless of what is actually on this machine.
+// withEmptyFirstRun points HOME at a fresh, empty temp directory, PATH at another, and clears GEMINI_API_KEY, so a test that does not care about first-run detection gets the same "nothing set up" answer regardless of what is actually on this machine.
 func withEmptyFirstRun(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// os.UserHomeDir reads USERPROFILE on Windows, not HOME, so without this the test sees the developer's own Claude and Codex logins.
+	t.Setenv("USERPROFILE", home)
+	// The brain line names the one automatic routing lands on, and an agy binary on this machine's PATH counts as signed in.
+	t.Setenv("PATH", t.TempDir())
 	t.Setenv("GEMINI_API_KEY", "")
 }
 
@@ -70,15 +75,16 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		want            SettingsView
 	}{
 		{
-			name:            "gemini brain, local embedder, meetings and capture on",
+			name:            "no brain picked and none signed in, local embedder, meetings and capture on",
 			cfg:             config.JuneConfig{Brain: config.BrainConfig{}, Embed: config.EmbedConfig{LlamaServer: "/usr/bin/llama-server", ModelPath: "/models/embed.gguf"}},
 			meetingsEnabled: true,
 			paused:          false,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel(), Brain: config.TextModel, EmbedModel: config.LocalEmbedModel,
+				VoiceModel: noVoiceKey, Brain: noBrainSignedIn, EmbedModel: config.LocalEmbedModel,
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
+				UpdateCheck: true, AllowFallback: true, MeetingsOffer: meetingsOfferAsk,
 			},
 		},
 		{
@@ -88,9 +94,10 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 			paused:          true,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel(), Brain: "claude-cli sonnet", EmbedModel: "none",
+				VoiceModel: noVoiceKey, Brain: "claude-cli sonnet", EmbedModel: "none",
 				MeetingsEnabled: false, CaptureEnabled: false, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
+				UpdateCheck: true, AllowFallback: true, MeetingsOffer: meetingsOfferAsk,
 			},
 		},
 		{
@@ -100,9 +107,10 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 			paused:          false,
 			want: SettingsView{
 				DataDir: dataDir, StoreBytes: 120, RecordingsBytes: 500, ModelsBytes: 0,
-				VoiceModel: config.VoiceModel(), Brain: config.BrainClaudeCLI, EmbedModel: "none",
+				VoiceModel: noVoiceKey, Brain: config.BrainClaudeCLI, EmbedModel: "none",
 				MeetingsEnabled: true, CaptureEnabled: true, KeepAudioDays: -1,
 				DaemonStarted: "2026-09-04T08:00:00Z", Version: "dev", FirstRun: noFirstRunSteps(), ClaudeUsageFromLogin: true,
+				UpdateCheck: true, AllowFallback: true, MeetingsOffer: meetingsOfferAsk,
 			},
 		},
 	}
@@ -111,7 +119,7 @@ func TestSettings_RealValuesFromDiskAndConfig(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			paused := c.paused
 			cfg := c.cfg
-			srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&cfg, noopSave), c.meetingsEnabled, func() bool { return paused }, startedAt))
+			srv := httptest.NewServer(Settings(dataDir, NewLiveConfig(&cfg, nil, noopSave), c.meetingsEnabled, func() bool { return paused }, startedAt, nil))
 			defer srv.Close()
 
 			var got SettingsView
@@ -130,7 +138,7 @@ func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	withFakeGsettings(t, noCustomKeybindings)
 	cfg := &config.JuneConfig{}
-	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.SaveConfig), false, nil, time.Now()))
+	srv := httptest.NewServer(Settings(t.TempDir(), NewLiveConfig(cfg, config.ReadConfig, config.SaveConfig), false, nil, time.Now(), nil))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{"claude_usage_from_login":false}`))

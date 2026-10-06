@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -29,6 +30,9 @@ var (
 	procIsIconic                   = user32.NewProc("IsIconic")
 	procGetWindowRect              = user32.NewProc("GetWindowRect")
 	procAttachThreadInput          = user32.NewProc("AttachThreadInput")
+	procGetShellWindow             = user32.NewProc("GetShellWindow")
+	procGetWindowLongW             = user32.NewProc("GetWindowLongW")
+	procSendInput                  = user32.NewProc("SendInput")
 	procGetCurrentThreadId         = kernel32.NewProc("GetCurrentThreadId")
 	procOpenProcess                = kernel32.NewProc("OpenProcess")
 	procQueryFullProcessImageNameW = kernel32.NewProc("QueryFullProcessImageNameW")
@@ -39,9 +43,21 @@ var (
 const (
 	gwOwner                        = 4
 	swRestore                      = 9
+	wsExToolWindow                 = 0x80
+	inputMouse                     = 0
+	mouseeventfMove                = 0x0001
 	dwmwaExtendedFrameBounds       = 9
 	dwmwaCloaked                   = 14
 	processQueryLimitedInformation = 0x1000
+)
+
+// gwlExStyle is GetWindowLong's index for the extended style. It is negative, so it is a variable: a constant cannot be converted to the uintptr the call takes.
+var gwlExStyle = int32(-20)
+
+// How activate waits for the switch to land. SetForegroundWindow returns before it has: GetForegroundWindow reads 0, or the old window, for a few milliseconds after the call (about 6 ms, measured on Windows 11 on 2026-10-03), so reading it once straight after reported a window that did come forward as one that did not, and the caller went on to raise the next candidate.
+const (
+	activateSettle = 500 * time.Millisecond
+	activatePoll   = 10 * time.Millisecond
 )
 
 // Raiser lists and activates top-level windows through Win32. The zero value is ready to use and it is safe for concurrent use.
@@ -58,7 +74,7 @@ func (r *Raiser) Available(ctx context.Context) (bool, error) { return true, nil
 
 type rect struct{ Left, Top, Right, Bottom int32 }
 
-// List enumerates the windows a person would see in Alt+Tab: visible, unowned, titled, and not cloaked (a cloaked window is a suspended UWP app or one on another virtual desktop). Input: a context, unused because EnumWindows does not block. Output: one Window per such window, with WmClass set to the owning program's file name without ".exe" and the frame in physical pixels.
+// List enumerates the windows a person would see in Alt+Tab: visible, unowned, titled, not cloaked (a cloaked window is a suspended UWP app or one on another virtual desktop), not a tool window and not the desktop. Input: a context, unused because EnumWindows does not block. Output: one Window per such window, with WmClass set to the owning program's file name without ".exe" and the frame in physical pixels.
 func (r *Raiser) List(ctx context.Context) ([]Window, error) {
 	listMu.Lock()
 	defer listMu.Unlock()
@@ -87,6 +103,13 @@ func describe(hwnd, fg uintptr) (Window, bool) {
 		return Window{}, false
 	}
 	if owner, _, _ := procGetWindow.Call(hwnd, gwOwner); owner != 0 {
+		return Window{}, false
+	}
+	// The desktop ("Program Manager") and tool windows are nothing a person switches to, and they share a process with windows that are: the desktop is explorer.exe's, like every File Explorer window, so raising explorer.exe by pid could land on the desktop.
+	if shell, _, _ := procGetShellWindow.Call(); hwnd == shell {
+		return Window{}, false
+	}
+	if ex, _, _ := procGetWindowLongW.Call(hwnd, uintptr(gwlExStyle)); uint32(ex)&wsExToolWindow != 0 {
 		return Window{}, false
 	}
 	var cloaked uint32
@@ -127,9 +150,18 @@ func programName(pid uint32) string {
 	return strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".EXE")
 }
 
-// ByPid activates the first window owned by process pid. Output: true if one was found and came to the front.
+// ByPid activates the first window owned by process pid, the one nearest the front. Many windows share a pid here (every Store app's frame is ApplicationFrameHost's, every browser window its browser's), so a caller holding a window from List raises it with ByWindow instead. Output: true if one was found and came to the front.
 func (r *Raiser) ByPid(ctx context.Context, pid uint32) (bool, error) {
 	return r.activateFirst(ctx, func(w Window) bool { return w.Pid == pid })
+}
+
+// ByWindow activates the very window List reported, by its handle. Input: a window from List. Output: true if it came to the front; false when it has closed since, when its handle now names another process's window (Windows reuses the handles of closed windows), or when it would not come forward.
+func (r *Raiser) ByWindow(ctx context.Context, w Window) (bool, error) {
+	hwnd := uintptr(w.ID)
+	if now, ok := describe(hwnd, 0); !ok || now.Pid != w.Pid {
+		return false, nil
+	}
+	return activate(ctx, hwnd), nil
 }
 
 // ByTitle activates the first window whose title contains substring, ignoring case. Output: true if one was found and came to the front.
@@ -147,20 +179,46 @@ func (r *Raiser) activateFirst(ctx context.Context, match func(Window) bool) (bo
 	windows, _ := r.List(ctx)
 	for _, w := range windows {
 		if match(w) {
-			return activate(uintptr(w.ID)), nil
+			return activate(ctx, uintptr(w.ID)), nil
 		}
 	}
 	return false, nil
 }
 
-// activate restores and brings a window to the front. Windows refuses SetForegroundWindow to a background process like the daemon, so the calling thread first attaches its input queue to the foreground window's thread, which lets the call through. Input: the window handle. Output: whether the window is now the foreground window.
-func activate(hwnd uintptr) bool {
+// activate restores and brings a window to the front, then waits up to activateSettle for Windows to report it there. Windows refuses SetForegroundWindow to a background process like the daemon, so the calling thread first attaches its input queue to the foreground window's thread. That is not always enough: with the foreground locked (LockSetForegroundWindow, which the process in front may call) the call was refused with the attach as without it, and went through once the calling process had sent an input event of its own, which is what nudge sends before a refused call is made once more. Measured on Windows 11 on 2026-10-03. Input: a context that cuts the wait short, and the window handle. Output: whether the window became the foreground window.
+func activate(ctx context.Context, hwnd uintptr) bool {
+	// A caller whose time is spent is no longer watching: a window raised now would come forward after it had already been told no, and it would go on to the keyboard on top of it.
+	if ctx.Err() != nil {
+		return false
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	// Async, and no attach to a hung foreground thread: both calls otherwise wait on the other program's message loop, which never answers when it is hung.
 	if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
 		procShowWindowAsync.Call(hwnd, swRestore)
 	}
+	if !setForeground(hwnd) {
+		nudge()
+		if !setForeground(hwnd) {
+			// A refusal is final: under a locked foreground three refused calls in a row each left the window behind for the 1.5 s watched after it (measured 2026-10-03), so there is no switch to wait for, and a caller trying window after window under one deadline must not spend activateSettle on each.
+			now, _, _ := procGetForegroundWindow.Call()
+			return now == hwnd
+		}
+	}
+	deadline := time.Now().Add(activateSettle)
+	for {
+		if now, _, _ := procGetForegroundWindow.Call(); now == hwnd {
+			return true
+		}
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(activatePoll)
+	}
+}
+
+// setForeground makes one SetForegroundWindow call for hwnd with the calling thread's input attached to the foreground window's thread for its duration. The caller holds its goroutine on one OS thread, since the attach belongs to the thread. Output: SetForegroundWindow's answer, false when Windows refused the switch.
+func setForeground(hwnd uintptr) bool {
 	fg, _, _ := procGetForegroundWindow.Call()
 	self, _, _ := procGetCurrentThreadId.Call()
 	other, _, _ := procGetWindowThreadProcessId.Call(fg, 0)
@@ -172,7 +230,23 @@ func activate(hwnd uintptr) bool {
 		defer procAttachThreadInput.Call(self, other, 0)
 	}
 	procBringWindowToTop.Call(hwnd)
-	procSetForegroundWindow.Call(hwnd)
-	now, _, _ := procGetForegroundWindow.Call()
-	return now == hwnd
+	ok, _, _ := procSetForegroundWindow.Call(hwnd)
+	return ok != 0
+}
+
+// pointerInput is Win32's INPUT with its MOUSEINPUT member, which is 40 bytes on 64-bit and 28 on 32-bit, the size SendInput checks.
+type pointerInput struct {
+	typ uint32
+	mi  struct {
+		dx, dy                 int32
+		mouseData, flags, time uint32
+		extraInfo              uintptr
+	}
+}
+
+// nudge sends one mouse event that moves the pointer by nothing, which makes this process the one that sent the last input event, and Windows lets that process set the foreground window. It is a mouse move rather than the Alt press usually used for this because a lone Alt opens the menu bar of whichever window takes it, and an unused key such as F24 is one a macro tool may have bound.
+func nudge() {
+	in := pointerInput{typ: inputMouse}
+	in.mi.flags = mouseeventfMove
+	procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 }

@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"encoding/json"
+	"june/internal/config"
 	"june/internal/db"
 	"june/internal/proactive"
 	"june/internal/tracker"
@@ -148,15 +149,27 @@ func withoutBrowserStatus(title string) string {
 	return title
 }
 
-// describe names each capturing application the way a person would recognise it: by the window it has open, falling back to the process when June has seen no window for it.
+// micHolder is one application holding the microphone. proc is its process name, the one thing its windows can be matched on (see windowFor); name is what a person calls it, which the prompt falls back to when June has seen no window of it. On Linux the two are the same word. On Windows they can be unrelated strings: Teams is the package MSTeams, runs as ms-teams.exe and is called Microsoft Teams, and matching windows on the package name found none, so the prompt read "MSTeams is using your microphone" with the call's window on screen.
+type micHolder struct{ proc, name string }
+
+// holderProcs is the process name of each holder, in order.
+func holderProcs(users []micHolder) []string {
+	procs := make([]string, len(users))
+	for i, u := range users {
+		procs[i] = u.proc
+	}
+	return procs
+}
+
+// describe names each capturing application the way a person would recognise it: by the window it has open, falling back to the application's own name when June has seen no window for it.
 //
-// Input: the process names holding the microphone, and the episodes June recorded recently. Output: one display name each, cut to one line's worth.
-func describe(users []string, eps []db.Episode) []string {
+// Input: the applications holding the microphone, and the episodes June recorded recently. Output: one display name each, cut to one line's worth.
+func describe(users []micHolder, eps []db.Episode) []string {
 	named := make([]string, 0, len(users))
 	for _, u := range users {
-		name := windowFor(u, eps)
+		name := windowFor(u.proc, eps)
 		if name == "" {
-			name = u
+			name = u.name
 		} else {
 			name = withoutBrowserStatus(name)
 		}
@@ -172,16 +185,50 @@ func describe(users []string, eps []db.Episode) []string {
 // consentEntry is one app under Windows' microphone consent store (HKCU\...\CapabilityAccessManager\ConsentStore\microphone): its subkey name and the LastUsedTimeStart and LastUsedTimeStop stamps Windows keeps for it. It lives here rather than in the Windows file so its rule is tested on Linux.
 type consentEntry struct {
 	// key is a package family name for a packaged app, or for a desktop app (under NonPackaged) the exe's full path with # in place of each backslash.
-	key         string
-	packaged    bool
+	key      string
+	packaged bool
+	// start and stop are FILETIMEs: 100-nanosecond ticks since 1601 UTC.
 	start, stop uint64
+	// proc and name are what the Windows reader resolved the app to, for a holder only: the executable its windows run under (a package's Application Executable, ms-teams for MSTeams), and the name Windows itself shows for it (the package's DisplayName, or the exe's FileDescription, which is what Task Manager lists a process as). Either may be empty, and consentUsers then derives it from the key.
+	proc, name string
+}
+
+// wslBridgeName is what the prompt calls WSLg's msrdc.exe. Its FileDescription is "Remote Desktop", which is true of the program and says nothing to a person who never opened a remote desktop: what it carries is the microphone of a Linux app running under WSL.
+const wslBridgeName = "WSL"
+
+// wslBridgeMinHold is how long WSLg's msrdc.exe has to have held the microphone before it counts as a call. It is the RDP client WSLg draws Linux apps' windows and sound through, and it opens the Windows microphone whenever anything in WSL reads WSLg's audio source, not only for a call: on 2026-10-03 at 05:13:47 it held it for 5.8 s, two seconds after a dictation ended, with nothing in WSL in a call, and that was asked about as a meeting. A Linux call app under WSLg holds it for the length of the call, so the bridge is counted once its hold has outlasted that kind of grab, and a real call there is asked about half a minute late.
+const wslBridgeMinHold = 30 * time.Second
+
+// isWSLBridge reports whether a NonPackaged consent key is WSLg's msrdc.exe: C:\Program Files\WSL\msrdc.exe for WSL from its MSI, or the same exe inside the Store package's folder under WindowsApps. A Remote Desktop client's own msrdc.exe lives elsewhere and is a real remote session, so it is left alone.
+func isWSLBridge(key string) bool {
+	k := strings.ToLower(key)
+	return strings.HasSuffix(k, "#msrdc.exe") && (strings.Contains(k, "#wsl#") || strings.Contains(k, "windowssubsystemforlinux"))
+}
+
+// fromGoBuild reports whether a NonPackaged consent key is a binary the go command built: `go test` and `go run` leave them under a go-build directory, in the temp directory or the build cache. That is a program being worked on, never a meeting app, and on the machines June is developed on it is June's own tree: internal/audio's tests open the microphone, and a `go run` of the daemon holds it the way the daemon does, under a name the june/junew rule cannot see.
+func fromGoBuild(key string) bool {
+	return strings.Contains(strings.ToLower(key), "#go-build")
+}
+
+// fileTime turns a consent-store stamp into a time. Input: a FILETIME, 100-nanosecond ticks since 1601-01-01 UTC. Output: the same instant.
+func fileTime(ft uint64) time.Time {
+	// 116444736000000000 is the number of ticks between 1601-01-01 and 1970-01-01.
+	return time.Unix(0, (int64(ft)-116444736000000000)*100)
+}
+
+// packageShortName is a package's Name without its publisher's prefix, "WhatsAppDesktop" for 5319275A.WhatsAppDesktop and "Slack" for 91750D7E.Slack: the closest the family name comes to the app's own name, for when its manifest could not be read.
+func packageShortName(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
+		return name[i+1:]
+	}
+	return name
 }
 
 // consentUsers returns the apps holding the microphone according to the consent store, excluding June itself. An app holds it when it has started using it and not stopped since: a non-zero start stamp and a zero stop stamp.
-// Input: the entries under microphone and microphone\NonPackaged. Output: names as streamName gives them, in order and without repeats.
+// Input: the entries under microphone and microphone\NonPackaged, and the time now, which WSLg's bridge's hold is measured against. Output: one holder per app, in order and without repeats by name; a holder's proc and name are the ones the Windows reader resolved, or else the exe or package name from the key.
 // ponytail: every holder counts as a call, so a dictation tool on Windows gets asked about the way Handy was on Linux; telling them apart needs the render sessions (IAudioSessionManager2, GetProcessId) to see which holders also play audio back. An app that crashes mid-call leaves its stop stamp at 0, so it reads as holding the microphone until it next runs; cross-checking that the process still exists would fix that.
-func consentUsers(entries []consentEntry) []string {
-	var names []string
+func consentUsers(entries []consentEntry, now time.Time) []micHolder {
+	var users []micHolder
 	seen := map[string]bool{}
 	for _, e := range entries {
 		if e.start == 0 || e.stop != 0 {
@@ -195,14 +242,33 @@ func consentUsers(entries []consentEntry) []string {
 		if base := strings.TrimSuffix(bin, ".exe"); base == "" || strings.EqualFold(base, juneBinary) || strings.EqualFold(base, juneBinary+"w") {
 			continue
 		}
-		name := streamName(bin, "")
+		if !e.packaged && fromGoBuild(e.key) {
+			continue
+		}
+		proc, name := e.proc, e.name
+		if !e.packaged && isWSLBridge(e.key) {
+			if now.Sub(fileTime(e.start)) < wslBridgeMinHold {
+				continue
+			}
+			name = wslBridgeName
+		}
+		fallback := streamName(bin, "")
+		if e.packaged {
+			fallback = packageShortName(bin)
+		}
+		if proc == "" {
+			proc = fallback
+		}
+		if name == "" {
+			name = fallback
+		}
 		if name == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
-		names = append(names, name)
+		users = append(users, micHolder{proc: proc, name: name})
 	}
-	return names
+	return users
 }
 
 // meetingWatch remembers enough between polls to ask about a call once, then leave it alone, and then end the recording it started when the call goes away. The zero value is ready to use.
@@ -278,11 +344,14 @@ func askToRecord(ctx context.Context, users []string) bool {
 	return proactive.Ask(n, notifyWait, proactive.NotifySendAsk, nil) == "record"
 }
 
+// setupNudgeEvery is how often a call may bring up the "set up meeting transcripts" notice in place of the question, when transcripts are not installed. Once a day: the microphone opens for Discord, games and voice notes as readily as for meetings, and a user who has not set transcripts up yet should hear about it, not be asked on every call.
+const setupNudgeEvery = 24 * time.Hour
+
 // WatchForMeetings asks whether to record whenever an application other than June holds the microphone for long enough to be a call, and starts recording if the answer is yes. It returns when ctx is cancelled.
 //
 // The microphone is the signal rather than a meeting app's window, because it is the one thing every call has in common: it needs no list of which applications count, and it does not fire for a meeting tab that is merely open. Playback from the same application is what tells a call from dictation or a voice note. What the two together cannot tell is a call from, say, a voice message being listened to and answered, which is why the default is to ask rather than to record.
 //
-// With autoRecord set the question is skipped and recording starts on the same signal.
+// With autoRecord set the question is skipped and recording starts on the same signal. Whether to ask at all is read from the config on every call rather than once, so turning the offer off in Settings takes effect on the next call. Nothing is offered or recorded while meeting transcripts are not installed; the call brings up a notice pointing at Local features instead, at most once a day.
 func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 	if rec == nil {
 		return
@@ -305,13 +374,16 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 	})
 	defer proactive.SetNoticeAction(recordNoticeKind, "record", nil)
 
+	// nudged is when the set-up notice last went up, kept for the watcher's lifetime; a daemon restart shows it again at the next call, which is rare enough not to nag.
+	var nudged time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			users := readMicUsers(ctx)
-			ask, stop := w.step(users, rec.Active())
+			procs := holderProcs(users)
+			ask, stop := w.step(procs, rec.Active())
 			if stop {
 				slog.Info("the call June was recording has released the microphone, stopping the recording")
 				if _, err := rec.StopAndProcess(ctx); err != nil {
@@ -322,19 +394,31 @@ func WatchForMeetings(ctx context.Context, rec *Recorder, autoRecord bool) {
 			if !ask {
 				continue
 			}
+			// ReadConfig, not LoadConfig: this runs on the watcher's goroutine, and LoadConfig would write a default file or set aside one the user is half-way through saving. A read that fails is the defaults, with the offer on.
+			if cfg, _ := config.ReadConfig(); !autoRecord && !cfg.Meetings.OfferEnabled() {
+				slog.Debug("something else is holding the microphone, and the meeting offer is turned off", "processes", procs)
+				continue
+			}
 			// The prompt names the window rather than the process wherever one can be found, since a call in a browser tab is "chrome" and so is everything else in that browser.
 			// The desktop is asked before June's own history, because history is always behind here: the microphone opens as the call is joined and the tracker does not record the window for another minute or so, which is well after the question has been asked and answered.
 			var eps []db.Episode
 			if recent, err := rec.store.EpisodesInWindow(ctx, time.Now().Add(-windowLookback), time.Now(), windowLookbackRows); err == nil {
 				eps = recent
 			}
-			for _, u := range users {
-				if t := tracker.WindowTitleFor(ctx, u); t != "" {
-					eps = append(eps, db.Episode{App: u, Title: t})
+			for _, p := range procs {
+				if t := tracker.WindowTitleFor(ctx, p); t != "" {
+					eps = append(eps, db.Episode{App: p, Title: t})
 				}
 			}
 			names := describe(users, eps)
-			slog.Info("something else is holding the microphone", "apps", names, "processes", users, "auto", autoRecord)
+			slog.Info("something else is holding the microphone", "apps", names, "processes", procs, "auto", autoRecord)
+			if !rec.TranscriptionReady() {
+				if time.Since(nudged) >= setupNudgeEvery {
+					nudged = time.Now()
+					rec.notifyAt(setupTitle, askBody(names)+" To have June record and summarise calls, set up meeting transcripts in Settings → Local features.", setupPlace, setupID)
+				}
+				continue
+			}
 			if !autoRecord && !askToRecord(ctx, names) {
 				continue
 			}

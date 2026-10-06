@@ -37,6 +37,9 @@ func autostartEnabled() bool {
 // autostartCurrent reports whether an installed entry needs no rewrite. It always does not on Linux; see reconcileAutostart.
 func autostartCurrent() bool { return true }
 
+// autostartSystemChoice reports a choice the user made outside June about starting it at sign-in. There is none to read on Linux: the desktops' startup settings delete or rewrite June's own entry, which reads the same as an entry June wrote or never did, so the config stays the switch.
+func autostartSystemChoice() (on, ok bool) { return false, false }
+
 // setAutostart writes the autostart .desktop entry when on is true, and removes it when false.
 // Removing an entry that isn't there is not an error.
 // Exec= uses the absolute path from os.Executable and Path= pins the working directory to the binary's own directory, because June loads .env relative to the working directory and a session manager launches autostart entries from an arbitrary one. (The database, vector index, config and IPC token no longer depend on cwd — see config.DataDir.)

@@ -3,6 +3,7 @@ package recorder
 import (
 	"slices"
 	"testing"
+	"time"
 )
 
 // Windows' microphone consent store keeps a start and stop stamp per app; an app holds the microphone while it has started and not stopped. June's own process is left out, desktop apps are named from the exe at the end of the #-separated path, and packaged apps from the family name before the publisher hash, and an app listed twice is named once.
@@ -18,7 +19,11 @@ func TestConsentUsers(t *testing.T) {
 		{key: "MSTeams_8wekyb3d8bbwe", packaged: true, start: 3},
 	}
 	want := []string{"Zoom", "Chrome", "MSTeams"}
-	if got := consentUsers(entries); !slices.Equal(got, want) {
+	var got []string
+	for _, u := range consentUsers(entries, time.Now()) {
+		got = append(got, u.name)
+	}
+	if !slices.Equal(got, want) {
 		t.Errorf("consentUsers = %q, want %q", got, want)
 	}
 }

@@ -85,10 +85,16 @@ func parseDiarTurns(out string) []diarTurn {
 // speakers is how many voices the caller knows are in the call, from the meeting app's own window; the diarizer then returns exactly that many rather than estimating. Pass 0 when it is not known, and the distance threshold decides instead — which gets the count wrong more often than not.
 // offset shifts the turns onto the recording's clock, the same way transcribeWAV shifts its segments.
 func diarizeWAV(ctx context.Context, bin, path string, speakers int, offset time.Duration) ([]diarTurn, error) {
+	// A relative binary or library folder would be looked for under wd once the child starts there.
+	if abs, err := filepath.Abs(bin); err == nil {
+		bin = abs
+	}
 	dir := filepath.Dir(bin)
+	// The models and the WAV go over the way whisper-cli's do (see childPaths): a data directory under a user name outside ASCII put a path the diarizer could not open into every run, and every remote voice stayed pooled under one label.
+	wd, paths := childPaths([]string{filepath.Join(dir, sherpaSegmentation), filepath.Join(dir, sherpaEmbedding), path})
 	args := []string{
-		"--segmentation.pyannote-model=" + filepath.Join(dir, sherpaSegmentation),
-		"--embedding.model=" + filepath.Join(dir, sherpaEmbedding),
+		"--segmentation.pyannote-model=" + paths[0],
+		"--embedding.model=" + paths[1],
 		"--segmentation.num-threads=" + strconv.Itoa(transcribeThreads()),
 		"--embedding.num-threads=" + strconv.Itoa(transcribeThreads()),
 	}
@@ -97,8 +103,8 @@ func diarizeWAV(ctx context.Context, bin, path string, speakers int, offset time
 	} else {
 		args = append(args, "--clustering.cluster-threshold="+clusterThreshold())
 	}
-	args = append(args, path)
-	out, errOut, err := runWithLibPath(ctx, bin, args, filepath.Join(dir, "lib"))
+	args = append(args, paths[2])
+	out, errOut, err := runWithLibPath(ctx, wd, bin, args, filepath.Join(dir, "lib"))
 	if err != nil {
 		return nil, fmt.Errorf("diarize %s: %w (%s)", filepath.Base(path), err, strings.TrimSpace(errOut))
 	}

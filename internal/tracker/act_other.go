@@ -31,5 +31,11 @@ func Focused(ctx context.Context, ref string) (bool, error) { return false, errA
 
 func FocusedElement(ctx context.Context) (act.Node, bool) { return act.Node{}, false }
 
+// FocusedContents is Linux and Windows only; elsewhere nothing readable holds the keyboard.
+func FocusedContents(ctx context.Context) (act.Node, bool) { return act.Node{}, false }
+
+// RefWindow is Linux and Windows only; elsewhere no ref names a window.
+func RefWindow(string) string { return "" }
+
 func UseWindowPlacer(f func(ctx context.Context, pid uint32, title string) (x, y, w, h int, ok bool)) {
 }

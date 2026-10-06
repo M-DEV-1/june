@@ -13,6 +13,8 @@ type Node struct {
 	Showing     bool
 	// Ref is the tracker's handle on the node (a bus name and object path) so an action can be fired on it later.
 	Ref string
+	// Value is the node's own contents where the toolkit publishes them apart from its name: the text in a box to type in, which a box with a name of its own does not carry in Label (Win11 Notepad's page is named "Text editor"). Read only where a caller needs it: the element that holds the keyboard (see tracker.FocusedContents), so a field_holds check can see what was typed, and on Windows a page of text with a name of its own in an observe walk (see uiaPageValue in internal/tracker), so the listing shows what Notepad holds; "" for a password box and wherever it was not read.
+	Value string
 }
 
 // Item is one line of the list the model sees: a number to refer to it by, and the node's role, label and rectangle.
@@ -21,6 +23,8 @@ type Item struct {
 	Role, Label string
 	X, Y, W, H  int
 	Ref         string
+	// Value is the node's contents where it carries them apart from its label (see Node.Value). It is shown after the label and never judged: the stop lines and every result line name an item by its label alone, so a note that begins "buy milk" is still only "Text editor" to them.
+	Value string
 }
 
 // MaxItems caps the list; a longer one costs more tokens without making the choice any easier. Each line is about thirteen tokens, so the cap is also what one look at the screen costs the model: a hundred items is roughly 1,300 tokens, and a screen task takes many looks.
@@ -29,6 +33,9 @@ const MaxItems = 100
 
 // labelRunes is the longest label a line carries.
 const labelRunes = 60
+
+// valueRunes is the most of an item's contents a line carries after its label: the 500 characters of a value the Windows walk reads, so a short note is listed whole, at about a hundred and twenty tokens on the one line that has them.
+const valueRunes = 500
 
 // actionable is the set of roles a person can click, type into, or read a value from. Measured on this desktop on 2026-09-04: keeping only these took a Teams page from 19,000 tokens to about 1,300.
 var actionable = map[string]bool{
@@ -69,7 +76,7 @@ func Filter(nodes []Node) []Item {
 			continue
 		}
 		if secretRoles[n.Role] {
-			n.Label = ""
+			n.Label, n.Value = "", ""
 		}
 		if n.Label == "" && !typable[n.Role] {
 			continue
@@ -98,12 +105,12 @@ func Filter(nodes []Node) []Item {
 			}
 			room--
 		}
-		items = append(items, Item{N: len(items) + 1, Role: n.Role, Label: n.Label, X: n.X, Y: n.Y, W: n.W, H: n.H, Ref: n.Ref})
+		items = append(items, Item{N: len(items) + 1, Role: n.Role, Label: n.Label, X: n.X, Y: n.Y, W: n.W, H: n.H, Ref: n.Ref, Value: n.Value})
 	}
 	return items
 }
 
-// Format renders the list one item per line as `[n] role "label"`. Input: the filtered items. Output: the lines joined with newlines, or "" for none.
+// Format renders the list one item per line as `[n] role "label"`, followed by ` holds "contents"` for an item that carries its contents apart from its label (see Item.Value). Input: the filtered items. Output: the lines joined with newlines, or "" for none.
 // The number is the only handle the list hands out, because it is the only one every tool on this list takes. The centre used to be printed beside it, in desktop screen pixels, which no tool accepts at all: click, point_at and scroll_to take the number, click_at and scroll_at take pixels of the last picture. A model given two numbers uses both, so the centres were read as picture points and refused for being outside the picture — the item's rectangle is still on Item for whatever aims the pointer, it is just not published to the model.
 func Format(items []Item) string {
 	lines := make([]string, len(items))
@@ -113,6 +120,13 @@ func Format(items []Item) string {
 			label = append(label[:labelRunes-1], '…')
 		}
 		lines[i] = fmt.Sprintf("[%d] %s %q", it.N, it.Role, string(label))
+		// Quoted, so the contents' own line breaks print as "\n" and the item stays on its one line.
+		if value := []rune(it.Value); len(value) > 0 {
+			if len(value) > valueRunes {
+				value = append(value[:valueRunes-1], '…')
+			}
+			lines[i] += fmt.Sprintf(" holds %q", string(value))
+		}
 	}
 	return strings.Join(lines, "\n")
 }

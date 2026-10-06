@@ -119,19 +119,23 @@ function ErrorMeta({ turn, folded }: { turn: Turn; folded: boolean }) {
   );
 }
 
-/** What an answer says under it: the time and the tools it called on one grey line, and the quotes behind it folded away. Input: the turn and whether this reply folds at all. Output: the line, the fold, and the quotes when the fold is open. An answer that read nothing says so, since a reply built on nothing is one to treat differently. */
+/** The tools that hand the model something read — off the screen, the store, a file, the day's timeline, or another agent's answer — so a reply that called one stands on it even when it kept no quotes. Only memory hits carry a source to quote; the rest leave no evidence behind, and a reply off the screen was being told it read nothing. Tools that only act (open_app, type_text, click, save_note, open_url and the rest) read nothing, and a reply that called only those still says so. */
+const READ_TOOLS = new Set(["observe_screen", "look", "point_at", "wait_for", "recall", "query_memory", "query_store", "read_file", "list_files", "action_items", "personal_context", "branch", "delegate"]);
+
+/** What an answer says under it: the time and the tools it called on one grey line, and the quotes behind it folded away. Input: the turn and whether this reply folds at all. Output: the line, the fold, and the quotes when the fold is open. An answer that kept no quotes and called no tool that reads says so, since a reply built on nothing is one to treat differently. */
 function AnswerMeta({ turn, folded }: { turn: Turn; folded: boolean }) {
   const dispatch = useAppDispatch();
   const open = useAppSelector((s) => s.ui.openRails.includes(turn.id));
   const evidence = turn.evidence ?? [];
   const tools = (turn.tools ?? []).filter(Boolean);
+  const read = evidence.length > 0 || tools.some((t) => READ_TOOLS.has(t));
   const foldable = evidence.length > 0 && folded;
   return (
     <>
       <div className="mt-1.5 text-meta text-muted-foreground">
         {hhmm(turn.when)}
         {tools.length && folded ? ` · ${tools.join(", ")}` : ""}
-        {evidence.length ? "" : " · read nothing — treat it that way"}
+        {read ? "" : " · read nothing — treat it that way"}
       </div>
       {foldable ? (
         <Fold label="Sources" count={evidence.length} open={open} controls={`fold-${turn.id}`} onToggle={() => dispatch(ui.railToggled(turn.id))} />

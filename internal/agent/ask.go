@@ -73,6 +73,8 @@ type TurnTrace struct {
 	LastTarget *ScreenTarget
 	// LessonsShown is the id of every lesson the reference block put in front of the model this turn (see RenderLessonBlock), for the end-of-ask hook (AfterScreenRun) to score once the run's outcome is known.
 	LessonsShown []int64
+	// Note is one line for the person about how this answer came to be, such as liteModelNote, "" for none. It is kept apart from Answer for the display path to put ahead of it: routines compare Answer with db.RoutineNothing, and the turn stored from it is sent back to the model as history, so a note merged into it would post every silent routine check and teach the model to open answers with it.
+	Note string
 }
 
 // Provider names, as they are stored and as the screen that shows what each model provider costs groups by.
@@ -268,7 +270,7 @@ func handshakeInstruction(now time.Time, personal, contextStr string, toolsCount
 }
 
 // screenTaskGuidance tells the ask paths (text and Codex; the live voice handshake in connect.go builds its own prompt and does not include this) that "go somewhere and do X" is a screen task to carry through, not a page to open and leave. Written from three 2026-09-05 traces: one opened a page and answered in nine words without ever looking at the screen, one clicked the nearest button and called a different thing done, and one opened a site's root over the page the user was already reading and spent the rest of its budget getting back. It is deliberately written about screens in general — lists, settings, threads, tables — because a rule that names one kind of site teaches the model nothing about the next one.
-const screenTaskGuidance = `Doing something on the screen, going somewhere, starting something, changing a setting, is one task to see through, not a page to open and a sentence to say. Start from the window already in front: observe_screen first, and work in what's already open rather than opening a site's root over it. Stay in that window, never click a desktop overview, panel, dock or other app's window unless the request names another window; switch_window is the only tool that may bring a different one to front. When the target isn't in the current observe_screen list, scroll_to where it would be and observe_screen again, rather than clicking something else or stopping; narrow by section, group or filter first, then look for the item itself. Once it's in the list, click it there, then observe_screen again to confirm what opened or is playing is that same thing. Use the tool that performs the literal action asked for, not a shortcut to the same end state: scroll_to for scrolling, never a click; type_text for typing, always, open_url opens a page but types nothing. After every action, observe_screen again and check what actually changed. When what came up doesn't match, say so and keep working rather than calling it done; when something needed isn't there at all, say what's missing and what you'll try next.
+const screenTaskGuidance = `Doing something on the screen, going somewhere, starting something, changing a setting, is one task to see through, not a page to open and a sentence to say. Start from the window already in front: observe_screen first, and work in what's already open rather than opening a site's root over it. Stay in that window, never click a desktop overview, panel, dock or other app's window unless the request names another window; open_app is the only tool that may bring a different one to front. When the target isn't in the current observe_screen list, scroll_to where it would be and observe_screen again, rather than clicking something else or stopping; narrow by section, group or filter first, then look for the item itself. Once it's in the list, click it there, then observe_screen again to confirm what opened or is playing is that same thing. Use the tool that performs the literal action asked for, not a shortcut to the same end state: scroll_to for scrolling, never a click; type_text for typing, always, open_url opens a page but types nothing. After every action, observe_screen again and check what actually changed. When what came up doesn't match, say so and keep working rather than calling it done; when something needed isn't there at all, say what's missing and what you'll try next.
 
 Some of the screen is drawn, not laid out, video, a photo, a canvas, a map, a game, and none of it appears in the observe_screen list. To read it, or to point at or draw on it, call look first and take coordinates from the picture it returns. press_key is for keys no listing offers (Enter, Escape, Tab, Space) and lands wherever focus is, so click the field or player first. click_at and scroll_at are for elements the list has no entry or working action for, and only after a look, in that picture's coordinates.`
 
@@ -417,7 +419,7 @@ func HistoryFromTurns(turns []db.Turn) History {
 	return History(kept[first:])
 }
 
-// AskText runs one question through GenerateContent (config.TextModel, then config.TextFallbackModel once if the first answers 503, then Codex on the user's ChatGPT login when that fails the same way) with the same handshake context Live gets, per-turn RetrieveRelevant like a typed turn, memory tools, and thoughts captured. Input: question text. Output: TurnTrace including thoughts and tool hops.
+// AskText runs one question through GenerateContent (config.TextModel, then config.TextFallbackModel once if the first answers 503 or askQuotaFallbackModel once if it answers 429, then Codex on the user's ChatGPT login when that fails the same way) with the same handshake context Live gets, per-turn RetrieveRelevant like a typed turn, memory tools, and thoughts captured. Input: question text. Output: TurnTrace including thoughts and tool hops.
 func (a *Agent) AskText(ctx context.Context, question string) (TurnTrace, error) {
 	return a.AskTextWith(ctx, nil, question)
 }
@@ -439,15 +441,63 @@ func (a *Agent) askRouted(ctx context.Context, need Need, history History, quest
 		case ProviderClaude:
 			return a.AskClaudeWith(ctx, history, question)
 		default:
-			// Gemini alone has a second model to try before it counts as unable to answer, because a 503 means that one model is overloaded rather than that the provider is spent.
-			tr, err := a.askText(ctx, config.TextModel, history, question)
-			if shouldFallBack(err) {
-				slog.Warn("ask text: model unavailable, asking the fallback", "model", config.TextModel, "fallback", config.TextFallbackModel, "error", err)
-				tr, err = a.askText(ctx, config.TextFallbackModel, history, question)
-			}
-			return tr, err
+			return a.askGemini(ctx, history, question)
 		}
 	})
+}
+
+// askGemini asks the Gemini API alone. Gemini alone has a second model to try before it counts as unable to answer: a 503 means that one model is overloaded, and a 429 that one model's allowance is spent, rather than that the provider is.
+// The free tier gives TextModel 20 requests a day and every round of the tool loop is one, so a dozen questions in, a key-only user was told the day's Gemini was used up and nothing else could answer. The lite model has its own allowance, 500 a day (see brain.DefaultQuotaOptions), so a spent TextModel is asked again there once, and the trace's Note says so in one line.
+// Either retry runs the whole turn again, so it is made only while the first attempt has done nothing on screen: a click repeated is a second click.
+func (a *Agent) askGemini(ctx context.Context, history History, question string) (TurnTrace, error) {
+	tr, err := a.askText(ctx, config.TextModel, history, question)
+	if err == nil || actionHops(tr.ToolHops) > 0 {
+		return tr, err
+	}
+	switch {
+	case shouldFallBack(err):
+		slog.Warn("ask text: model unavailable, asking the fallback", "model", config.TextModel, "fallback", config.TextFallbackModel, "error", err)
+		tr, err = a.askText(ctx, config.TextFallbackModel, history, question)
+	case apiErrorCode(err, 429):
+		slog.Warn("ask text: the model's allowance is spent, asking the lite model", "model", config.TextModel, "fallback", askQuotaFallbackModel, "error", err)
+		tr, err = a.askText(ctx, askQuotaFallbackModel, history, question)
+		if err == nil {
+			tr.Note = liteModelNote
+		}
+	}
+	return tr, err
+}
+
+// askQuotaFallbackModel answers an ask whose TextModel came back 429. It is the background jobs' model on purpose: the lite model is the one whose free-tier allowance is large enough to still be there when TextModel's is gone.
+const askQuotaFallbackModel = config.DefaultBackgroundModel
+
+// liteModelNote is the Note an answer from askQuotaFallbackModel carries, for the window to show ahead of it, so a weaker answer than usual comes with its reason rather than reading as June getting worse.
+const liteModelNote = "Gemini's main model is out of requests for now, so a lighter Gemini model answered this one."
+
+// ErrNoGeminiKey is what an ask named for the Gemini brain fails with when no GEMINI_API_KEY is set. Its text carries the same words genai's own missing-key error does, so the window says this brain has no key rather than "that ask failed".
+var ErrNoGeminiKey = errors.New("gemini: no GEMINI_API_KEY is set, and an api key is required to ask this brain")
+
+// GeminiBrain is the asker the daemon registers under the "gemini" brain name: the Gemini API and nothing else. Naming a brain is asking that brain, and the routed default asker it used to be answered a Gemini-pinned conversation on Antigravity when no key was set, under Gemini's name (2026-10-03).
+type GeminiBrain struct {
+	Agent *Agent
+}
+
+// AskText answers the question on the Gemini API alone.
+func (b GeminiBrain) AskText(ctx context.Context, question string) (TurnTrace, error) {
+	return b.AskTextWith(ctx, nil, question)
+}
+
+// AskTextWith answers the question with the conversation so far on the Gemini API alone. Output: the trace, or ErrNoGeminiKey when there is no key to ask with.
+func (b GeminiBrain) AskTextWith(ctx context.Context, history History, question string) (TurnTrace, error) {
+	if !geminiKeySet() {
+		return TurnTrace{Channel: ChannelText, Model: config.TextModel, Question: question, Usage: TokenUsage{Provider: ProviderGemini}}, ErrNoGeminiKey
+	}
+	return b.Agent.askGemini(ctx, history, question)
+}
+
+// AfterScreenRun hands a screen run to the agent's lesson hook, as the agent itself did when it was registered under this name.
+func (b GeminiBrain) AfterScreenRun(ctx context.Context, trace TurnTrace, outcome string) {
+	b.Agent.AfterScreenRun(ctx, trace, outcome)
 }
 
 // shouldFallBack reports whether an ask failed in the one way another model can fix: the API said 503 UNAVAILABLE, the model itself is overloaded. Input: the error from askText, possibly wrapped. Output: true only for a 503 API error.
@@ -995,9 +1045,13 @@ var askAllowedTools = map[string]bool{
 	"delegate": true,
 }
 
+// jobAllowedTools are the tools a computer-use job may run on top of an ask's (see inJob), because its own prompt offers them and nothing else would reach them: branch is a job's one way to the web. An ask is not offered branch, since its brains search the web themselves and delegate hands a task to one that does; a job's brain is held to one JSON action a round, and with branch refused here its prompt's "the only way to reach the web" was a way to nowhere.
+// switch_window is the job prompt's old name for open_app, which runTool still answers as open_app. A job's brain writes its tool's name as free text rather than picking from a declared list, so one that reaches for the old name gets the window raised rather than a refusal and a step filed as failed.
+var jobAllowedTools = map[string]bool{"branch": true, "switch_window": true}
+
 // evalExecute runs a tool for an ask, refusing the ones outside the gate. Input: the tool's name and arguments. Output: the tool's result, or a refusal naming the tool. The refusal used to read "disabled in evals (read-only memory eval)", which describes a situation a person typing a question is not in; askTools now keeps a gated tool off the list in the first place, so anything reaching this refusal is a model calling a tool it was never offered, and the message says the plain true thing instead.
 func (a *Agent) evalExecute(ctx context.Context, name string, args map[string]any) string {
-	if !a.evalWrites && !subtaskAllowedTools[name] && !askAllowedTools[name] {
+	if !a.evalWrites && !subtaskAllowedTools[name] && !askAllowedTools[name] && !(jobAllowedTools[name] && inJob(ctx)) {
 		return fmt.Sprintf("error: tool %q %s", name, askGateMark)
 	}
 	return a.executeTool(ctx, name, args)
@@ -1103,7 +1157,7 @@ func automaticLessons(app string, hops []ToolHop, maxLines int) []string {
 	return out
 }
 
-// reflectiveLesson asks the same brain that just ran a screen turn, in one plain question through AskText — the cheapest existing entry point that gets a plain answer back without offering it screen tools it has no reason to reach for on a question about itself — what a later run in app should carry forward from this one. Input: ctx, the app, and the finished trace, whose question and hops go into the prompt so the model is reflecting on this run rather than on whatever its own memory lookup turned up. Output: the model's own words, trimmed, or "" when it said there was nothing, the call failed, app is "", or the run had no hops to describe.
+// reflectiveLesson asks the same brain that just ran a screen turn, in one plain question through AskText's own route (askRouted, so the lesson never opens with withNote's line about which model answered) — the cheapest existing entry point that gets a plain answer back without offering it screen tools it has no reason to reach for on a question about itself — what a later run in app should carry forward from this one. Input: ctx, the app, and the finished trace, whose question and hops go into the prompt so the model is reflecting on this run rather than on whatever its own memory lookup turned up. Output: the model's own words, trimmed, or "" when it said there was nothing, the call failed, app is "", or the run had no hops to describe.
 func (a *Agent) reflectiveLesson(ctx context.Context, app string, trace TurnTrace) string {
 	if app == "" {
 		return ""
@@ -1112,7 +1166,7 @@ func (a *Agent) reflectiveLesson(ctx context.Context, app string, trace TurnTrac
 	if summary == "" {
 		return ""
 	}
-	tr, err := a.AskText(ctx, fmt.Sprintf(reflectivePromptFmt, app, trace.Question, summary))
+	tr, err := a.askRouted(ctx, Need{}, nil, fmt.Sprintf(reflectivePromptFmt, app, trace.Question, summary))
 	if err != nil {
 		slog.Warn("lessons: the reflective call failed, skipping", "error", err)
 		return ""

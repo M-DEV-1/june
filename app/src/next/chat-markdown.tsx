@@ -1,6 +1,6 @@
 /** One of June's replies, rendered as text a person actually reads rather than as one plain paragraph: tables, task lists and strikethrough from GitHub-flavoured markdown, $...$ and $$...$$ as real typeset maths, headings no bigger than the page's own section heading, and a link that opens in the system browser instead of navigating this window away from the chat. No raw HTML ever runs — react-markdown's default turns a stray `<script>` or `<img onerror>` back into the literal text, which is also what keeps a reply safe from anything a tool result or a model slipped into the words. Input: the reply's text, exactly as the daemon sent it. Output: the structured reply. A user's own turn is left as plain text elsewhere — this is only for what June said back. */
 
-import { useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import { createContext, useContext, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -57,6 +57,16 @@ function CodeBlock({ children, ...p }: { children?: ReactNode }) {
   );
 }
 
+/** Whether what is being drawn sits inside a reply's link. hast nodes carry no parent, so this is how an image learns it is the face of a link, such as a badge written [![alt](img)](href). */
+const InLink = createContext(false);
+
+/** A reply's image, never a real <img>: an image loads the moment the reply is drawn, with no click, so a reply steered by text on the screen could put memory into an image's address and send it anywhere. Input: the image's address and alt text. Output: a link to it, which goes nowhere until clicked like any other link in a reply; or, inside a link, its alt text alone, since a link in a link is an <a> in an <a> and one click opened both addresses. */
+function ReplyImage({ src, alt }: { src?: unknown; alt?: string }) {
+  const inLink = useContext(InLink);
+  if (inLink) return <>{alt || "image"}</>;
+  return <ReplyLink href={typeof src === "string" ? src : undefined}>{alt || "image"}</ReplyLink>;
+}
+
 /** A link in a reply, opened in the system browser. A component of its own because it calls a hook: react-markdown renders a `components` entry through createElement, but an arrow function hung off an object is not a component to any tool that reads the code, and a hook inside one is a rules-of-hooks violation on its face. */
 function ReplyLink({ href, children, ...p }: ComponentPropsWithoutRef<"a">) {
   const dispatch = useAppDispatch();
@@ -80,7 +90,7 @@ function ReplyLink({ href, children, ...p }: ComponentPropsWithoutRef<"a">) {
       }}
       {...p}
     >
-      {children}
+      <InLink.Provider value>{children}</InLink.Provider>
     </a>
   );
 }
@@ -99,6 +109,7 @@ const components: Components = {
   blockquote: ({ node: _n, ...p }) => <blockquote className="mt-3 border-l-2 border-hairline pl-3 text-muted-foreground italic first:mt-0" {...p} />,
   hr: ({ node: _n, ...p }) => <hr className="my-4 border-hairline" {...p} />,
   a: ({ node: _n, ...p }) => <ReplyLink {...p} />,
+  img: ({ node: _n, src, alt }) => <ReplyImage src={src} alt={alt} />,
   pre: ({ node: _n, children, ...p }) => <CodeBlock {...p}>{children}</CodeBlock>,
   code: ({ node: _n, className, children, ...p }) => {
     // A fenced block's own <code> sits inside the <pre> above and only needs the mono face; a bare `code` span is inline text and gets the subtle surface and padding the design calls "sunken". remark tags a fenced block's code with `language-xxx` only when the fence names one — a fence with no language (rare in practice, since every real reply names one) falls back to the inline styling nested inside the pre's own background, which is a harmless doubling rather than a wrong render. ponytail: className-sniffing, not full inline/block tracking — fine while every real fence in the daemon's replies names a language.

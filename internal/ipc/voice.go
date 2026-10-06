@@ -47,7 +47,7 @@ var voiceReconnectDelay = 2 * time.Second
 // voiceMaxReconnectDelay caps the backoff voiceBackoff computes, so a session that has been failing for a while still tries again every so often rather than the wait growing without bound.
 var voiceMaxReconnectDelay = 30 * time.Second
 
-// voiceMaxConsecutiveFailures is how many times in a row dial will redial a run that keeps failing before it gives up on the session rather than trying again. Past this many failures the cause is almost certainly not transient — a missing or expired API key, say — and retrying for ever would just hold the microphone open and fill the log with the same error. A variable only so a test can shrink it.
+// voiceMaxConsecutiveFailures is how many times in a row dial will redial a run that keeps failing before it gives up on the session rather than trying again. Past this many failures the cause is almost certainly not transient — an expired or revoked API key, say (a missing one is refused by Start before the microphone opens) — and retrying for ever would just hold the microphone open and fill the log with the same error. A variable only so a test can shrink it.
 var voiceMaxConsecutiveFailures = 8
 
 // voiceStopTimeout bounds how long POST /voice/stop waits for the session goroutine to return before closing the audio devices anyway, so a wedged session cannot hang the request.
@@ -87,6 +87,8 @@ type VoiceSession struct {
 	store *db.Store
 	// open builds the microphone, the speaker and the agent for one session. A field rather than a call so the tests can substitute fakes for the user's real hardware.
 	open func() (audio.Microphone, audio.Speaker, voiceRunner, error)
+	// touch tells the server a conversation began or ended (see Server.LastUse), so a restart June makes on its own account does not land the moment one has hung up. nil tells nobody.
+	touch func()
 
 	mu      sync.Mutex
 	seq     int
@@ -98,10 +100,26 @@ type VoiceSession struct {
 	speaker audio.Speaker
 }
 
+// noVoiceKeySentence is what POST /voice/start answers with when there is no Gemini key, which the hover shows as it is.
+const noVoiceKeySentence = "Talking to June needs a free Gemini key. Add one in Settings → Brain."
+
+// markNoKey tags an answer as "there is no Gemini key" with X-June-Error: no_key, so a window that knows the word can offer to open Settings. The header is also named in Access-Control-Expose-Headers on this response: the window's fetch is cross-origin, and a browser hides every response header outside the CORS safelist from script unless the response names it.
+func markNoKey(w http.ResponseWriter) {
+	w.Header().Set("X-June-Error", "no_key")
+	w.Header().Add("Access-Control-Expose-Headers", "X-June-Error")
+}
+
+// errNoVoiceKey is what a session's open returns when there is no Gemini API key, which a live session cannot be dialled without, and Start answers it 503. It is a refusal up front rather than a failure in dial: Start used to open the microphone, report "listening" and then redial "api key is required" with a growing backoff for about two minutes before giving up, holding the microphone the whole time with nothing on the other end.
+var errNoVoiceKey = errors.New("no Gemini API key")
+
 // NewVoice builds the daemon's voice session. Input: the server whose hub the session broadcasts on and whose live activity buffer the handshake reads, the store the agent uses as its memory and the session files each turn's token count in, the Gemini API key, and the way a spoken chain of work reaches the job runner — ActJobs.Spoken in the daemon, nil for a session that cannot start one, which makes the do tool say so. Output: the session, idle; register its Start, Stop and Status methods on the mux (see cmd/daemon.go for the route names).
 func NewVoice(s *Server, store *db.Store, apiKey string, runJob func(context.Context, string) (string, error)) *VoiceSession {
-	v := &VoiceSession{hub: s.hub, store: store, state: "idle"}
+	v := &VoiceSession{hub: s.hub, store: store, state: "idle", touch: s.use.touch}
 	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
+		// Checked before either device is touched, so a machine with no key never has its microphone opened for a session that cannot connect.
+		if strings.TrimSpace(apiKey) == "" {
+			return nil, nil, nil, errNoVoiceKey
+		}
 		mic, err := audio.NewMic()
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("microphone: %w", err)
@@ -161,7 +179,7 @@ func (v *VoiceSession) setState(id, state string) {
 	v.emit(id, "state", state)
 }
 
-// Start handles POST /voice/start. Input: no body. Output: 405 for any method but POST — a GET would otherwise open the microphone; 202 with JSON {"id": string} once the microphone, the speaker and the live session are up, or 409 when a session is already running (or was stopped while this call was still opening its hardware), or 500 when the audio devices cannot be opened. The session then runs in the background and everything it hears and says arrives on /events under that id.
+// Start handles POST /voice/start. Input: no body. Output: 405 for any method but POST — a GET would otherwise open the microphone; 202 with JSON {"id": string} once the microphone, the speaker and the live session are up, or 409 when a session is already running (or was stopped while this call was still opening its hardware), 503 with a plain sentence when there is no Gemini API key and so nothing to talk to, or 500 when the audio devices cannot be opened. The session then runs in the background and everything it hears and says arrives on /events under that id.
 //
 // The lock is held only to claim the id and to install the opened hardware, never across v.open or mic.StartCapture themselves — those reach real devices and can take a while, and Status and Stop must keep answering while they do, the same shape Dictation.Start already uses. The claim is a reservation under v.id with state "starting": Status sees a session already turning on, a second Start sees one already running, and a Stop landing during the reservation clears v.id, which the check after opening the hardware reads back to know its own start was cancelled out from under it.
 func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +201,12 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	mic, speaker, run, err := v.open()
 	if err != nil {
 		v.clearReservation(id)
+		if errors.Is(err, errNoVoiceKey) {
+			// Plain text, since the hover shows the body as it is. The window has a key box in Settings and in setup, so that is where this points rather than at a file.
+			markNoKey(w)
+			http.Error(w, noVoiceKeySentence, http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -216,6 +240,7 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	v.mu.Unlock()
 
 	v.emit(id, "state", "listening")
+	v.touched()
 	go v.watch(ctx, id, run)
 	go v.dial(ctx, id, run, micChan, done)
 	go v.levels(ctx, id, mic, speaker)
@@ -243,7 +268,7 @@ func voiceBackoff(prev time.Duration) time.Duration {
 	return next
 }
 
-// dial holds the live session open, redialing when it drops, until the session's context is cancelled or the run has failed voiceMaxConsecutiveFailures times in a row. Closing done tells Stop the run is over. A run that keeps failing — a missing or expired API key holds the microphone open on nothing, say — is retried with a growing backoff rather than every voiceReconnectDelay for ever, and once the failures run out dial tears the session down itself so the microphone is not left open with nobody watching.
+// dial holds the live session open, redialing when it drops, until the session's context is cancelled or the run has failed voiceMaxConsecutiveFailures times in a row. Closing done tells Stop the run is over. A run that keeps failing — an expired API key holds the microphone open on nothing, say — is retried with a growing backoff rather than every voiceReconnectDelay for ever, and once the failures run out dial tears the session down itself so the microphone is not left open with nobody watching.
 func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, micChan <-chan []byte, done chan struct{}) {
 	defer close(done)
 	// delay and failures are only touched once a run has actually failed, so a session whose run never fails never reads voiceReconnectDelay, voiceMaxReconnectDelay or voiceMaxConsecutiveFailures at all — the same as before backoff and giving-up existed.
@@ -303,6 +328,7 @@ func (v *VoiceSession) giveUp(id string) {
 		speaker.Close()
 	}
 	v.emit(id, "state", "idle")
+	v.touched()
 }
 
 // watch turns the agent's own channels into events on the hub for as long as the session runs: what the user said becomes "heard", what June said becomes "said", each tool call becomes "tool", and the session's state changes become "state".
@@ -401,6 +427,14 @@ func (v *VoiceSession) end() {
 	}
 	if id != "" {
 		v.emit(id, "state", "idle")
+		v.touched()
+	}
+}
+
+// touched tells the server a conversation began or ended, when there is one to tell.
+func (v *VoiceSession) touched() {
+	if v.touch != nil {
+		v.touch()
 	}
 }
 

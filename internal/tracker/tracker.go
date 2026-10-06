@@ -3,6 +3,7 @@ package tracker
 import (
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -43,12 +44,21 @@ type Tracker interface {
 	GetActiveWindow() (*Activity, error)
 }
 
-// IsJuneWindow reports whether a window is June's own desktop window: the app is named june (june-window is the window's program name on Windows), or it is the XWayland frame process (mutter-x11-frames) carrying the exact title "June". A terminal titled "june" because it sits in the repo is not the window, so the title alone never decides.
+// IsJuneWindow reports whether a window is June's own desktop window: the app is named june (june-window is the window's program name on Windows, and junew the console-less daemon the Windows login entry runs, whose tray menu holds the foreground while it is open), or it is the XWayland frame process (mutter-x11-frames) carrying the exact title "June". A terminal titled "june" because it sits in the repo is not the window, so the title alone never decides.
 // Input: an application name and a window title. Output: true when the window is June itself.
 // June looking at June is never the user's activity, so this is the one rule the tracker, the capture loop and the /context reads all filter by.
 func IsJuneWindow(app, title string) bool {
 	app = strings.TrimSpace(app)
-	return strings.EqualFold(app, "june") || strings.EqualFold(app, "june-window") || (app == "mutter-x11-frames" && strings.TrimSpace(title) == "June")
+	return strings.EqualFold(app, "june") || strings.EqualFold(app, "june-window") || strings.EqualFold(app, "junew") || (app == "mutter-x11-frames" && strings.TrimSpace(title) == "June")
+}
+
+// storeApps holds, lowercased, every application name a window has been read for inside a Windows store app's frame (see winPid). Only the Windows readers fill it; nothing on Linux is framed this way.
+var storeApps sync.Map
+
+// IsStoreApp reports whether an application is a Windows store app, whose window is titled with the name a person calls it by while its executable is named something else: Calculator runs as CalculatorApp and Settings as SystemSettings, so a request for "Calculator" matches such a window's title and never its application. Input: an application name as Observe reports it. Output: true once a window of it has been read inside a store app's frame in this process; always false off Windows.
+func IsStoreApp(app string) bool {
+	_, ok := storeApps.Load(strings.ToLower(strings.TrimSpace(app)))
+	return ok
 }
 
 // blocklist is the app blocklist the daemon in this process was built with. It is package-level because a read outside the tracker has no daemon to ask: the /context handler answers the hotkey from a live window read (internal/ipc/reads.go), and that read has to refuse the same applications the capture loop refuses or the hotkey hands the model a window the episode store would never hold.

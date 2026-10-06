@@ -1,22 +1,33 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"june/internal/util"
 )
 
-// Version is June's release number, the one source of truth for every place that reports it: internal/obs/telemetry.go tags telemetry with it.
-const Version = "0.1.1"
+// Version is June's release number, the one source of truth for every place that reports it: GET /settings, GET /setup, the updater and the telemetry tags. A var rather than a const so a release build sets it from the tag with -ldflags "-X june/internal/config.Version=0.2.0"; a constant written by hand had already drifted from tauri.conf.json. "dev" is a build nobody stamped, which the updater never replaces.
+var Version = "dev"
 
 type JuneConfig struct {
 	Tracker TrackerConfig `json:"tracker"`
+	// SetupDone is set when the user finishes the window's first-run setup. Until then the tracker stays paused, so nothing on the screen is observed before the user has been told what June keeps.
+	// Never omitted, so every file this version writes answers it one way or the other: a file without the key was written by a June from before setup existed, and that is the one case readConfig decides it for (see storeExists).
+	SetupDone bool `json:"setup_done"`
+	// UpdateCheck turns the daily check for a new June release on or off. nil means on. SignPath's terms ask for a way to turn off anything that contacts a server the user did not choose, and GitHub's release API is one.
+	UpdateCheck *bool `json:"update_check,omitempty"`
 	// Voice is the Gemini Live prebuilt voice name used for the assistant's spoken output (see AvailableVoices).
 	// Defaults to DefaultVoice when unset.
 	Voice string `json:"voice"`
@@ -169,18 +180,22 @@ func (p ProactiveConfig) Hours() (brief, close int) {
 
 // TranscribeConfig holds the settings for the whisper.cpp build that turns a meeting's audio into text.
 type TranscribeConfig struct {
-	// GPUDevice is which GPU whisper.cpp should decode on, numbered as whisper.cpp numbers the Vulkan devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees — on a laptop with both integrated and discrete graphics that is usually the slower of the two, so this normally wants setting.
+	// GPUDevice is which GPU whisper.cpp should decode on, numbered as its backend numbers the devices it finds. Zero, the default, leaves the choice to whisper.cpp, which takes the first device it sees. On Linux that backend is Vulkan, which counts the integrated graphics too, usually as the slower device 0, so this normally wants setting there. On Windows it is CUDA, which counts only the NVIDIA cards, so zero is normally right and a number carried over from a Vulkan machine names no GPU at all.
 	GPUDevice int `json:"gpu_device"`
 	// ClusterThreshold is the cosine distance at which the diarizer stops treating two stretches of the call's audio as the same voice. Smaller splits one person into several; larger merges two people into one. Zero means the built-in default.
 	// It wants setting per machine rather than guessing: the right value depends on the embedding model, on how the other people's microphones colour their voices, and on how much everyone talks over each other. Sherpa's own default of 0.5 gave 35 clusters for a six-person standup on this laptop, which is the symptom of it being set too low.
 	ClusterThreshold float64 `json:"cluster_threshold"`
 	// SpeakerCountFromScreen tells the diarizer how many people are in the call, counted from the names the meeting app shows inside its own window, instead of letting it estimate from ClusterThreshold. Off by default: the count is read out of one flattened run of accessibility text, where three names in a row can parse as one, and undercounting fuses several people into a single voice in a way nothing downstream can undo. The recorder logs the count it would have used on every meeting, so turn this on once that log shows the right number for a real group call.
 	SpeakerCountFromScreen bool `json:"speaker_count_from_screen"`
+	// Model is the whisper.cpp model file in the whispercpp directory, such as "ggml-small.bin". Empty means ggml-medium.bin. A machine with no GPU whisper can use gets the small model from first-run setup, because medium on the CPU takes several seconds per dictation.
+	Model string `json:"model,omitempty"`
 }
 
 // BrainConfig chooses which backend answers June's one-shot text duties — the meeting minutes and the personal context updater. The zero value is the Gemini API on TextModel, which is what June did before this block existed, so a config file written without it behaves exactly as it always has.
 // The voice assistant is not covered by this: that is a Gemini Live session, not a one-shot call.
 type BrainConfig struct {
+	// AllowFallback lets a background duty (minutes, briefs, summaries) go to another signed-in brain when the one it was meant for fails. nil means allowed, which is how June always behaved; the window and the privacy notice let the user turn it off so nothing goes to a service they did not pick.
+	AllowFallback *bool `json:"allow_fallback,omitempty"`
 	// Provider is BrainGeminiAPI (the default) or BrainClaudeCLI to run `claude -p` under whatever Claude Code login the machine already has. Anything else falls back to the Gemini API.
 	Provider string `json:"provider"`
 	// Model names the model each provider should use: a Gemini model name (defaulting to TextModel), or for claude-cli a model alias passed as --model ("sonnet", "opus"); empty means the login's default.
@@ -226,19 +241,27 @@ type EmbedConfig struct {
 	IdleTimeout time.Duration `json:"idle_timeout_ms"`
 	// Device is the llama.cpp device name to run the server on, such as "Vulkan1", as listed by `llama-server --list-devices`. Empty leaves the choice to llama-server, which on a machine with two GPUs may spread the model across both.
 	Device string `json:"device"`
-	// SimilarityFloor is the cosine floor a vector hit must clear to enter hybrid search's fusion. Defaults to DefaultLocalSimilarityFloor; set it here to retune retrieval without a rebuild.
+	// SimilarityFloor is the cosine floor a vector hit must clear to enter hybrid search's fusion. Defaults to DefaultLocalSimilarityFloor, WindowsLocalSimilarityFloor on Windows; set it here to retune retrieval without a rebuild.
 	SimilarityFloor float64 `json:"similarity_floor"`
 	// ActRunSimilarityFloor is the cosine a past screen run's question must reach against a new one before that run is shown to the model as reference. Defaults to db.DefaultActRunSimilarity, which was measured on written-for-the-purpose desktop questions rather than on anything in this store, and wants revisiting once there are real questions asked days apart to measure. Zero or less is ignored. Read it through ActRunFloor rather than directly.
 	ActRunSimilarityFloor float64 `json:"act_run_similarity_floor"`
 }
 
 // DefaultLocalSimilarityFloor is the cosine floor for EmbeddingGemma, against internal/db's 0.55 default for Gemini. Measured by replaying thirteen real queries from the log against both indexes: the same genuinely-relevant documents that Gemini scored 0.55-0.79 EmbeddingGemma scores 0.43-0.81, so keeping 0.55 dropped every vector candidate on the open-ended questions ("what did i do today") and quietly reduced those searches to lexical-only.
+// That store is a Linux one, whose captures are long pages; a Windows store has its own floor (see WindowsLocalSimilarityFloor).
 const DefaultLocalSimilarityFloor = 0.40
 
-// Floor is the cosine floor to hand db.Store.SetVectorSimilarityFloor, defaulting to DefaultLocalSimilarityFloor when the config names none.
+// WindowsLocalSimilarityFloor is DefaultLocalSimilarityFloor for a Windows store. Measured on 2026-10-03 against twenty Windows captures (Calculator, Settings, File Explorer, Notepad, a browser, a terminal) through the running server: a question put in other words than the window's own scored its window 0.29-0.30 at the least ("calculation history" against Calculator 0.295, "sitcom I was streaming" against the episode playing 0.292, "how much RAM is installed" against Settings' About page 0.303), while the best match for ten questions about things never on the screen (a dentist, a flight, a budget email, a pull request) was 0.10-0.26. At 0.40 every one of those right answers was dropped and the search was keyword-only; 0.28 keeps them and still turns the absent topics away. The band below the best hit (internal/db's vectorSimilarityBand) is what trims the tail once a strong match is in.
+// Windows only, because the Linux store was not measured again: what its off-topic questions score between 0.28 and 0.40 is not known, so it keeps the floor it was measured at.
+const WindowsLocalSimilarityFloor = 0.28
+
+// Floor is the cosine floor to hand db.Store.SetVectorSimilarityFloor, defaulting to WindowsLocalSimilarityFloor on Windows and DefaultLocalSimilarityFloor elsewhere when the config names none.
 func (e EmbedConfig) Floor() float64 {
 	if e.SimilarityFloor > 0 {
 		return e.SimilarityFloor
+	}
+	if runtime.GOOS == "windows" {
+		return WindowsLocalSimilarityFloor
 	}
 	return DefaultLocalSimilarityFloor
 }
@@ -461,11 +484,126 @@ func ConfigPath() string {
 	return filepath.Join(DataDir(), "june-config.json")
 }
 
+// ErrUnreadable is what ReadConfig wraps when june-config.json is there but is not a config it can read: a hand edit with a stray comma, or a file a power cut left half written. Callers tell it apart from a read that failed, which says nothing about the file, with errors.Is. SaveConfig wraps it too, when such a file could not be kept aside and so was not written over.
+var ErrUnreadable = errors.New("june-config.json is not a config June can read")
+
 // get or create
+// A file with no setup_done yet has it decided by readConfig and written straight back, so the decision is made once, against the store as it stood then. The daemon loads its config before it opens the store for exactly this reason: decided after, the store a new install's first daemon had just created would count as one from an earlier June.
+// A file that will not parse is never changed here. LoadConfig runs on every ask, dictation and voice start of a running daemon, and setting such a file aside there undid settings the daemon still held: a hand edit saved with one stray comma, or read half-way through Notepad's save, became the defaults on disk, and the updater and the meeting watcher, which read the file, went back to checking and offering. So the defaults run under whatever of the file decoded, with setup_done kept true when a store shows June has run here before, and the file is left for whoever is editing it. A save replaces it, keeping it aside (see SaveConfig), and the daemon does that once as it starts (see ReplaceUnreadable). One that could not be read at all is treated the same way, so a passing lock on the file does not send someone who has used June for months back to first-run setup with watching paused.
 func LoadConfig() JuneConfig {
-	cfg := JuneConfig{
+	configPath := ConfigPath()
+	// Once per process: an install whose data folder is outside the profile and was made before June protected such folders is protected the next time June starts, not only once a setting is next saved (see util.MkdirPrivate).
+	protectOnce.Do(func() {
+		if _, err := os.Stat(DataDir()); err == nil {
+			util.MkdirPrivate(DataDir())
+		}
+	})
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		cfg := defaultConfig()
+		// No file at all is a new install, or one whose config was deleted by hand, and the store tells them apart the same way it does for a file from an earlier June.
+		cfg.SetupDone = storeExists()
+		slog.Info("Creating default config file", "path", configPath, "setup_done", cfg.SetupDone)
+		if err := SaveConfig(cfg); err != nil {
+			slog.Error("Failed to write default config file", "error", err)
+		}
+		return cfg
+	}
+
+	cfg, decided, err := readConfig()
+	if errors.Is(err, ErrUnreadable) {
+		// Once until the file reads again, since a file left broken would otherwise be logged on every ask.
+		if !unreadableLogged.Swap(true) {
+			slog.Warn("june-config.json could not be read; running on the defaults under what of it did, and leaving it as it is until a setting is saved", "error", err)
+		}
+		return recoveredWithoutFile(cfg)
+	}
+	if err != nil {
+		cfg.SetupDone = storeExists()
+		slog.Error("Failed to load config file, using defaults", "error", err, "setup_done", cfg.SetupDone)
+		return cfg
+	}
+	unreadableLogged.Store(false)
+	if decided {
+		slog.Info("this config predates first-run setup; recording whether setup counts as done", "setup_done", cfg.SetupDone)
+		if err := SaveConfig(cfg); err != nil {
+			slog.Warn("could not record setup_done; it is decided again on the next load", "error", err)
+		}
+	}
+	return cfg
+}
+
+// protectOnce keeps LoadConfig's protection of the data folder to the first load in a process.
+var protectOnce sync.Once
+
+// unreadableLogged is set once LoadConfig has logged that the file will not parse, and cleared when it next reads.
+var unreadableLogged atomic.Bool
+
+// recoveredWithoutFile is what a broken file is read as: the defaults under whatever of it decoded (a value of the wrong type spoils only its own field), with setup_done kept true when a store shows June has run here before. Before, the defaults ran with setup_done false, and the daemon paused watching and opened first-run setup for someone who had used June for months.
+func recoveredWithoutFile(cfg JuneConfig) JuneConfig {
+	cfg.SetupDone = cfg.SetupDone || storeExists()
+	repair(&cfg)
+	return cfg
+}
+
+// ReplaceUnreadable writes cfg in place of a june-config.json that will not parse, keeping the broken file beside it (see SaveConfig), and leaves a file that reads, is missing or cannot be opened as it is. The daemon calls it once as it starts, with the config it runs on, which LoadConfig made of that same file: every other reader of the file, the updater and the meeting watcher among them, then sees what the daemon runs on, and the user is told at this start rather than after the next save. Output: whether the file was replaced.
+func ReplaceUnreadable(cfg JuneConfig) bool {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	if _, _, err := readConfig(); !errors.Is(err, ErrUnreadable) {
+		return false
+	}
+	if err := saveLocked(cfg); err != nil {
+		slog.Error("could not write a new june-config.json in place of the unreadable one", "error", err)
+		return false
+	}
+	return true
+}
+
+// setAsideNote is the file that says a june-config.json was set aside and the user has not been told yet. It holds the name the broken file was kept under.
+func setAsideNote() string {
+	return filepath.Join(DataDir(), "june-config.set-aside")
+}
+
+// keepAside copies data, the bytes of an unreadable june-config.json, to june-config.json.unreadable-<date>-<time> beside it, and leaves a note for the next daemon to tell the user about (see TakeSetAside). A copy rather than a rename, so there is never a moment with no config file, in which another load would write the defaults in its place. Output: the copy's path, or the error from writing it.
+func keepAside(data []byte) (string, error) {
+	base := ConfigPath() + ".unreadable-" + time.Now().Format("20060102-150405")
+	// A name already taken may be an earlier broken file kept the same second.
+	aside := base
+	for i := 2; util.Exists(aside); i++ {
+		aside = fmt.Sprintf("%s-%d", base, i)
+	}
+	if err := util.WriteFilePrivate(aside, data); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(setAsideNote(), []byte(filepath.Base(aside)), 0o600); err != nil {
+		slog.Warn("could not leave a note that june-config.json was set aside; the user will not be told", "error", err)
+	}
+	return aside, nil
+}
+
+// TakeSetAside reports a june-config.json that was set aside since the user was last told, and forgets it, so it is told once. The daemon calls it as it starts. Output: the name the broken file was kept under, in the data directory, or "" when there is nothing to tell.
+func TakeSetAside() string {
+	note := setAsideNote()
+	data, err := os.ReadFile(note)
+	if err != nil {
+		return ""
+	}
+	os.Remove(note)
+	return strings.TrimSpace(string(data))
+}
+
+// storeExists reports whether June's store is already in the data directory. It is what decides setup_done for an install that has never recorded it: an earlier June that has run has a store, and its tracking must not stop because the version that brought setup arrived, while a new install has none until its first daemon opens one.
+func storeExists() bool {
+	info, err := os.Stat(filepath.Join(DataDir(), "db"))
+	return err == nil && !info.IsDir()
+}
+
+// defaultConfig is the config a machine with no june-config.json runs on, and the base a file's own keys are read over.
+func defaultConfig() JuneConfig {
+	return JuneConfig{
 		Tracker: TrackerConfig{
-			Blocklist: DefaultBlocklist,
+			Blocklist: slices.Clone(DefaultBlocklist),
 			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
 			DwellTime: DefaultDwellTime,
 		},
@@ -477,34 +615,44 @@ func LoadConfig() JuneConfig {
 			IdleTimeout: DefaultEmbedIdleTimeout,
 		},
 	}
+}
 
-	configPath := ConfigPath()
+// ReadConfig reads june-config.json as it is on disk right now, with the same defaults and repairs LoadConfig applies, but it never creates the file and never hides a failure. A running daemon reads through it before it saves one setting, so the save changes that setting alone: saving the copy it loaded at startup put back every field changed since — `june --autostart on`, or a hand edit — and the next start then reconciled the login entry against the stale value. Output: the config, and an error when the file is missing, unreadable or not valid JSON, in which case the config is the defaults, or as much of the file as decoded.
+func ReadConfig() (JuneConfig, error) {
+	cfg, _, err := readConfig()
+	return cfg, err
+}
 
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		slog.Info("Creating default config file", "path", configPath)
-		if err := SaveConfig(cfg); err != nil {
-			slog.Error("Failed to write default config file", "error", err)
-		}
-		return cfg
-	}
-
-	data, err := os.ReadFile(configPath)
+// readConfig is ReadConfig, also saying whether the file lacked setup_done so that this read decided it (see storeExists). Every caller that saves what it read then writes the decision down, the installer's `june --autostart` among them, which runs before the new daemon ever starts; read as plain false instead, an upgrade's first save would have turned an existing install's tracking off.
+func readConfig() (cfg JuneConfig, decided bool, err error) {
+	cfg = defaultConfig()
+	data, err := os.ReadFile(ConfigPath())
 	if err != nil {
-		slog.Error("Failed to read config file, using defaults", "error", err)
-		return cfg
+		return cfg, false, fmt.Errorf("failed to read config file: %w", err)
 	}
-
+	data = bytes.TrimPrefix(data, utf8BOM)
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		slog.Error("Failed to parse config file, using defaults", "error", err)
-		return cfg
+		return cfg, false, fmt.Errorf("%w: %w", ErrUnreadable, err)
 	}
+	var keys map[string]json.RawMessage
+	if json.Unmarshal(data, &keys) == nil {
+		if _, ok := keys["setup_done"]; !ok {
+			cfg.SetupDone = storeExists()
+			decided = true
+		}
+	}
+	repair(&cfg)
+	return cfg, decided, nil
+}
 
+// repair puts back the defaults a file may have zeroed or spoiled, for every config read from disk, a recovered one included.
+func repair(cfg *JuneConfig) {
 	// configs written before /voice existed (or with a bad value) fall back to default
 	if _, ok := NormalizeVoice(cfg.Voice); cfg.Voice == "" || !ok {
 		cfg.Voice = DefaultVoice
 	}
 
-	// json.Unmarshal only overwrites keys the file actually carries, so a config with no "embed" block keeps the defaults set above. These two guards cover the case where the block exists but zeroes a field explicitly, which would otherwise mean binding port 0 or reaping the embedding server on every tick.
+	// json.Unmarshal only overwrites keys the file actually carries, so a config with no "embed" block keeps the defaults defaultConfig set. These two guards cover the case where the block exists but zeroes a field explicitly, which would otherwise mean binding port 0 or reaping the embedding server on every tick.
 	if cfg.Embed.Port <= 0 {
 		cfg.Embed.Port = DefaultEmbedPort
 	}
@@ -516,23 +664,41 @@ func LoadConfig() JuneConfig {
 		cfg.Tracker.DwellTime = DefaultDwellTime
 	}
 	if cfg.Tracker.Blocklist == nil {
-		cfg.Tracker.Blocklist = DefaultBlocklist
+		cfg.Tracker.Blocklist = slices.Clone(DefaultBlocklist)
 	}
-
-	return cfg
 }
 
-// SaveConfig persists cfg to disk, creating the data directory if needed.
+// utf8BOM is the byte order mark a file may start with. Windows PowerShell 5.1's Set-Content and Out-File -Encoding utf8 write one, and so does Notepad's "UTF-8 with BOM", and encoding/json refuses it, so a file edited that way read as broken although its JSON was fine.
+var utf8BOM = []byte("\xef\xbb\xbf")
+
+// SaveConfig persists cfg to disk, creating the data directory if needed. A june-config.json already there that will not parse is first kept beside the new one, as june-config.json.unreadable-<date>-<time>, and the next daemon to start tells the user once (see TakeSetAside): written over, a hand edit with one stray comma was gone for good, and the installer's `june --autostart` did exactly that. When it cannot be kept, nothing is written and the error wraps ErrUnreadable.
 func SaveConfig(cfg JuneConfig) error {
-	// 0700, matching the legacy-migration path above: the same directory holds the store, the IPC token and the log, so it is the user's alone and must not depend on which of the three writers happened to create it first.
-	if err := os.MkdirAll(DataDir(), 0700); err != nil {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	return saveLocked(cfg)
+}
+
+// saveMu keeps this process to one save at a time, so the look for a broken file and the write that replaces it are never split by another save: one that ran between them would have its good file kept aside as broken, then written over.
+var saveMu sync.Mutex
+
+// saveLocked is SaveConfig for a caller that holds saveMu.
+func saveLocked(cfg JuneConfig) error {
+	// The user's alone (0700, and on Windows a DACL of its own when it is outside the profile): the same directory holds the store, the IPC token and the log, so it must not depend on which of the three writers happened to create it first.
+	if err := util.MkdirPrivate(DataDir()); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	if err := util.WriteFileAtomic(ConfigPath(), data, 0600); err != nil {
+	if old, err := os.ReadFile(ConfigPath()); err == nil && json.Unmarshal(bytes.TrimPrefix(old, utf8BOM), new(JuneConfig)) != nil {
+		aside, err := keepAside(old)
+		if err != nil {
+			return fmt.Errorf("%w, and it could not be kept aside, so it was not written over: %v", ErrUnreadable, err)
+		}
+		slog.Warn("june-config.json could not be read; kept it aside and wrote a new one", "kept_as", aside, "setup_done", cfg.SetupDone)
+	}
+	if err := util.WriteFilePrivate(ConfigPath(), data); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 	return nil
@@ -553,3 +719,9 @@ func (cfg *JuneConfig) SetVoice(name string) error {
 	}
 	return nil
 }
+
+// UpdateCheckEnabled reports whether the daily release check runs: on unless the config turned it off.
+func (c JuneConfig) UpdateCheckEnabled() bool { return c.UpdateCheck == nil || *c.UpdateCheck }
+
+// FallbackAllowed reports whether a background duty may go to another signed-in brain when its own fails: allowed unless the config turned it off.
+func (b BrainConfig) FallbackAllowed() bool { return b.AllowFallback == nil || *b.AllowFallback }

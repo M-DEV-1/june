@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -16,8 +17,10 @@ import (
 	"os"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	"june/internal/recorder"
+	"june/internal/tracker"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/prop"
@@ -154,18 +157,21 @@ type dbusMenuLayout struct {
 //	1 = Status indicator  (disabled; label reflects tracking state)
 //	2 = separator
 //	7 = Open June  (brings the desktop window to the front)
-//	3 = Pause / Resume Tracking  (label toggled by paused flag)
+//	3 = Pause / Resume Tracking  (label toggled by the tracker's own state)
 //	6 = Start / Stop meeting recording  (label toggled by the recorder's own state)
 //	4 = separator
 //	5 = Quit June
 type dbusMenu struct {
 	// The daemon's own context, handed to a stop from the tray so the transcription it starts ends with the daemon instead of outliving it on the GPU.
-	ctx     context.Context
-	quitCh  chan<- struct{}
-	conn    *dbus.Conn // needed to emit LayoutUpdated when pause label changes
-	rec     *recorder.Recorder
-	paused  atomic.Bool
-	menuRev atomic.Uint32
+	ctx    context.Context
+	quitCh chan<- struct{}
+	conn   *dbus.Conn // needed to emit LayoutUpdated when pause label changes
+	rec    *recorder.Recorder
+	// tracking is read for the pause labels on every redraw. The window pauses and resumes through the same /pause and /resume, so a flag only the tray's clicks flipped read "Pause" over a paused tracker and made the next click pause it again.
+	tracking *tracker.Daemon
+	// drawnStatus is the status line the last LayoutUpdated went out with, so watchPause can tell when the window, a pause running out or setup finishing has changed it since.
+	drawnStatus atomic.Pointer[string]
+	menuRev     atomic.Uint32
 }
 
 // menu item IDs, in the order they appear.
@@ -186,10 +192,7 @@ func (m *dbusMenu) recording() bool {
 
 // items is the single source of truth for the menu: every property of every item, in display order. GetLayout, GetGroupProperties and GetProperty all read from here so the three views can never disagree about a label.
 func (m *dbusMenu) items() []dbusMenuItemProps {
-	pauseLabel := "Pause Observation"
-	if m.paused.Load() {
-		pauseLabel = "Resume Observation"
-	}
+	statusLabel, pauseLabel := pauseLabels(m.tracking.IsPaused())
 	item := func(id int32, label string, enabled bool) dbusMenuItemProps {
 		return dbusMenuItemProps{ID: id, Properties: map[string]dbus.Variant{
 			"label":   dbus.MakeVariant(label),
@@ -205,7 +208,7 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 		}}
 	}
 
-	status := item(menuStatus, m.statusLabel(), false)
+	status := item(menuStatus, statusLabel, false)
 	status.Properties["icon-data"] = dbus.MakeVariant(m.statusIcon())
 
 	return []dbusMenuItemProps{
@@ -222,22 +225,35 @@ func (m *dbusMenu) items() []dbusMenuItemProps {
 
 // refresh bumps the menu revision and tells the shell to re-read the layout, which is how a toggled label reaches the screen.
 func (m *dbusMenu) refresh() {
+	status, _ := pauseLabels(m.tracking.IsPaused())
+	m.drawnStatus.Store(&status)
 	rev := m.menuRev.Add(1)
 	if m.conn != nil {
 		m.conn.Emit("/MenuBar", "com.canonical.dbusmenu.LayoutUpdated", rev, int32(0))
 	}
 }
 
-func (m *dbusMenu) statusLabel() string {
-	if m.paused.Load() {
-		return "Paused"
+// watchPause redraws the menu when the tracker has been paused or resumed by something other than the tray, a pause has run out or setup has finished, until ctx ends.
+// ponytail: polled, because the tracker tells no one when it is paused; a pause observer on tracker.Daemon would make this event-driven.
+func (m *dbusMenu) watchPause(ctx context.Context) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			status, _ := pauseLabels(m.tracking.IsPaused())
+			if drawn := m.drawnStatus.Load(); drawn == nil || *drawn != status {
+				m.refresh()
+			}
+		}
 	}
-	return "Observing"
 }
 
-// statusIcon returns the rendered status dot (PNG bytes) matching the current tracking state, for the menu item's icon-data property.
+// statusIcon returns the rendered status dot (PNG bytes) matching the current tracking state, for the menu item's icon-data property. Waiting on setup is paused too.
 func (m *dbusMenu) statusIcon() []byte {
-	if m.paused.Load() {
+	if m.tracking.IsPaused() {
 		return dotPaused
 	}
 	return dotActive
@@ -264,21 +280,18 @@ func (m *dbusMenu) Event(id int32, eventId string, data dbus.Variant, timestamp 
 	case menuOpen:
 		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + "/window?action=open")
 	case menuPause:
-		var endpoint string
-		if m.paused.Load() {
-			endpoint = "/resume"
-			m.paused.Store(false)
-		} else {
-			endpoint = "/pause"
-			m.paused.Store(true)
-		}
-		go authedDaemonGet("http://127.0.0.1:" + DaemonPort + endpoint)
-		// signal from root so both the status label (id 1) and pause label (id 3) refresh
-		m.refresh()
+		paused := m.tracking.IsPaused()
+		// The redraw waits for the request, since the labels are read off the tracker it changes; signalled from root so both the status label (id 1) and pause label (id 3) refresh.
+		go func() {
+			clickPauseItem(paused)
+			m.refresh()
+		}()
 	case menuMeeting:
 		toggleMeeting(m.ctx, m.rec)
 		m.refresh()
 	case menuQuit:
+		// Recorded as a quit the way POST /quit is, before the shutdown starts, so a restart asked for during it is refused rather than bringing June back after the user quit it.
+		beginQuit()
 		select {
 		case m.quitCh <- struct{}{}:
 		default:
@@ -332,7 +345,7 @@ type dbusMenuItemProps struct {
 // runDaemonSupervisor on Linux registers an SNI tray icon via D-Bus and provides menu items: Open June, Pause/Resume Tracking, and Quit June.
 // If SNI registration fails it falls back to headless mode.
 func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
-	stop, _, err := startDaemonServices(ctx, listener)
+	stop, tracking, err := startDaemonServices(ctx, listener)
 	if err != nil {
 		slog.Error("failed to start daemon services", "error", err)
 		listener.Close()
@@ -340,7 +353,11 @@ func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	}
 
 	quitCh := make(chan struct{}, 1)
-	if trayErr := registerSNI(ctx, quitCh); trayErr != nil {
+	trayErr := errors.New("JUNE_NO_TRAY is set")
+	if trayWanted() {
+		trayErr = registerSNI(ctx, quitCh, tracking)
+	}
+	if trayErr != nil {
 		slog.Warn("system tray unavailable, running headless", "error", trayErr)
 		slog.Info("Daemon running in background (headless, no system tray).")
 		select {
@@ -362,9 +379,9 @@ func runDaemonSupervisor(ctx context.Context, listener net.Listener) {
 	stop()
 }
 
-// registerSNI exports the StatusNotifierItem and dbusmenu objects and registers with the StatusNotifierWatcher.
+// registerSNI exports the StatusNotifierItem and dbusmenu objects and registers with the StatusNotifierWatcher. Input: the daemon's context, the channel Quit June sends on, and the tracker whose pause state the menu shows.
 // Returns an error if any step fails so the caller can fall back to headless operation.
-func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
+func registerSNI(ctx context.Context, quitCh chan<- struct{}, tracking *tracker.Daemon) error {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return fmt.Errorf("connect session bus: %w", err)
@@ -427,10 +444,10 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 	}
 
 	// Export dbusmenu at /MenuBar.
-	menu := &dbusMenu{ctx: ctx, quitCh: quitCh, conn: conn, rec: meetingRecorder}
+	menu := &dbusMenu{ctx: ctx, quitCh: quitCh, conn: conn, rec: meetingRecorder, tracking: tracking}
 	// The menu's own clicks redraw it themselves; this covers a recording started or stopped by anything else, which since the microphone watcher landed is how most of them begin.
 	if meetingRecorder != nil {
-		meetingRecorder.SetOnStateChange(menu.refresh)
+		meetingRecorder.AddStateObserver(menu.refresh)
 	}
 	if err := conn.Export(menu, menuPath, "com.canonical.dbusmenu"); err != nil {
 		conn.Close()
@@ -485,6 +502,8 @@ func registerSNI(ctx context.Context, quitCh chan<- struct{}) error {
 			}
 		}()
 	}
+
+	go menu.watchPause(ctx)
 
 	// Close the connection when context is cancelled.
 	go func() {

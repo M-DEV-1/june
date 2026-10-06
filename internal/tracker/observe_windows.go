@@ -11,7 +11,7 @@ import (
 	"june/internal/act"
 )
 
-// Observe bounds on Windows: the whole read gets the same 4 s the Linux walk does, and the script walks for at most uiaObserveWalkMS of it so a large page answers with what it read in time.
+// Observe bounds on Windows: the whole read gets the same 4 s the Linux walk does, and the script walks for at most uiaObserveWalkMS of it so a large page answers with what it read in time; less when a cold host's start has already spent part of the 4 s (see uiaCall).
 const (
 	uiaObserveTimeout = 4 * time.Second
 	uiaObserveWalkMS  = 2500

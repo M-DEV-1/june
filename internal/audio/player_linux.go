@@ -3,13 +3,18 @@
 package audio
 
 import (
+	"context"
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jfreymuth/pulse"
 	"github.com/jfreymuth/pulse/proto"
 )
+
+// The voice preview finds Drain by a type assertion, so a Drain that drifts from Drainer would compile and leave the preview cut off; this makes it fail to build instead.
+var _ Drainer = (*pulseSpeaker)(nil)
 
 type pulseSpeaker struct {
 	client     *pulse.Client
@@ -133,6 +138,33 @@ drain:
 		default:
 			break drain
 		}
+	}
+}
+
+// Drain waits until readFn has handed everything queued to the server, then for as long as the server's buffer takes to play it out, or until ctx ends. The library's own Drain would wait for an underrun that never comes, since readFn answers every request, with silence when nothing is queued.
+func (s *pulseSpeaker) Drain(ctx context.Context) error {
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		s.mu.Lock()
+		empty := len(s.buffer) < 2 && len(s.chunks) == 0
+		s.mu.Unlock()
+		if empty {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+	// The server holds up to twice the latency asked for (PlaybackLatency sets the most it keeps at double the target), and the last of the audio is somewhere in it.
+	tail := 2 * time.Duration(s.stream.BufferSizeBytes()) * time.Second / (24000 * 2)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(tail):
+		return nil
 	}
 }
 

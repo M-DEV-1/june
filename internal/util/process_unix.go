@@ -12,6 +12,11 @@ func OwnProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+// StartProcessGroup starts cmd. The process group OwnProcessGroup gave it is all KillProcessGroup needs here, so there is nothing to let go of afterwards. Output: a release func that does nothing, and the start error.
+func StartProcessGroup(cmd *exec.Cmd) (release func(), err error) {
+	return func() {}, cmd.Start()
+}
+
 // KillProcessGroup kills a started cmd and everything in its process group. Input: a cmd set up with OwnProcessGroup and already started. Output: the kill error, if any.
 func KillProcessGroup(cmd *exec.Cmd) error {
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

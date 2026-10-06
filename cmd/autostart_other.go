@@ -18,3 +18,6 @@ func setAutostart(on bool) error {
 
 // autostartCurrent always reports true: there is no entry to fall out of date.
 func autostartCurrent() bool { return true }
+
+// autostartSystemChoice reports no choice: there is no startup list to read here.
+func autostartSystemChoice() (on, ok bool) { return false, false }

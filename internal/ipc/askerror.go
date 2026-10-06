@@ -6,24 +6,35 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os/exec"
 	"regexp"
+	"strings"
 
+	"june/internal/agent"
 	"june/internal/util"
 
 	"google.golang.org/genai"
 )
 
-// The sentences a failed ask can read as. Each says what happened and, where there is something to do about it, what to do; none carries a URL, a status code or any of the provider's own JSON.
+// The sentences a failed ask can read as. Each says what happened and, where there is something to do about it, what to do; none carries a URL, a status code or any of the provider's own JSON. Nor does any send the person to a terminal, a file or a variable name: the window has a key box in Settings → Brain and in setup, and a lapsed login is signed back into in the provider's own app, which is where these point.
 const (
-	askQuotaSpent  = "Today's free Gemini requests are used up. It works again tomorrow, or now on another brain."
-	askTooFast     = "That is too many requests in a row. Give it a moment, then ask again."
-	askOverloaded  = "Every model is busy right now. Ask again in a moment."
-	askKeyRefused  = "The key for this brain was refused. Check it in settings, then ask again."
-	askMalformed   = "The model turned the question down as malformed. Try asking it another way."
-	askTooLong     = "That took too long and was given up on. Ask again, or ask for less at once."
-	askStopped     = "That question was stopped before it was answered."
-	askNoNetwork   = "No network. The model cannot be reached from here."
-	askUnexplained = "That ask failed. The whole message is in the log."
+	askQuotaSpent           = "Today's free Gemini requests are used up. It works again tomorrow, or now on another brain."
+	askTooFast              = "That is too many requests in a row. Give it a moment, then ask again."
+	askOverloaded           = "Every model is busy right now. Ask again in a moment."
+	askKeyRefused           = "The key for this brain was refused. Check it in Settings → Brain, then ask again."
+	askNoKey                = "Gemini has no key on this computer. Add a free one in Settings → Brain, or pick another brain."
+	askMalformed            = "The model turned the question down as malformed. Try asking it another way."
+	askTooLong              = "That took too long and was given up on. Ask again, or ask for less at once."
+	askStopped              = "That question was stopped before it was answered."
+	askNoNetwork            = "No network. The model cannot be reached from here."
+	askLoggedOut            = "This brain's login has expired. Open its app and sign in again, or pick another brain."
+	askLoggedOutChatGPT     = "Your ChatGPT login has expired. Open the Codex app and sign in again, or pick another brain."
+	askLoggedOutClaude      = "Your Claude login has expired. Open Claude Code and sign in again, or pick another brain."
+	askLoggedOutAntigravity = "Your Antigravity login has expired. Open Antigravity and sign in again, or pick another brain."
+	askNoAnswer             = "The model ended its turn without an answer. Ask again, or pick another brain."
+	askNoBrain              = "No brain can answer right now. Add a Gemini key or sign in to one in Settings → Brain."
+	askNotInstalled         = "June cannot find this brain's program. If you just installed it, quit June and open it again."
+	askUnexplained          = "That ask failed for a reason June did not recognise. Ask again, or pick another brain."
 )
 
 // statusInText finds the HTTP status a provider named in a plain error string, for the paths that return no typed API error: another brain's HTTP client, and any error whose typed cause was flattened to text on the way here. It only reads a number that follows a word saying it is one, so a model name or a byte count is never mistaken for a status.
@@ -52,6 +63,21 @@ func askSentence(err error, text string) string {
 	case errors.Is(err, context.Canceled):
 		return askStopped
 	}
+	// Read before the status: an expired CLI login can carry the 401 it came back with, which reads as a refused API key these brains do not have. The text is matched too, for a stored error that is text alone; an expired Claude login and an empty agy turn both used to show as "That ask failed" (2026-10-03).
+	if errors.Is(err, agent.ErrLoggedOut) || util.ContainsAny(text, agent.ErrLoggedOut.Error()) {
+		return loggedOutSentence(text)
+	}
+	// A brain whose command line is not on June's PATH, most often one installed after June started. June re-reads Windows' Path before each ask (see Server.Ask), so this is what is left when even that has not found it.
+	if errors.Is(err, exec.ErrNotFound) || util.ContainsAny(text, exec.ErrNotFound.Error()) {
+		return askNotInstalled
+	}
+	if errors.Is(err, agent.ErrNoAnswer) || util.ContainsAny(text, "returned no text") {
+		return askNoAnswer
+	}
+	// With no Gemini key the router offers nobody on a machine with no CLI signed in, and its error had no sentence of its own, so it showed as "That ask failed".
+	if errors.Is(err, agent.ErrNoProvider) || util.ContainsAny(text, agent.ErrNoProvider.Error()) {
+		return askNoBrain
+	}
 	if code := askStatus(err, text); code != 0 {
 		switch code {
 		case 429:
@@ -71,6 +97,10 @@ func askSentence(err error, text string) string {
 	if noNetwork(err, text) {
 		return askNoNetwork
 	}
+	// Read before the timeout words: genai's missing-key error prints its whole ClientConfig, which contains "Timeout:(*time.Duration)(nil)", and was shown as "took too long".
+	if util.ContainsAny(text, "api key is required") {
+		return askNoKey
+	}
 	if util.ContainsAny(text, "context deadline exceeded", "deadline exceeded", "timed out", "timeout") {
 		return askTooLong
 	}
@@ -78,6 +108,24 @@ func askSentence(err error, text string) string {
 		return askStopped
 	}
 	return askUnexplained
+}
+
+// loggedOutSentence names the provider whose login lapsed, and the app it is signed back into, from the text of an ErrLoggedOut. Each brain's error names itself right after ErrLoggedOut's own words ("…: codex login…", "…: claude: …", "…: agy: …"), so that is where it is read, rather than anywhere in the text, where an Antigravity error can name a Claude model it was running. Input: the error's text. Output: the sentence, or the one that names no provider when the text names none June knows.
+func loggedOutSentence(text string) string {
+	_, after, ok := strings.Cut(text, agent.ErrLoggedOut.Error())
+	if !ok {
+		return askLoggedOut
+	}
+	after = strings.ToLower(strings.TrimLeft(after, ": "))
+	switch {
+	case strings.HasPrefix(after, "codex"):
+		return askLoggedOutChatGPT
+	case strings.HasPrefix(after, "claude"):
+		return askLoggedOutClaude
+	case strings.HasPrefix(after, "agy"), strings.HasPrefix(after, "antigravity"):
+		return askLoggedOutAntigravity
+	}
+	return askLoggedOut
 }
 
 // askStatus reads the HTTP status a failed call came back with. Input: the error and its text. Output: the status code, or 0 when the failure named none. The SDK returns its API error by value and callers wrap it, so both forms are asked for before the text is read.

@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
-import { usePickBrainMutation, type Brain, type UsageLimit } from "./api";
+import { AUTOMATIC_BRAIN, hotkeyFailed, useOpenUrlMutation, usePickBrainMutation, type Brain, type UsageLimit } from "./api";
 import { atBottom, hhmm, windowLabel } from "./format";
 import { Face } from "./face";
 import { ui, useAppDispatch, useAppSelector, type Queries } from "./store";
@@ -98,10 +98,52 @@ export function useFollowSelection(container: RefObject<HTMLElement | null>, id?
   }, [container, id]);
 }
 
+/** Whether this window runs on Windows, for the sentences that name the tray, the Start menu or Windows' own settings. */
+export const ON_WINDOWS = typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+
+/** What the window says in place of the shortcut's keys when another program holds them. Windows 11 tucks a new tray icon behind the ^ by the clock, so there the sentence says where to look. */
+export const NO_SHORTCUT = `Shortcut unavailable — open June from the tray${ON_WINDOWS ? " (the June icon by the clock; click ^ if you don't see it)" : ""}.`;
+
+/** Whether the shortcut that opens June is unavailable because another program already holds it. Input: none. Output: true once the window has said so. Asked once per mount: the window registers the shortcut only when it starts, so the answer cannot change while it runs. */
+export function useHotkeyUnavailable(): boolean {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void hotkeyFailed().then((f) => {
+      if (live) setFailed(f);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return failed;
+}
+
+/** Opens Settings scrolled to one of its sections, for the actions that fix a problem the window says somewhere else. Input: none. Output: the function, taking the section's id ("brain", "local-features"). */
+export function useOpenSettingsAt(): (section: string) => void {
+  const dispatch = useAppDispatch();
+  return (section) => {
+    dispatch(ui.placeShown("settings"));
+    // Settings has to be drawn before there is anything to scroll to.
+    setTimeout(() => document.getElementById(section)?.scrollIntoView({ block: "start" }), 50);
+  };
+}
+
+/** Opens a link in the person's own browser. Input: none. Output: the function that opens one. The daemon's POST /open is what reliably reaches the browser from the desktop window, which is why the reply markdown's links use it too; a plain browser tab with no daemon route to ask — the mock page — opens a tab of its own instead. */
+export function useOpenLink(): (href: string) => void {
+  const [openUrl] = useOpenUrlMutation();
+  return (href) => {
+    void openUrl(href)
+      .unwrap()
+      .catch(() => window.open(href, "_blank", "noopener"));
+  };
+}
+
 /** What an empty list says where there is room for one short line, with June's own face above it — the hero of the empty state, sized a step up from the page's own heading rather than left at the sidebar chip's size. Input: whether the daemon answered, the sentence for an answer with nothing in it, and whether the list is still on its first fetch. While loading, the real empty sentence is held back and a "thinking" face shows instead, so "Nothing to do." never flashes before the data it describes has actually arrived. Output: the block. */
 export function Nothing({ up, empty, loading }: { up: boolean; empty: string; loading?: boolean }) {
-  const state = loading ? "thinking" : up ? "watching" : "asleep";
-  const line = loading ? "Looking…" : up ? empty : "Not connected.";
+  const refused = useAppSelector((s) => s.progress.refused);
+  const state = loading ? "thinking" : up ? "watching" : refused ? "refused" : "asleep";
+  const line = loading ? "Looking…" : up ? empty : refused ? "The daemon refused this window's key." : "Not connected.";
   return (
     <div className="flex flex-col items-center gap-2 px-2 py-6 text-center">
       <Face state={state} className="text-title" />
@@ -110,11 +152,18 @@ export function Nothing({ up, empty, loading }: { up: boolean; empty: string; lo
   );
 }
 
-/** What an empty pane says, which is the whole reading side of the window and so gets the four parts an empty state is made of: June's own face as its hero, one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, the action, and whether the pane is still on its first fetch. While loading, the hint and action are held back and the face shows "thinking" with a short "Looking…" in place of the real empty line, so the real copy never flashes before data arrives. Output: a centred block. */
+/** What an empty pane says, which is the whole reading side of the window and so gets the four parts an empty state is made of: June's own face as its hero, one line in the text colour naming what is not there, one muted sentence saying what to do about it, and the action itself when there is one to offer. Input: whether the daemon answered, the line for an answer with nothing in it, the sentence under it, the action, and whether the pane is still on its first fetch. While loading, the hint and action are held back and the face shows "thinking" with a short "Looking…" in place of the real empty line, so the real copy never flashes before data arrives. A daemon that answered but refused this window's key (progress.refused) says that rather than that nothing is answering, since the fix is the opposite one: the daemon is up, and it is the window that needs the new key. Output: a centred block. */
 export function Blank({ up, empty, hint, action, loading }: { up: boolean; empty: string; hint?: string; action?: ReactNode; loading?: boolean }) {
-  const state = loading ? "thinking" : up ? "watching" : "asleep";
-  const title = loading ? "Looking…" : up ? empty : "Nothing is answering";
-  const under = loading ? undefined : up ? hint : `June's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
+  const refused = useAppSelector((s) => s.progress.refused);
+  const state = loading ? "thinking" : up ? "watching" : refused ? "refused" : "asleep";
+  const title = loading ? "Looking…" : up ? empty : refused ? "June's daemon refused this window's key" : "Nothing is answering";
+  const under = loading
+    ? undefined
+    : up
+      ? hint
+      : refused
+        ? "The daemon is running, but on a different key from the one this window holds. Reopen the window, or restart June, so it reads the current one."
+        : `June's daemon should be listening on ${DAEMON_ADDRESS}. The window keeps trying and fills in on its own once it is back.`;
   return (
     <div className="m-auto flex max-w-[46ch] flex-col items-center gap-3 px-8 py-12 text-center">
       <Face state={state} className="text-title" />
@@ -398,16 +447,35 @@ function noteClause(note: string): string {
   return clause.charAt(0).toUpperCase() + clause.slice(1);
 }
 
-/** The brain control in the header of Chats and Tasks: which backend answers this conversation, and the list to pick another from. Input: the brain the conversation names, which is "" when it was opened without one, and every brain the daemon reported. Output: the control. A brain that is not signed in is shown greyed and cannot be picked; picking one writes the choice through POST /brains, which is what makes it the daemon's default rather than something this window remembers. */
-export function BrainPicker({ current, brains }: { current: string; brains: Brain[] }) {
+/** Where each brain's lapsed login is signed back into, by the name a person knows it under: the daemon's own notes name a terminal command ("run codex login"), which nobody who installed June from a setup program should be sent to. */
+const SIGN_IN_APP: Record<string, string> = {
+  codex: "the Codex app",
+  claude: "Claude Code",
+  antigravity: "Antigravity",
+  grok: "Grok",
+};
+
+/** The line under a brain that is not signed in. Input: the row. Output: "Open {app} and sign in again" for a login its provider refused — the same reading onboarding's loginsFound makes of the note — and otherwise the note itself, unless it names a terminal or a command, in which case just "Not signed in". Not even on a title: a tooltip naming a terminal command is still the window telling someone to open a terminal. */
+function signedOutLine(b: Brain): string {
+  const note = b.limits_note ?? "";
+  if (/expired|refused|sign in again|log in again/i.test(note)) return `Open ${SIGN_IN_APP[b.id] ?? b.name} and sign in again`;
+  if (!note || /terminal|\brun\b|_API_KEY|\.env\b|config/i.test(note)) return "Not signed in";
+  return note.charAt(0).toUpperCase() + note.slice(1);
+}
+
+/** The brain control in the header of Chats and Tasks, and on Settings: which backend answers this conversation, and the list to pick another from. Input: the brain the conversation names, which is "" when it was opened without one; every brain the daemon reported; and whether no brain is pinned and the daemon's router picks one per question. Output: the control. A brain that is not signed in is shown greyed and cannot be picked; picking one writes the choice through POST /brains, which is what makes it the daemon's default rather than something this window remembers, and "Automatic" at the top of the list is the way back to letting June pick. */
+export function BrainPicker({ current, brains, automatic = false }: { current: string; brains: Brain[]; automatic?: boolean }) {
   const dispatch = useAppDispatch();
   const [pickBrain] = usePickBrainMutation();
-  // A conversation the daemon opened without naming a brain is answered by the one GET /brains marks default, so the header names that one rather than the word "default".
-  const chosen = brains.find((b) => b.id === current || b.name === current) ?? (current ? undefined : brains.find((b) => b.default));
+  // A conversation the daemon opened without naming a brain is answered by whatever the daemon is set to: its router's own choice when nothing is pinned, and otherwise the one GET /brains marks default, which the header names rather than the word "default".
+  const named = current ? brains.find((b) => b.id === current || b.name === current) : undefined;
+  const auto = !current && automatic;
+  const chosen = named ?? (current || auto ? undefined : brains.find((b) => b.default));
 
-  const pick = async (b: Brain) => {
+  /** Picks a brain, or with none hands the choice back to the daemon's router. The brain's own model goes with it as it stands, "" included: filling in the first listed model pinned one nobody had picked and wrote it into june-config.json. */
+  const pick = async (b?: Brain) => {
     try {
-      await pickBrain({ brain: b.id, model: b.model || b.models?.[0] || "" }).unwrap();
+      await pickBrain(b ? { brain: b.id, model: b.model } : { brain: AUTOMATIC_BRAIN }).unwrap();
     } catch {
       dispatch(ui.noticed({ text: "Could not change the brain", kind: "error" }));
     }
@@ -417,7 +485,7 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="sm" className="gap-1 px-1.5 font-normal text-muted-foreground hover:text-foreground">
-          Brain: <span className="text-foreground">{chosen ? chosen.name : current || "not set"}</span>
+          Brain: <span className="text-foreground">{auto ? "Automatic" : chosen ? chosen.name : current || "not set"}</span>
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
@@ -425,32 +493,39 @@ export function BrainPicker({ current, brains }: { current: string; brains: Brai
         {brains.length === 0 ? (
           <DropdownMenuLabel className="font-normal text-muted-foreground">No brains reported</DropdownMenuLabel>
         ) : (
-          brains.map((b, i) => (
-            <Fragment key={b.id}>
-              {i > 0 ? <DropdownMenuSeparator /> : null}
-              <DropdownMenuItem disabled={!b.signed_in} onClick={() => void pick(b)} className="flex-col items-stretch gap-2 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className={chosen && b.id === chosen.id ? "font-medium" : undefined}>{b.name}</span>
-                  <span className="text-meta text-muted-foreground">{b.signed_in ? b.model || b.models?.[0] || "" : "not signed in"}</span>
-                </div>
-                {b.limits && b.limits.length > 0 ? (
-                  <div className="flex flex-col gap-2">
-                    {b.limits.map((l, j) => (
-                      <UsageBar key={`${j}-${l.window}`} limit={l} />
-                    ))}
+          <>
+            <DropdownMenuItem onClick={() => void pick()} className="flex-col items-stretch gap-1 py-2">
+              <span className={auto ? "font-medium" : undefined}>Automatic — June picks</span>
+              <p className="text-meta text-muted-foreground">A signed-in brain for each question, none pinned</p>
+            </DropdownMenuItem>
+            {brains.map((b) => (
+              <Fragment key={b.id}>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem disabled={!b.signed_in} onClick={() => void pick(b)} className="flex-col items-stretch gap-2 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className={chosen && b.id === chosen.id ? "font-medium" : undefined}>{b.name}</span>
+                    <span className="text-meta text-muted-foreground">{b.signed_in ? b.model || "default model" : "not signed in"}</span>
                   </div>
-                ) : !b.signed_in ? (
-                  <p className="text-meta text-muted-foreground">Not signed in</p>
-                ) : b.limits_note ? (
-                  <p className="text-meta text-muted-foreground" title={b.limits_note}>
-                    {noteClause(b.limits_note)}
-                  </p>
-                ) : (
-                  <p className="text-meta text-muted-foreground">No usage data</p>
-                )}
-              </DropdownMenuItem>
-            </Fragment>
-          ))
+                  {/* A brain that cannot be called has no allowance worth drawing — Gemini with no key still reports an untouched daily window — and what it does have to say is usually how to sign in. */}
+                  {!b.signed_in ? (
+                    <p className="text-meta text-muted-foreground">{signedOutLine(b)}</p>
+                  ) : b.limits && b.limits.length > 0 ? (
+                    <div className="flex flex-col gap-2">
+                      {b.limits.map((l, j) => (
+                        <UsageBar key={`${j}-${l.window}`} limit={l} />
+                      ))}
+                    </div>
+                  ) : b.limits_note ? (
+                    <p className="text-meta text-muted-foreground" title={b.limits_note}>
+                      {noteClause(b.limits_note)}
+                    </p>
+                  ) : (
+                    <p className="text-meta text-muted-foreground">No usage data</p>
+                  )}
+                </DropdownMenuItem>
+              </Fragment>
+            ))}
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

@@ -25,7 +25,8 @@ func TestBrainsReadsTheLoginFiles(t *testing.T) {
 	}
 
 	cfg := config.JuneConfig{Brain: config.BrainConfig{Provider: config.BrainClaudeCLI, Model: "sonnet"}}
-	onPath := func(name string) bool { return name == "grok" }
+	// Claude counts as signed in only with its command on PATH as well as its login file, since an ask runs the command.
+	onPath := func(name string) bool { return name == "grok" || name == "claude" }
 
 	list := brainList(context.Background(), cfg, home, onPath, nil)
 	byID := map[string]BrainView{}
@@ -91,7 +92,7 @@ func TestBrainsPostPersists(t *testing.T) {
 	t.Setenv("JUNE_DATA_DIR", t.TempDir())
 	cfg := &config.JuneConfig{}
 	rec := httptest.NewRecorder()
-	Brains(NewLiveConfig(cfg, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
+	Brains(NewLiveConfig(cfg, config.ReadConfig, config.SaveConfig), nil)(rec, httptest.NewRequest(http.MethodPost, "/brains", strings.NewReader(`{"brain":"claude","model":"opus"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /brains = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
@@ -122,7 +123,7 @@ func TestBrainsPostPersists(t *testing.T) {
 
 // TestBrains_ConcurrentPostAndRead runs POST /brains against GET /brains under the race detector, which is what a brain pick while the picker refetches looks like; the GET reads the BrainModels map, so a shared map would be caught here.
 func TestBrains_ConcurrentPostAndRead(t *testing.T) {
-	live := NewLiveConfig(&config.JuneConfig{}, func(config.JuneConfig) error { return nil })
+	live := NewLiveConfig(&config.JuneConfig{}, nil, func(config.JuneConfig) error { return nil })
 	h := Brains(live, nil)
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {

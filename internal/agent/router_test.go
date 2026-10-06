@@ -9,7 +9,7 @@ import (
 // readyAll makes every provider on the card list usable, so a test says what it is about rather than depending on which CLIs this machine happens to have.
 func readyAll(t *testing.T) {
 	t.Helper()
-	for _, id := range []string{ProviderCodex, ProviderClaude, ProviderAgy} {
+	for _, id := range []string{ProviderGemini, ProviderCodex, ProviderClaude, ProviderAgy} {
 		SetProviderReady(id, true)
 	}
 	t.Cleanup(ResetRouter)

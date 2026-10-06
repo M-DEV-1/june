@@ -296,16 +296,24 @@ func StripObjectChars(s string) string {
 	return strings.Join(kept, "\n")
 }
 
+// stripControls drops the object characters and turns every other control character into the separator it stands for. Input: a raw capture. Output: the text with "\n" as its only line break.
+// A line ends in "\r\n" on Windows and, in the text Win11 Notepad's TextPattern gives, in a bare "\r"; Word ends a line inside a paragraph with "\v" and a page with "\f". Each of them deleted, as every control character other than "\n" and "\t" used to be, fused the last word of one line onto the first of the next ("alpha 42second") in the stored text, the keyword index and the embedding alike. Any other control character becomes a space, which can split a token but never joins two.
 func stripControls(s string) string {
+	if strings.ContainsRune(s, '\r') {
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+	}
 	return strings.Map(func(r rune) rune {
 		if isObjectChar(r) {
 			return -1
 		}
-		if r == '\n' || r == '\t' {
+		switch r {
+		case '\n', '\t':
 			return r
+		case '\r', '\v', '\f':
+			return '\n'
 		}
 		if unicode.IsControl(r) {
-			return -1
+			return ' '
 		}
 		return r
 	}, s)

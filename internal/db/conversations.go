@@ -8,7 +8,13 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+
+	"june/internal/util"
 )
+
+// conversationTitleRuneCap bounds a conversation's title. The sidebar draws one line of it, and nothing upstream bounds what a title is made from: a rename took 5,000 characters, and a task's title or a question's first eight words can be a pasted page.
+const conversationTitleRuneCap = 200
 
 // Conversation is one thread of question and answer in the window. Last is the text of its newest turn, empty for a conversation nobody has spoken in yet; LastKind is that turn's kind ("ask", "dictation", "voice" or "error"), also empty when there is no turn yet.
 type Conversation struct {
@@ -42,9 +48,9 @@ type UserTask struct {
 	Created        time.Time
 }
 
-// CreateConversation opens a new conversation. Input: its title and the brain that will answer in it, both allowed to be empty. Output: the new conversation's id, or an error from the store.
+// CreateConversation opens a new conversation. Input: its title and the brain that will answer in it, both allowed to be empty; a title past conversationTitleRuneCap runes is cut to it. Output: the new conversation's id, or an error from the store.
 func (s *Store) CreateConversation(ctx context.Context, title, brain string) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO conversations (title, brain) VALUES (?, ?)`, strings.TrimSpace(title), strings.TrimSpace(brain))
+	res, err := s.db.ExecContext(ctx, `INSERT INTO conversations (title, brain) VALUES (?, ?)`, util.Runes(strings.TrimSpace(title), conversationTitleRuneCap), strings.TrimSpace(brain))
 	if err != nil {
 		return 0, fmt.Errorf("create conversation: %w", err)
 	}
@@ -56,6 +62,7 @@ func (s *Store) CreateConversation(ctx context.Context, title, brain string) (in
 }
 
 // ListConversations returns the most recently touched conversations, newest first. Input: how many to return. Output: each conversation with the text and kind of its newest turn as Last and LastKind.
+// A conversation one of the user's tasks was opened alongside is left out until something is said in it. Every new task opens one up front, so the task's own screen has a thread to ask into, and listing them made each task an empty chat beside the real ones; the Tasks screen reads its thread by id, not off this list, and the first question asked in it brings it into the list like any other chat.
 func (s *Store) ListConversations(ctx context.Context, limit int) ([]Conversation, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -65,6 +72,8 @@ func (s *Store) ListConversations(ctx context.Context, limit int) ([]Conversatio
 			IFNULL((SELECT t.text FROM conversation_turns t WHERE t.conversation_id = c.id ORDER BY t.id DESC LIMIT 1), ''),
 			IFNULL((SELECT t.kind FROM conversation_turns t WHERE t.conversation_id = c.id ORDER BY t.id DESC LIMIT 1), '')
 		FROM conversations c
+		WHERE EXISTS (SELECT 1 FROM conversation_turns t WHERE t.conversation_id = c.id)
+		   OR NOT EXISTS (SELECT 1 FROM user_tasks u WHERE u.conversation_id = c.id)
 		ORDER BY c.updated_at DESC, c.id DESC
 		LIMIT ?`, limit)
 	if err != nil {
@@ -83,9 +92,9 @@ func (s *Store) ListConversations(ctx context.Context, limit int) ([]Conversatio
 	return out, rows.Err()
 }
 
-// RenameConversation changes a conversation's title. Input: its id and the new title (trimmed before storing). Output: an error when the title is blank or no conversation has that id — a rename the store never took must not be reported as done.
+// RenameConversation changes a conversation's title. Input: its id and the new title (trimmed before storing, and cut to conversationTitleRuneCap runes). Output: an error when the title is blank or no conversation has that id — a rename the store never took must not be reported as done.
 func (s *Store) RenameConversation(ctx context.Context, id int64, title string) error {
-	title = strings.TrimSpace(title)
+	title = util.Runes(strings.TrimSpace(title), conversationTitleRuneCap)
 	if title == "" {
 		return fmt.Errorf("a conversation needs a title")
 	}
@@ -258,17 +267,37 @@ func (s *Store) SetUserTaskTitle(ctx context.Context, id int64, title string) er
 // DeleteUserTask removes one of the user's own tasks outright. Input: the task's id. Output: an error when nothing matched it.
 //
 // Ticking a task done is not the same as never having wanted it: a task June added by mistake, or one the user asks it to get rid of, has to go rather than sit on the list struck through. Nothing in the product could remove one before 2026-09-12.
+//
+// The conversation opened alongside the task goes with it when nothing was ever said in it and no other task points at it: it exists only because the task did, and left behind it was an empty thread nothing linked to any more, which ListConversations then showed as a chat. One that was asked in is the user's record of what was said and stays.
 func (s *Store) DeleteUserTask(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM user_tasks WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("delete user task: %w", err)
+		return fmt.Errorf("delete user task: begin tx: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete user task: %w", err)
-	}
-	if n == 0 {
+	defer tx.Rollback() //nolint:errcheck — no-op after a successful Commit
+
+	var convID int64
+	err = tx.QueryRowContext(ctx, `SELECT conversation_id FROM user_tasks WHERE id = ?`, id).Scan(&convID)
+	if err == sql.ErrNoRows {
 		return fmt.Errorf("no task with id %d", id)
+	}
+	if err != nil {
+		return fmt.Errorf("delete user task: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_tasks WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete user task: %w", err)
+	}
+	if convID != 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM conversations
+			WHERE id = ?
+			  AND NOT EXISTS (SELECT 1 FROM conversation_turns t WHERE t.conversation_id = conversations.id)
+			  AND NOT EXISTS (SELECT 1 FROM user_tasks u WHERE u.conversation_id = conversations.id)`, convID); err != nil {
+			return fmt.Errorf("delete user task: its empty conversation: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete user task: commit: %w", err)
 	}
 	return nil
 }
@@ -318,7 +347,21 @@ func (s *Store) ActiveDays(ctx context.Context, since time.Time) ([]string, erro
 	return out, rows.Err()
 }
 
-// DeleteConversation removes a conversation and every turn said in it. Output: an error when no conversation has that id — a delete the store never took must not be reported as done.
+// screenAskHead and screenAskGap are the two pieces ScreenAsk puts around the screen text.
+const (
+	screenAskHead = "On screen: "
+	screenAskGap  = "\n\n"
+)
+
+// ScreenAsk is the question a window ask is put to the model as when the hover sent what was on screen with it: "On screen: " and the screen text, a blank line, then the question. Input: the screen text and the question as the user typed it. Output: the composed text. It lives here, not beside the one caller in internal/ipc, because DeleteConversation has to recognise this exact shape in a lesson's goal and this package cannot import that one.
+func ScreenAsk(screen, question string) string {
+	return screenAskHead + screen + screenAskGap + question
+}
+
+// DeleteConversation removes a conversation and every turn said in it, and what the asks in it left in the other tables. Output: an error when no conversation has that id — a delete the store never took must not be reported as done.
+//
+// Deleting the turns alone left the rest of the conversation behind for up to a month: every tool call made for it (tool_calls, with the tool's own output — screen text, recall excerpts) until the age prune, the screen runs its questions made (act_runs, with each step's result, which the act-reference block reads straight into later prompts), its questions on the token ledger, and the screen text a window ask carries ahead of its question (see ScreenAsk), which the end-of-ask hook files as the goal of every lesson that run taught. The tool calls carry the conversation's id and go. The rest carry only the question, so they are matched on the text of this conversation's own questions, and a question that some other conversation still holds the same words of is left alone, since the row may be that conversation's: an act run is deleted, a ledger row loses only its question, because its counts are what the day's spend is read from, and a lesson's goal is cut back to the bare question. A run behind a long job (job_id set) belongs to /act, not to any chat, and is never touched here.
+// What June learned from the conversation is memory rather than the conversation, and stays, by the same rule PruneActRuns keeps: a lesson keeps its line and its hits and misses, and an act run a "How I did X" note was written from is kept with the note, because the note is read back as memory and the run is the record behind it. Both still name the question, as memory does; a note goes when June is asked to forget it, and its run is then the prune's to take.
 func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -326,6 +369,38 @@ func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 	}
 	defer tx.Rollback() //nolint:errcheck — no-op after a successful Commit
 
+	// Every match below reads this conversation's questions, so they run before its turns are deleted.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM act_runs WHERE id IN (
+			SELECT r.id FROM act_runs r
+			WHERE r.job_id = ''
+			  AND r.question IN (SELECT t.text FROM conversation_turns t WHERE t.conversation_id = ? AND t.role = 'you')
+			  AND NOT EXISTS (SELECT 1 FROM conversation_turns o WHERE o.conversation_id <> ? AND o.role = 'you' AND o.text = r.question)
+			  AND NOT `+runHasNote+`
+		)`, id, id); err != nil {
+		return fmt.Errorf("delete conversation: its act runs: %w", err)
+	}
+	screenLessons, err := screenLessonsOf(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
+	}
+	for _, l := range screenLessons {
+		if _, err := tx.ExecContext(ctx, `UPDATE lessons SET goal = ? WHERE id = ?`, l.Goal, l.ID); err != nil {
+			return fmt.Errorf("delete conversation: the screen text in lesson %d's goal: %w", l.ID, err)
+		}
+	}
+	// The ledger keeps the first questionRuneCap runes of a question, so the turns are cut the same way before they are compared; SQLite's substr counts characters, the same unit util.Runes cuts in.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE token_use SET question = ''
+		WHERE question <> ''
+		  AND question IN (SELECT substr(t.text, 1, ?) FROM conversation_turns t WHERE t.conversation_id = ? AND t.role = 'you')
+		  AND NOT EXISTS (SELECT 1 FROM conversation_turns o WHERE o.conversation_id <> ? AND o.role = 'you' AND substr(o.text, 1, ?) = token_use.question)`,
+		questionRuneCap, id, id, questionRuneCap); err != nil {
+		return fmt.Errorf("delete conversation: its questions on the token ledger: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tool_calls WHERE conversation_id = ?`, id); err != nil {
+		return fmt.Errorf("delete conversation: its tool calls: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_turns WHERE conversation_id = ?`, id); err != nil {
 		return fmt.Errorf("delete conversation: turns: %w", err)
 	}
@@ -347,7 +422,67 @@ func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete conversation: commit: %w", err)
 	}
+	// A lesson's vector was embedded from its goal and its line, so it is embedded again from the bare question; with no embedder the old vector stays, since it holds no text and dropping it would leave the lesson findable by naming words alone.
+	for _, l := range screenLessons {
+		s.embedLessonAsync(l.ID, l.Goal, l.Lesson)
+	}
 	return nil
+}
+
+// screenLessonsOf finds the lessons whose goal is one of a conversation's questions with the screen text still in front of it (see ScreenAsk). Input: ctx, the open transaction and the conversation's id. Output: those lessons with Goal already cut back to the bare question, trimmed the way AddLesson trims a goal, or an error from the store. A question some other conversation still holds the same words of is skipped, the rule DeleteConversation applies to every match on question text.
+func screenLessonsOf(ctx context.Context, tx *sql.Tx, id int64) ([]Lesson, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT t.text FROM conversation_turns t
+		WHERE t.conversation_id = ? AND t.role = 'you'
+		  AND NOT EXISTS (SELECT 1 FROM conversation_turns o WHERE o.conversation_id <> ? AND o.role = 'you' AND o.text = t.text)`, id, id)
+	if err != nil {
+		return nil, fmt.Errorf("its questions: %w", err)
+	}
+	// tail is how the question ends a goal, which AddLesson trimmed as a whole, so only the question's own trailing space is gone; bare is the goal it becomes, trimmed as AddLesson would trim a goal that was only the question.
+	type question struct{ tail, bare string }
+	var questions []question
+	for rows.Next() {
+		var q string
+		if err := rows.Scan(&q); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan its question: %w", err)
+		}
+		// A blank question would match every goal that ends in the gap.
+		if bare := strings.TrimSpace(q); bare != "" {
+			questions = append(questions, question{tail: strings.TrimRightFunc(q, unicode.IsSpace), bare: bare})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("its questions: %w", err)
+	}
+	if len(questions) == 0 {
+		return nil, nil
+	}
+
+	rows, err = tx.QueryContext(ctx, `SELECT id, goal, lesson FROM lessons WHERE instr(goal, ?) = 1`, screenAskHead)
+	if err != nil {
+		return nil, fmt.Errorf("lessons learned with the screen: %w", err)
+	}
+	defer rows.Close()
+	var out []Lesson
+	for rows.Next() {
+		var l Lesson
+		if err := rows.Scan(&l.ID, &l.Goal, &l.Lesson); err != nil {
+			return nil, fmt.Errorf("scan a lesson learned with the screen: %w", err)
+		}
+		for _, q := range questions {
+			if strings.HasSuffix(l.Goal, screenAskGap+q.tail) {
+				l.Goal = q.bare
+				out = append(out, l)
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lessons learned with the screen: %w", err)
+	}
+	return out, nil
 }
 
 // EpisodeCountsByDay returns how many episodes were recorded on each local calendar day in [since, until] — the day list's "seen" count. Output: day ('YYYY-MM-DD') to count, with no entry for a day that had none.

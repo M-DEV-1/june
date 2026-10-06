@@ -20,6 +20,8 @@ const ActEventType = "act"
 // ActEmitter builds the sink a Runner broadcasts its progress through. Input: the server whose /events hub the window is listening to. Output: the function to hand actjob.New, which turns each job event into one stream event: Text is the line a hover shows, Detail is the same event as JSON for a client that wants the parts.
 func ActEmitter(s *Server) func(actjob.Event) {
 	return func(ev actjob.Event) {
+		// A job moving on is the person's own work going on, which a restart nobody asked for waits out (see LastUse).
+		s.use.touch()
 		detail, err := json.Marshal(ev)
 		if err != nil {
 			detail = nil

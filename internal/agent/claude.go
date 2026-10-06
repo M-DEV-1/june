@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"june/internal/config"
 	"june/internal/util"
 
 	"google.golang.org/genai"
@@ -52,14 +53,125 @@ func claudeModel() string {
 	return pickedModel("claude", "JUNE_CLAUDE_MODEL", claudeDefaultModel)
 }
 
-// claudeLoggedIn reports whether this machine has a Claude Code login to run under, which is what makes Claude worth handing a question to.
+// claudeLoggedIn reports whether this machine has a Claude Code login to run under, which is what makes Claude worth handing a question to. It is the router's readiness check and runs under the router's lock, so it only reads the file: a renewed login is noticed before the lock is taken (see reviveRenewedLogins).
 func claudeLoggedIn() bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(home + "/.claude/.credentials.json")
-	return err == nil
+	return claudeCredentialsHoldToken(home)
+}
+
+// ClaudeSignedIn reports whether the Claude Code login under home can still be used, and when it can, notices a login refused earlier that has been renewed since (see claudeLoginRenewed), so the picker that asks this stops greying the row out as soon as the user has signed in again. Input: the home directory. Output: see claudeCredentialsHoldToken.
+func ClaudeSignedIn(home string) bool {
+	if !claudeCredentialsHoldToken(home) {
+		return false
+	}
+	reviveClaude(home)
+	return true
+}
+
+// claudeCredentialsHoldToken reports whether the Claude Code credentials file under home holds a login. The file being there is not enough: when the CLI's OAuth session dies it keeps the file and empties both tokens, and every `claude -p` then fails "Failed to authenticate: OAuth session expired and could not be refreshed" while June drew the row as signed in (2026-10-03). Input: the home directory. Output: false when the file is missing or holds neither an access token nor a refresh token; a file June cannot read as Claude's is given the benefit of the doubt, since the CLI may have changed its shape and still be signed in.
+func claudeCredentialsHoldToken(home string) bool {
+	raw, err := os.ReadFile(ClaudeCredentialsPath(home))
+	if err != nil {
+		return false
+	}
+	var creds claudeCredentials
+	if json.Unmarshal(raw, &creds) != nil {
+		return true
+	}
+	return creds.OAuth.AccessToken != "" || creds.OAuth.RefreshToken != ""
+}
+
+// claudeSignedOutNote is what the picker says on the Claude row once its login has been refused.
+const claudeSignedOutNote = "the Claude login has expired: run claude in a terminal to sign in again"
+
+// claudeAuthFailure reports whether the text a failed `claude -p` run printed says its login is gone rather than anything about this prompt. Input: the result text of a run that reported is_error, which is the CLI's own message and not the model's. Output: true for an authentication failure. The markers are the CLI's own wording: "Failed to authenticate: OAuth session expired and could not be refreshed" (measured on 2026-10-03), the "API Error: 401 ... authentication_error" form a refused token takes, and the "Please run /login" the CLI ends a missing login with.
+func claudeAuthFailure(text string) bool {
+	return util.ContainsAny(text, "failed to authenticate", "oauth session expired", "oauth token has expired", "oauth token revoked", "could not be refreshed", "authentication_error", "invalid_grant", "invalid api key", "please run /login", "api error: 401")
+}
+
+// ClaudeLoginFailed turns a failed `claude -p` run whose text says its login is gone into ErrLoggedOut, and records that so the picker greys the Claude row out and the router stops offering Claude for BreakerWindow. Every place that runs the CLI checks this first: the ask path here and the duty path in internal/brain. Input: the result text of a run that reported is_error. Output: the error to return, or nil when the failure is not an expired login.
+func ClaudeLoginFailed(text string) error {
+	if !claudeAuthFailure(text) {
+		return nil
+	}
+	NoteClaudeRefused(time.Now())
+	recordSignedOut(ProviderClaude, claudeSignedOutNote)
+	ProviderFailed(ProviderClaude, BreakerWindow)
+	return fmt.Errorf("%w: claude: %s", ErrLoggedOut, claudeSignedOutNote)
+}
+
+// ClaudeSignedInAgain clears a signed-out mark an earlier refusal left on the Claude row, because a run that answered is proof the login works again. Input: none. Output: none.
+func ClaudeSignedInAgain() {
+	claudeRefusal.Lock()
+	claudeRefusal.at = time.Time{}
+	claudeRefusal.Unlock()
+	clearClaudeMark()
+}
+
+// claudeRefusal is when the Claude login was last refused, zero while it has not been or once it has worked since. It is what lets a login the user renews in a terminal be noticed without a Claude run to prove it: a refusal greys the row out and opens Claude's breaker for BreakerWindow, Claude is ranked last, and with the usage read turned off nothing else would clear either until Claude happened to answer something.
+var claudeRefusal struct {
+	sync.Mutex
+	at time.Time
+}
+
+// claudeRenewSlack is how much later than the refusal the credentials file has to have been written to count as a renewed login. The CLI can write the file during the very run that was refused, a moment after June noted the refusal, and that write is not the user signing in again.
+const claudeRenewSlack = 30 * time.Second
+
+// NoteClaudeRefused records that the Claude login was refused at a given moment. ClaudeLoginFailed calls it with now; the daemon calls it at start with the time of the signed-out mark an earlier run left, so a login renewed while June was not running is noticed too. Input: when the login was refused. Output: none; an earlier moment than one already noted is ignored.
+func NoteClaudeRefused(at time.Time) {
+	claudeRefusal.Lock()
+	defer claudeRefusal.Unlock()
+	if at.After(claudeRefusal.at) {
+		claudeRefusal.at = at
+	}
+}
+
+// claudeLoginRenewed reports whether a Claude login refused earlier has been renewed since: the credentials file was written after the refusal and holds a token. That is what the CLI leaves when the user signs in again, and also when another claude process managed to refresh the session, which proves the login works just the same. It forgets the refusal and clears the picker's mark when it is. Input: the home directory. Output: true once per renewal.
+func claudeLoginRenewed(home string) bool {
+	claudeRefusal.Lock()
+	at := claudeRefusal.at
+	claudeRefusal.Unlock()
+	if at.IsZero() {
+		return false
+	}
+	info, err := os.Stat(ClaudeCredentialsPath(home))
+	if err != nil || !info.ModTime().After(at.Add(claudeRenewSlack)) || !claudeCredentialsHoldToken(home) {
+		return false
+	}
+	claudeRefusal.Lock()
+	// A newer refusal noted in the meantime is not undone by a file written before it.
+	renewed := claudeRefusal.at.Equal(at)
+	if renewed {
+		claudeRefusal.at = time.Time{}
+	}
+	claudeRefusal.Unlock()
+	if !renewed {
+		return false
+	}
+	slog.Info("claude: the login file was written again after the login was refused, so Claude is offered again")
+	clearClaudeMark()
+	return true
+}
+
+// reviveClaude closes Claude's breaker and clears its signed-out mark once its refused login has been renewed. It takes the router's lock, so it must never run under it. Input: the home directory. Output: none.
+func reviveClaude(home string) {
+	if claudeLoginRenewed(home) {
+		closeBreaker(ProviderClaude)
+	}
+}
+
+// clearClaudeMark clears the signed-out mark on the Claude row, if there is one. Input: none. Output: none.
+func clearClaudeMark() {
+	usageRecorder.Lock()
+	to := usageRecorder.to
+	usageRecorder.Unlock()
+	if to != nil {
+		// A reading with no windows only clears the mark; see UsageRecorder.
+		to.Record(ProviderClaude, nil)
+	}
 }
 
 // claudeToolServer offers June's own tools to one `claude -p` run over MCP's HTTP transport, running each call through the same gate as every other ask and keeping the calls it ran so the turn's trace can carry them.
@@ -321,15 +433,26 @@ type claudeRunner func(ctx context.Context, args []string, stdin string) ([]byte
 func runClaudeCLI(binary string) claudeRunner {
 	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, binary, args...)
-		util.HideConsole(cmd)
+		// The arguments are June's own, but through a claude.cmd shim a temp path under a user name holding % or & would reach node as something else.
+		if err := util.CheckCommandLine(cmd); err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
+		// A timed-out run is killed with everything it started, not just the direct child: an npm install of Claude Code is a claude.cmd shim, and killing that kills cmd.exe and leaves node running the ask.
+		util.OwnProcessGroup(cmd)
+		cmd.Cancel = func() error { return util.KillProcessGroup(cmd) }
 		cmd.Stdin = strings.NewReader(stdin)
 		cmd.Dir = os.TempDir()
 		var out, stderr bytes.Buffer
 		cmd.Stdout = &out
 		cmd.Stderr = &stderr
-		// Killing the child does not kill its own children, and stdout stays open as long as any of them holds it, so without this a hung run would block here for as long as its grandchildren live.
+		// A grandchild that left the group can still hold stdout open, so without this a hung run would block here for as long as it lives.
 		cmd.WaitDelay = 2 * time.Second
-		if err := cmd.Run(); err != nil {
+		release, err := util.StartProcessGroup(cmd)
+		if err == nil {
+			defer release()
+			err = cmd.Wait()
+		}
+		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return nil, fmt.Errorf("claude: the run timed out after %s", claudeAskTimeout)
 			}
@@ -506,8 +629,16 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	tr.Usage.add(input, res.Usage.OutputTokens, input+res.Usage.OutputTokens)
 	tr.Usage.CachedInputTokens = res.Usage.CacheReadTokens
 	if res.IsError {
+		if err := ClaudeLoginFailed(res.Result); err != nil {
+			return tr, err
+		}
+		// The CLI sets subtype "success" on a run that failed, so naming it said "the run failed (success)".
+		if res.Subtype == "" || res.Subtype == "success" {
+			return tr, fmt.Errorf("claude: the run failed: %s", util.LogHead(res.Result))
+		}
 		return tr, fmt.Errorf("claude: the run failed (%s): %s", res.Subtype, util.LogHead(res.Result))
 	}
+	ClaudeSignedInAgain()
 	answer, sources := stripSourcesBlock(strings.TrimSpace(res.Result))
 	tr.Answer = answer
 	tr.Evidence = append(tr.Evidence, sources...)
@@ -539,14 +670,33 @@ type CodexThenClaude struct {
 }
 
 // AskText answers through Codex, or through Claude when Codex refused because its allowance is spent. Input: the question. Output: whichever turn trace answered, or Codex's own error when Claude is not a way out of it.
+// The daemon hands the memory summarizer's background prompts here when Gemini refuses one, so with fallback turned off (DutyFallbackAllowed) only the brain the user picked may take it: Codex or Claude when that is the pick, and otherwise neither, and the prompt fails with ErrFallbackOff rather than spending a ChatGPT or Claude plan the user did not choose for background work.
 func (b CodexThenClaude) AskText(ctx context.Context, question string) (TurnTrace, error) {
+	fallback := DutyFallbackAllowed()
+	picked := PreferredProvider()
+	mayUse := func(id string) bool { return fallback || picked == id }
+	if !mayUse(ProviderCodex) {
+		if mayUse(ProviderClaude) {
+			return b.Agent.AskClaude(ctx, question)
+		}
+		return TurnTrace{Channel: ChannelText, Question: question}, ErrFallbackOff
+	}
 	tr, err := b.Agent.AskCodex(ctx, question)
 	// The same rule the router applies: hand on only when the failure is a spent allowance another provider does not share, only while no action has run so a click is never taken twice, and only when this machine has a Claude login.
-	if ProviderSpent(err) && actionHops(tr.ToolHops) == 0 && claudeLoggedIn() {
+	if ProviderSpent(err) && actionHops(tr.ToolHops) == 0 && claudeLoggedIn() && mayUse(ProviderClaude) {
 		slog.Warn("ask: the Codex allowance is spent, asking Claude", "error", err)
 		return b.Agent.AskClaude(ctx, question)
 	}
 	return tr, err
+}
+
+// ErrFallbackOff is what background work fails with when the brain it would hand on to is not the one the user picked and they have turned fallback off.
+var ErrFallbackOff = errors.New("background work may only use the brain you picked, and that brain could not answer")
+
+// DutyFallbackAllowed reports whether background work may go to a brain the user did not pick when its own cannot answer: config.BrainConfig.AllowFallback, the "allow_fallback" setting, allowed unless turned off. It is read from the config on every call, so turning it off in Settings holds from the next duty on; a config that cannot be read is the default, which allows it.
+func DutyFallbackAllowed() bool {
+	cfg, _ := config.ReadConfig()
+	return cfg.Brain.FallbackAllowed()
 }
 
 const (
@@ -572,10 +722,12 @@ func ClaudeCredentialsPath(home string) string {
 type claudeCredentials struct {
 	OAuth struct {
 		AccessToken string `json:"accessToken"`
+		// RefreshToken is read only to tell an empty login from a live one (see claudeCredentialsHoldToken); it is never sent anywhere.
+		RefreshToken string `json:"refreshToken"`
 	} `json:"claudeAiOauth"`
 }
 
-// loadClaudeToken reads the subscription's OAuth access token out of the credentials file at path. Output: the token, or an error naming the file when it is missing, is not the file Claude Code writes, or holds no token. The error never carries the file's contents.
+// loadClaudeToken reads the subscription's OAuth access token out of the credentials file at path. Output: the token, or an error naming the file when it is missing, is not the file Claude Code writes, or holds no token — wrapping ErrLoggedOut when it holds no refresh token either, which is what the CLI leaves when its session has died, so the picker can say so. The error never carries the file's contents.
 func loadClaudeToken(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -584,6 +736,9 @@ func loadClaudeToken(path string) (string, error) {
 	var creds claudeCredentials
 	if err := json.Unmarshal(raw, &creds); err != nil {
 		return "", fmt.Errorf("claude login: %s is not the credentials file Claude Code writes", path)
+	}
+	if creds.OAuth.AccessToken == "" && creds.OAuth.RefreshToken == "" {
+		return "", fmt.Errorf("%w: claude login: %s holds no token at all", ErrLoggedOut, path)
 	}
 	if creds.OAuth.AccessToken == "" {
 		return "", fmt.Errorf("claude login: %s has no subscription access token; run `claude auth` first", path)
@@ -679,7 +834,7 @@ func refreshClaudeUsage(ctx context.Context, client *http.Client, url, credsPath
 	defer cancel()
 	limits, err := claudeUsage(ctx, client, url, credsPath)
 	if errors.Is(err, ErrLoggedOut) && rec != nil {
-		rec.RecordSignedOut(ProviderClaude, "the Claude login was refused: run claude login to sign in again")
+		rec.RecordSignedOut(ProviderClaude, claudeSignedOutNote)
 		return
 	}
 	if err != nil {

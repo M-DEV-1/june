@@ -30,9 +30,18 @@ func waitTimeout(args map[string]any) time.Duration {
 	return waitMaxTimeout
 }
 
-// focusedText is the text of the field the last click put the keyboard in, read off a fresh walk of the window so it carries what has just been typed rather than what the field held before. Input: the items of the fresh walk. Output: that field's label, which for an entry is its own contents, or "" when nothing has been clicked or the field is no longer there.
+// keyboardContents is keyboardHolder with the holder's contents read as well, which only a field_holds check needs. The tracker's read in production, a stand-in in the tests, for the reason keyboardHolder is one.
+var keyboardContents = tracker.FocusedContents
+
+// focusedText is the text of the field the keyboard is in, read fresh so it carries what has just been typed rather than what the field held before. Input: the items of a fresh walk of the window. Output: the contents of the element that holds the keyboard, "" included, whenever it is a place to type, the control clicked, or publishes contents at all; otherwise, and when nothing readable holds the keyboard, the label of the field the last click put the keyboard in, off the fresh walk, which for an unnamed entry is its own contents; "" when neither can be read.
+// The holder comes first because it is where the keys went: a job is told to type into a field that already has the focus, so with no click remembered this used to answer "" and every field_holds check failed on "0 other characters" with the text sitting in the box. A read holder answers with its contents even when they are empty, because a box with a name (Notepad's page, "Text editor") has its name for a label, never what was typed into it, and falling back to that label let field_holds "editor" pass on an empty page.
 func (a *Agent) focusedText(ctx context.Context, items []act.Item) string {
 	clicked, _ := a.focus(ctx)
+	if holder, held := keyboardContents(ctx); held {
+		if holder.Value != "" || typingPlaces[holder.Role] || (clicked.Ref != "" && holder.Ref == clicked.Ref) {
+			return holder.Value
+		}
+	}
 	if clicked.Ref == "" {
 		return ""
 	}
@@ -42,6 +51,15 @@ func (a *Agent) focusedText(ctx context.Context, items []act.Item) string {
 		}
 	}
 	return clicked.Label
+}
+
+// matchCheck is act.Match with the focused field's text read only for the one check that looks at it, since that read is a round trip to the accessibility tree on every poll of a wait. Input: the call's context, the check, and a fresh reading's title and items. Output: what act.Match says.
+func (a *Agent) matchCheck(ctx context.Context, check act.Check, title string, items []act.Item) (bool, string) {
+	focused := ""
+	if check.Kind == act.FieldHolds {
+		focused = a.focusedText(ctx, items)
+	}
+	return act.Match(check, title, items, focused)
 }
 
 // listCheck reports whether a check is matched against the numbered listing rather than against the window itself. Input: the check's kind. Output: true for item_present and item_absent, false for the other two.
@@ -64,8 +82,7 @@ func (a *Agent) CheckHolds(ctx context.Context, check act.Check) bool {
 	if err != nil {
 		return false
 	}
-	items := act.Filter(nodes)
-	held, _ := act.Match(check, title, items, a.focusedText(ctx, items))
+	held, _ := a.matchCheck(ctx, check, title, act.Filter(nodes))
 	return held
 }
 
@@ -90,7 +107,7 @@ func (a *Agent) waitFor(ctx context.Context, check act.Check, timeout time.Durat
 		if err == nil {
 			items := act.Filter(nodes)
 			var ok bool
-			ok, why = act.Match(check, title, items, a.focusedText(ctx, items))
+			ok, why = a.matchCheck(ctx, check, title, items)
 			// A list check is only about the window the step acted in. Another window that took focus since carries its own items, and it satisfies item_present by coincidence and item_absent by never having held the thing at all, so while the front window is not the one the list came from neither may pass. A title check is about whatever is in front by definition and is left alone.
 			if ok && listCheck(check.Kind) {
 				if changed := a.frontAppChanged(ctx); changed != "" {

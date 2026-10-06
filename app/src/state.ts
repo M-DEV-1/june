@@ -122,7 +122,7 @@ export type Event =
   | { kind: "contextLoaded"; ctx: ContextInfo }
   | { kind: "dictating" }
   | { kind: "dictated"; text: string }
-  | { kind: "dictationFailed" }
+  | { kind: "dictationFailed"; text?: string }
   | { kind: "hint"; text: string }
   | { kind: "voiceOn"; id: string }
   | { kind: "voiceOff" }
@@ -882,7 +882,7 @@ export function step(
     }
 
     case "dictationFailed":
-      return { view: { ...view, dictating: false, hint: "Dictation failed." } };
+      return { view: { ...view, dictating: false, hint: event.text || "Dictation failed." } };
 
     case "hint":
       return { view: { ...view, hint: event.text } };

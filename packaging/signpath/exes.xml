@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reference copy of the "exes" artifact configuration of SignPath project "june". SignPath reads the copy kept in its own web UI, not this file: change both together.
+  The release workflow uploads june.exe, junew.exe and june-window.exe as one GitHub artifact, which reaches SignPath as a zip, hence the zip-file root.
+  The same artifact carries Inno Setup's own Setup program, uninst-<inno version>-<hash>.e64.exe (packaging\release-windows.ps1 -SignUninstaller), which the installer then runs from %TEMP% and leaves behind as unins000.exe. Every request from the release workflow has it, since that workflow writes it out whenever SignPath is set up, so it is matched exactly once like the others.
+  Each file must say it is June at exactly the version being released (go-winres, tauri.conf.json and june.iss's VersionInfo put both there), as the SignPath Foundation requires of every file it signs. Inno Setup writes its two values into fixed-width slots padded with spaces; see installer.xml.
+  The Visual C++ runtime DLLs in crt\ are Microsoft's, already signed by Microsoft, and are never sent here.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file-set>
+      <include path="june.exe" product-name="June" product-version="${version}" />
+      <include path="junew.exe" product-name="June" product-version="${version}" />
+      <include path="june-window.exe" product-name="June" product-version="${version}" />
+      <include path="uninst-*.e64.exe" product-name="June" product-version="${version}" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

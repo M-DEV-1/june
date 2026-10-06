@@ -40,10 +40,11 @@ export async function post(path: string, body?: unknown): Promise<Response | nul
   }
 }
 
-/** Opens a live voice session on the daemon. Input: none. Output: the session id, or null when the daemon refused (409 because one is already running, 500 because the audio devices would not open) or could not be reached. */
+/** Opens a live voice session on the daemon. Input: none. Output: the session id, or null when the daemon could not be reached. Throws an Error carrying the daemon's own sentence when it refused (409 because one is already running, 503 because there is no Gemini API key, 500 because the audio devices would not open), so the caller can say why instead of staying silent. */
 export async function voiceStart(): Promise<string | null> {
   const res = await post("/voice/start");
-  if (!res?.ok) return null;
+  if (!res) return null;
+  if (!res.ok) throw new Error((await res.text()).trim() || "June's daemon would not start a voice session.");
   return ((await res.json()) as { id: string }).id;
 }
 
@@ -52,13 +53,26 @@ export async function voiceStop(): Promise<void> {
   await post("/voice/stop");
 }
 
-/** Opens the microphone on the daemon. Input: none. Output: the id of the recording, which stopDictation and the "dictation" event both carry. Throws if the daemon would not start one. */
+/** A dictation the daemon refused, carrying the sentence it gave for a person, "" when it gave none. A plain-text refusal is whisper's own error — a path and a file name — so it is not carried; only the "message" a JSON refusal puts beside its error word is. */
+export class DictationRefused extends Error {}
+
+/** Reads a refused dictation's sentence. Input: the response. Output: the error to throw. */
+async function dictationRefused(res: Response): Promise<DictationRefused> {
+  try {
+    const body = (await res.json()) as { message?: unknown };
+    return new DictationRefused(typeof body.message === "string" ? body.message.trim() : "");
+  } catch {
+    return new DictationRefused("");
+  }
+}
+
+/** Opens the microphone on the daemon. Input: none. Output: the id of the recording, which stopDictation and the "dictation" event both carry. Throws DictationRefused if the daemon would not start one, and whatever fetch threw if it could not be reached. */
 export async function startDictation(): Promise<string> {
   const res = await fetch(`${base}/dictate/start`, {
     method: "POST",
     headers: authHeaders(),
   });
-  if (!res.ok) throw new Error(`dictation did not start: ${res.status}`);
+  if (!res.ok) throw await dictationRefused(res);
   const body = (await res.json()) as { id: string };
   return body.id;
 }
@@ -71,7 +85,7 @@ export async function stopDictation(id: string): Promise<string> {
     body: JSON.stringify({ id }),
   });
   if (res.status === 404) return "";
-  if (!res.ok) throw new Error(`dictation failed: ${res.status}`);
+  if (!res.ok) throw await dictationRefused(res);
   const body = (await res.json()) as { text: string };
   return (body.text ?? "").trim();
 }
@@ -95,6 +109,12 @@ async function readJson<T>(path: string): Promise<T | null> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Where voice typing stands, off GET /components. Input: none. Output: the feature's state ("not_installed", "failed", "queued", "installing", "installed", ...), or "" when the daemon does not list it or could not be asked. */
+export async function voiceTypingState(): Promise<string> {
+  const c = await readJson<{ features?: { id: string; state: string }[] }>("/components");
+  return c?.features?.find((x) => x.id === "transcribe")?.state ?? "";
 }
 
 /** Asks whether a voice session is already running, which is how the window picks one up again after a reload. Input: none. Output: the daemon's status, or null when it cannot be reached or did not answer in time. */

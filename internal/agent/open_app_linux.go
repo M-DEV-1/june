@@ -220,3 +220,6 @@ var defaultBrowserID = func() string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// shellPid is 0 here: every window the shell shows is in the extension's List, so windowPids has nothing to add.
+func shellPid() uint32 { return 0 }

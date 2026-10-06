@@ -4,7 +4,7 @@
  * The first face of each state is the one that matters most, since it is what a single reading takes.
  */
 
-export type JuneState = "watching" | "listening" | "thinking" | "speaking" | "done" | "refused" | "asleep" | "dreaming" | "noticed" | "recording";
+export type JuneState = "watching" | "listening" | "thinking" | "speaking" | "done" | "refused" | "asleep" | "dreaming" | "noticed" | "recording" | "paused";
 
 /** The faces for each state, in the order they alternate. */
 export const FACES: Record<JuneState, string[]> = {
@@ -18,6 +18,8 @@ export const FACES: Record<JuneState, string[]> = {
   refused: ["(・_・;)", "(-_-)", "(￣ヘ￣)", "(ಠ_ಠ)"],
   dreaming: ["(-, -)…", "(˘‿˘)", "(￣.￣)…", "(っ˘ω˘ς )"],
   recording: ["(≖‿≖)", "(●_●)", "( ✧≖ ͜ʖ≖)"],
+  // Eyes shut on purpose: a paused June is not looking at the screen, and the face is the first place a person checks.
+  paused: ["(˘_˘)", "(-_-)"],
 };
 
 /** How often a state with several faces changes face, in milliseconds. */
