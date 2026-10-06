@@ -117,3 +117,19 @@ func TestLoadConfig_ZeroTrackerFieldsFallBackToTheDefaults(t *testing.T) {
 		t.Errorf("blocklist has %d entries, want the default %d", len(cfg.Tracker.Blocklist), len(DefaultBlocklist))
 	}
 }
+
+// A config that carries its own blocklist must not change DefaultBlocklist. json.Unmarshal decodes a slice into the backing array it already has, so a config built on the shared default wrote the user's entries over it, and every later config that fell back to the default got the user's list instead.
+func TestLoadConfig_AConfigsBlocklistLeavesTheDefaultAlone(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JUNE_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "june-config.json"), []byte(`{"setup_done":true,"tracker":{"blocklist":["slack"]}}`), 0600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+	first := DefaultBlocklist[0]
+
+	cfg := LoadConfig()
+
+	if DefaultBlocklist[0] != first {
+		t.Errorf("DefaultBlocklist[0] = %q after loading a config with blocklist %v, want %q", DefaultBlocklist[0], cfg.Tracker.Blocklist, first)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -602,7 +603,7 @@ func storeExists() bool {
 func defaultConfig() JuneConfig {
 	return JuneConfig{
 		Tracker: TrackerConfig{
-			Blocklist: DefaultBlocklist,
+			Blocklist: slices.Clone(DefaultBlocklist),
 			// 3s is too less to be a dwell time, so 15s sounded better. honestly, it has to be tab switching + dwell, and im not sure what the right number is?
 			DwellTime: DefaultDwellTime,
 		},
@@ -663,7 +664,7 @@ func repair(cfg *JuneConfig) {
 		cfg.Tracker.DwellTime = DefaultDwellTime
 	}
 	if cfg.Tracker.Blocklist == nil {
-		cfg.Tracker.Blocklist = DefaultBlocklist
+		cfg.Tracker.Blocklist = slices.Clone(DefaultBlocklist)
 	}
 }
 
