@@ -34,6 +34,7 @@ const (
 	askNoAnswer             = "The AI didn't answer. Ask again, or pick another brain."
 	askNoBrain              = "No brain can answer right now. Add a Gemini key or sign in to one in Settings → Brain."
 	askNotInstalled         = "June can't find this brain's app. If you just installed it, quit June and open it again."
+	askCouldNotRun          = "This brain's app wouldn't start. Quit June and open it again, or pick another brain."
 	askUnexplained          = "That didn't work, and June can't tell why. Ask again, or pick another brain."
 )
 
@@ -70,6 +71,10 @@ func askSentence(err error, text string) string {
 	// A brain whose command line is not on June's PATH, most often one installed after June started. June re-reads Windows' Path before each ask (see Server.Ask), so this is what is left when even that has not found it.
 	if errors.Is(err, exec.ErrNotFound) || util.ContainsAny(text, exec.ErrNotFound.Error()) {
 		return askNotInstalled
+	}
+	// A brain's app that stopped before it could answer, such as agy refusing to start; it only reaches the user when it was the brain they picked, since otherwise the question was handed on.
+	if errors.Is(err, agent.ErrCouldNotRun) {
+		return askCouldNotRun
 	}
 	if errors.Is(err, agent.ErrNoAnswer) || util.ContainsAny(text, "returned no text") {
 		return askNoAnswer

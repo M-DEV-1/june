@@ -113,9 +113,10 @@ Filename: "{app}\june.exe"; Parameters: "--autostart on"; WorkingDir: "{app}"; S
 Filename: "{app}\june.exe"; Parameters: "--autostart off"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: ShouldTurnAutostartOff
 Filename: "{app}\june.exe"; Parameters: "--update-check off"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: ShouldTurnUpdateCheckOff
 Filename: "{app}\june.exe"; Parameters: "--update-check on"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; Check: ShouldTurnUpdateCheckOn
-Filename: "{app}\junew.exe"; WorkingDir: "{app}"; Flags: nowait; Check: RelaunchAfterSilentInstall; AfterInstall: MarkRelaunched
+; June is opened through Explorer, so it runs as a child of the desktop shell, as from the Start menu, and not of Setup: a process Setup starts inherited Setup's RedirectionGuard on Windows 11 (measured 2026-10-06, though Inno's help says it is not inherited), and under it the junctions in agy's throwaway homes cannot be followed, so Antigravity runs fell back to empty folders until June was restarted by hand.
+Filename: "{win}\explorer.exe"; Parameters: """{app}\junew.exe"""; Flags: nowait; Check: RelaunchAfterSilentInstall; AfterInstall: MarkRelaunched
 ; There is no finished page to offer "Open June" on: June opens, and its own setup takes over from here.
-Filename: "{app}\junew.exe"; WorkingDir: "{app}"; Flags: nowait skipifsilent runasoriginaluser; Check: OpenAfterInstall
+Filename: "{win}\explorer.exe"; Parameters: """{app}\junew.exe"""; Flags: nowait skipifsilent runasoriginaluser; Check: OpenAfterInstall
 
 [Code]
 const
