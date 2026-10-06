@@ -35,8 +35,9 @@ func TestWatchMeetingWindow_SkipsWhatTheTickLoopSkips(t *testing.T) {
 			d.meetingEvery = 5 * time.Millisecond
 
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go d.watchMeetingWindow(ctx)
+			done := make(chan struct{})
+			go func() { d.watchMeetingWindow(ctx); close(done) }()
+			defer func() { cancel(); <-done }()
 
 			select {
 			case ev := <-events:
