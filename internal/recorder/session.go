@@ -68,19 +68,22 @@ type session struct {
 	fromTranscript bool
 }
 
-// powerSupplyRoot is where Linux exposes the machine's power supplies. Tests point it elsewhere.
-var powerSupplyRoot = "/sys/class/power_supply"
+// powerSupplyRoot is where Linux exposes the machine's power supplies.
+const powerSupplyRoot = "/sys/class/power_supply"
 
 // OnACPower reports whether the machine is on mains power, by reading the kernel's power supply class: a supply whose type is "Mains" and whose online flag is 1 is the charger, plugged in. Exported because the overnight dreaming loop gates on the same fact.
 // A machine that reports no mains supply at all — a desktop, or any system that does not export this, Windows included — counts as on mains, so transcription is never deferred forever somewhere it cannot be asked.
-func OnACPower() bool {
-	entries, err := os.ReadDir(powerSupplyRoot)
+func OnACPower() bool { return onACPowerAt(powerSupplyRoot) }
+
+// onACPowerAt is OnACPower reading the power supply class under root. Input: the directory to read. Output: whether that directory shows the machine on mains power.
+func onACPowerAt(root string) bool {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return true
 	}
 	mains := false
 	for _, e := range entries {
-		dir := filepath.Join(powerSupplyRoot, e.Name())
+		dir := filepath.Join(root, e.Name())
 		if readTrimmed(filepath.Join(dir, "type")) != "Mains" {
 			continue
 		}

@@ -705,7 +705,7 @@ func TestOnACPower(t *testing.T) {
 	cases := []struct {
 		name     string
 		supplies map[string][2]string
-		missing  bool // point powerSupplyRoot at a directory that does not exist at all
+		missing  bool // read a directory that does not exist at all
 		want     bool
 	}{
 		{name: "charger plugged in", supplies: map[string][2]string{"AC": {"Mains", "1"}, "BAT0": {"Battery", ""}}, want: true},
@@ -715,14 +715,11 @@ func TestOnACPower(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			old := powerSupplyRoot
-			if c.missing {
-				powerSupplyRoot = filepath.Join(t.TempDir(), "does-not-exist")
-			} else {
-				powerSupplyRoot = write(t, c.supplies)
+			root := filepath.Join(t.TempDir(), "does-not-exist")
+			if !c.missing {
+				root = write(t, c.supplies)
 			}
-			defer func() { powerSupplyRoot = old }()
-			if got := OnACPower(); got != c.want {
+			if got := onACPowerAt(root); got != c.want {
 				t.Errorf("OnACPower() = %v, want %v", got, c.want)
 			}
 		})
