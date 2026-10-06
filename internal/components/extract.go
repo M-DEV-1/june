@@ -54,7 +54,7 @@ func extract(ctx context.Context, archivePath, dir string, a *artifact) error {
 	return x.makeLinks()
 }
 
-// checkThroughLinks refuses an archive in which a path runs through one of its own symbolic links: a kept file or link whose directory is a link, or a link whose target's directory is one. link checks a target by joining it to the link's directory as written, which is where it really points only when no directory on the way is itself a link: "a" -> "." and then "a/x" -> "../evil" reads as staying inside, and once "a" is made it points one level above staging. The files are already out by now, but nothing has followed a link to write them, since links are only made after this.
+// checkThroughLinks refuses an archive in which a path runs through one of its own symbolic links: a kept file or link whose directory is a link, or a link whose target, walked element by element as the kernel walks it, passes through one. link checks a target by joining it to the link's directory as written, which is where it really points only when no directory on the way is itself a link: "a" -> "." and then "a/x" -> "../evil" reads as staying inside, and once "a" is made it points one level above staging. The files are already out by now, but nothing has followed a link to write them, since links are only made after this.
 func (x *extractor) checkThroughLinks() error {
 	isLink := map[string]bool{}
 	for _, l := range x.links {
@@ -82,12 +82,18 @@ func (x *extractor) checkThroughLinks() error {
 		if d := through(l.name); d != "" {
 			return fmt.Errorf("archive entry %q is inside %q, which is a symbolic link", l.name, d)
 		}
-		to := l.target
-		if !l.hard {
-			to = path.Join(path.Dir(l.name), l.target)
+		if l.hard {
+			if d := through(l.target); d != "" {
+				return fmt.Errorf("archive entry %q links through %q, which is a symbolic link", l.name, d)
+			}
+			continue
 		}
-		if d := through(to); d != "" {
-			return fmt.Errorf("archive entry %q links through %q, which is a symbolic link", l.name, d)
+		// A symbolic link's target is walked as the kernel walks it, element by element before any cleaning, since "sub/../x" cleans to "x" but passes through "sub" first, and from wherever "sub" points ".." can climb out.
+		els := strings.Split(path.Dir(l.name)+"/"+l.target, "/")
+		for i := 1; i < len(els); i++ {
+			if d := path.Join(els[:i]...); isLink[d] {
+				return fmt.Errorf("archive entry %q links through %q, which is a symbolic link", l.name, d)
+			}
 		}
 	}
 	return nil
