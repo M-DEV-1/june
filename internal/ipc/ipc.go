@@ -550,6 +550,10 @@ func (s *Server) Events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribing before the headers go out means a client that sees the stream open has already been registered, so nothing broadcast after that moment can miss it.
+	ch := s.hub.subscribeAs(r.URL.Query().Get("role"))
+	defer s.hub.unsubscribe(ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -558,9 +562,6 @@ func (s *Server) Events(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, streamPreamble)
 	flusher.Flush()
-
-	ch := s.hub.subscribeAs(r.URL.Query().Get("role"))
-	defer s.hub.unsubscribe(ch)
 
 	// A comment line every so often keeps the connection warm and gives a reader that is still buffering something to push the first real event through.
 	beat := time.NewTicker(streamHeartbeat)
