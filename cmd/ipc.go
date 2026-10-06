@@ -66,13 +66,10 @@ const ipcBodyLimit = 1 << 20
 // authedDaemonGet fires a fire-and-forget authenticated GET at the local daemon. Used to ask the window to open (the tray's Open click on both platforms, and the daemon's own start), which would otherwise each repeat the read-token-attach-header-GET dance.
 func authedDaemonGet(url string) { _ = authedDaemonRequest(http.MethodGet, url) }
 
-// authedDaemonPost is authedDaemonGet for a route that changes something and so answers POST alone: the tray's pause and resume clicks (tray_linux.go, tray_windows.go).
-func authedDaemonPost(url string) { _ = authedDaemonRequest(http.MethodPost, url) }
-
 // daemonRequestClient carries authedDaemonRequest. Every route it calls answers at once — /window only broadcasts, /pause and /resume flip a flag — so a daemon that has not answered in two seconds is wedged. On http.DefaultClient, which has no deadline, such a daemon hung `june` itself for ever in showWindow, after its /ping had already answered, and left one tray goroutine stuck per click.
 var daemonRequestClient = &http.Client{Timeout: 2 * time.Second}
 
-// authedDaemonRequest is the body of authedDaemonGet and authedDaemonPost, and what showWindow calls to learn whether the daemon took the instruction. Input: the method and the URL. Output: nil when the daemon answered 2xx; otherwise the transport error or the status it answered. The request is sent with no body and the response thrown away.
+// authedDaemonRequest is the body of authedDaemonGet, and what showWindow calls to learn whether the daemon took the instruction. Input: the method and the URL. Output: nil when the daemon answered 2xx; otherwise the transport error or the status it answered. The request is sent with no body and the response thrown away.
 func authedDaemonRequest(method, url string) error {
 	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
