@@ -90,6 +90,8 @@ Background work on memory runs on a timer:
 | Check whether it is time for the night run | every 5 minutes |
 | Delete screen pictures older than 14 days | every day |
 
+What each memory layer stores, how search ranks it, how it ages and repairs itself, and what the night run does are in [memory](memory.md).
+
 ## Local and cloud models
 
 ```mermaid
