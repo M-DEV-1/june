@@ -29,6 +29,11 @@ func NewMic() (Microphone, error) {
 	return &winMic{}, nil
 }
 
+// NewVoiceMic is NewMic: Windows has no echo guard.
+func NewVoiceMic() (Microphone, error) {
+	return NewMic()
+}
+
 // StartCapture opens the default capture device and returns a channel of 24 kHz mono s16le chunks of about 20 ms. The channel closes only once ctx is cancelled or Close is called, the same as on Linux: a lost device is reopened on whatever becomes the default, and until one does nothing arrives. The voice session reads one channel across every redial, so a channel that closed with the device would fail each redial at once and leave the session listening to nothing. A chunk the consumer is not ready for is dropped rather than blocking the capture thread.
 func (m *winMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	m.mu.Lock()

@@ -11,3 +11,7 @@ func NewMic() (Microphone, error) {
 func NewSpeaker() (Speaker, error) {
 	return nil, fmt.Errorf("audio not supported on this platform")
 }
+
+func NewVoiceMic() (Microphone, error) {
+	return NewMic()
+}

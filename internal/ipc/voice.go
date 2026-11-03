@@ -120,7 +120,7 @@ func NewVoice(s *Server, store *db.Store, apiKey string, runJob func(context.Con
 		if strings.TrimSpace(apiKey) == "" {
 			return nil, nil, nil, errNoVoiceKey
 		}
-		mic, err := audio.NewMic()
+		mic, err := audio.NewVoiceMic()
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("microphone: %w", err)
 		}
