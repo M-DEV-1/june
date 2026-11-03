@@ -21,6 +21,9 @@ type pulseMic struct {
 	micChan     chan []byte
 	cancel      context.CancelFunc
 	currentAmp  atomic.Uint64
+	// voice marks the voice session's mic, which gets a fresh echoGuard on every StartCapture. Dictation and the mic test leave guard nil: the user starts speaking right after the key press, which the open-time mute would cut.
+	voice bool
+	guard *echoGuard
 }
 
 // NewMic returns an uninitialised mic; hardware is connected lazily in StartCapture.
@@ -32,6 +35,11 @@ const (
 
 func NewMic() (Microphone, error) {
 	return &pulseMic{}, nil
+}
+
+// NewVoiceMic is NewMic for the voice session: each StartCapture also mutes the first second and silences chunks that are only June's own voice coming back (see echoGuard).
+func NewVoiceMic() (Microphone, error) {
+	return &pulseMic{voice: true}, nil
 }
 
 func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
@@ -56,6 +64,9 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 	micChan := make(chan []byte, 100)
 
 	m.mu.Lock()
+	if m.voice {
+		m.guard = newEchoGuard()
+	}
 	m.client = c
 	m.cancel = cancel
 	m.micChan = micChan
@@ -103,10 +114,13 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 }
 
 // writeFn is called by the pulse library with each captured batch of samples.
-// Converts to s16le bytes, stores amplitude, and forwards non-blocking.
+// Silences echo when the mic has a guard, converts to s16le bytes, stores amplitude, and forwards non-blocking.
 func (m *pulseMic) writeFn(in []int16) (int, error) {
 	if len(in) == 0 {
 		return 0, nil
+	}
+	if m.guard != nil {
+		m.guard.process(in, takePlaybackPeak())
 	}
 
 	buf := make([]byte, len(in)*2)
@@ -129,16 +143,7 @@ func (m *pulseMic) storeAmp(samples []int16) {
 	if len(samples) == 0 {
 		return
 	}
-	var sum float64
-	for _, s := range samples {
-		f := float64(s)
-		sum += f * f
-	}
-	rms := math.Sqrt(sum/float64(len(samples))) / 32768.0 * 3.0
-	if rms > 1.0 {
-		rms = 1.0
-	}
-	m.currentAmp.Store(math.Float64bits(rms))
+	m.currentAmp.Store(math.Float64bits(math.Min(sampleRMS(samples)/32768.0*3.0, 1.0)))
 }
 
 func (m *pulseMic) CurrentAmplitude() float64 {

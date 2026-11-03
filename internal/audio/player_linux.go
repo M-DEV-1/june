@@ -101,20 +101,14 @@ func (s *pulseSpeaker) readFn(out []int16) (int, error) {
 	return len(out), nil
 }
 
+// storeAmp keeps the level the waveform shows and tells the mic's echo guard how loud the audio just written is.
 func (s *pulseSpeaker) storeAmp(samples []int16) {
 	if len(samples) == 0 {
 		return
 	}
-	var sum float64
-	for _, v := range samples {
-		f := float64(v)
-		sum += f * f
-	}
-	rms := math.Sqrt(sum/float64(len(samples))) / 32768.0 * 3.0
-	if rms > 1.0 {
-		rms = 1.0
-	}
-	s.currentAmp.Store(math.Float64bits(rms))
+	rms := sampleRMS(samples)
+	notePlayback(rms)
+	s.currentAmp.Store(math.Float64bits(math.Min(rms/32768.0*3.0, 1.0)))
 }
 
 func (s *pulseSpeaker) Play(pcm []byte) error {

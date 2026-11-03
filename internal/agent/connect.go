@@ -36,8 +36,11 @@ func stripControlTokens(s string) string {
 	return cleaned
 }
 
-// prefixPaddingMs is the required duration of sustained detected speech before the Live API commits to "user started speaking". Raised above the SDK's zero-value default as a mitigation for acoustic echo (June's own voice bleeding into the mic and getting misread as a barge-in) — confirmed in production logs as 5+ false interrupts in under a minute. This is a tradeoff, not a fix: it also delays recognizing a genuine interruption by the same margin, and it does nothing for echo that outlasts the padding window. The real fix is acoustic echo cancellation (e.g. PulseAudio module-echo-cancel) or mic ducking during playback; this is a same-day mitigation pending those.
-const prefixPaddingMs = 300
+// prefixPaddingMs and silenceDurationMs are how long the Live server's voice detector wants speech before it calls the user started and silence before it calls the user finished, in milliseconds. With the server defaults (high start sensitivity) 30 of the 72 barge-ins logged 2026-09-08 to 10-18 had no user speech behind them, 8 of those within 2.1 s of connecting.
+const (
+	prefixPaddingMs   = 300
+	silenceDurationMs = 800
+)
 
 // bargeInConfirmWindow is how long an Interrupted that arrived with no user transcript is held open, waiting for one. The Live server raises Interrupted the moment its voice detector fires, and the matching InputTranscription fragment lands a few hundred milliseconds later, so requiring the transcript to already be there rejected real interruptions: 35 of 93 in the machine's log, 8 of them after echo cancellation was in place and the mic had stopped hearing June at all.
 const bargeInConfirmWindow = 1200 * time.Millisecond
@@ -49,7 +52,9 @@ const bargeInEchoAmplitude = 0.05
 func realtimeInputConfig() *genai.RealtimeInputConfig {
 	return &genai.RealtimeInputConfig{
 		AutomaticActivityDetection: &genai.AutomaticActivityDetection{
-			PrefixPaddingMs: genai.Ptr[int32](prefixPaddingMs),
+			StartOfSpeechSensitivity: genai.StartSensitivityLow,
+			PrefixPaddingMs:          genai.Ptr[int32](prefixPaddingMs),
+			SilenceDurationMs:        genai.Ptr[int32](silenceDurationMs),
 		},
 	}
 }
