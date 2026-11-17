@@ -331,8 +331,65 @@ func (v *VoiceSession) giveUp(id string) {
 	v.touched()
 }
 
-// watch turns the agent's own channels into events on the hub for as long as the session runs: what the user said becomes "heard", what June said becomes "said", each tool call becomes "tool", and the session's state changes become "state".
+// voiceConversationTitle names the conversation a voice session's turns are filed in.
+const voiceConversationTitle = "Voice conversation"
+
+// voiceTranscript files what a voice session hears and says as turns of one conversation, opened when the first turn is filed. Speech arrives in pieces, so the user's pieces and June's pieces are each held until the other side starts or the turn ends, and then filed as one turn.
+type voiceTranscript struct {
+	// store is where the turns go. nil files nothing, for a daemon or a test running without a store.
+	store  *db.Store
+	convID int64
+	you    strings.Builder
+	june   strings.Builder
+}
+
+// heard adds a piece of what the user said. June's reply so far is filed first, since the user speaking ends it.
+func (t *voiceTranscript) heard(text string) {
+	t.file("june", &t.june)
+	if t.you.Len() > 0 {
+		t.you.WriteString(" ")
+	}
+	t.you.WriteString(text)
+}
+
+// said adds a piece of what June said. The user's words so far are filed first, since June replying ends them. Pieces carry their own spacing, so they are joined as they come.
+func (t *voiceTranscript) said(text string) {
+	t.file("you", &t.you)
+	t.june.WriteString(text)
+}
+
+// flush files whatever is held from both sides.
+func (t *voiceTranscript) flush() {
+	t.file("you", &t.you)
+	t.file("june", &t.june)
+}
+
+// file stores the held text as one voice turn by role and empties the buffer. A store that cannot be written is logged and the text dropped, so a failing store never disturbs the session.
+func (t *voiceTranscript) file(role string, held *strings.Builder) {
+	text := strings.TrimSpace(held.String())
+	held.Reset()
+	if text == "" || t.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeTurnTimeout)
+	defer cancel()
+	if t.convID == 0 {
+		id, err := t.store.CreateConversation(ctx, voiceConversationTitle, "")
+		if err != nil {
+			slog.Error("voice: could not open a conversation", "error", err)
+			return
+		}
+		t.convID = id
+	}
+	if _, err := t.store.AddTurn(ctx, t.convID, role, text, "voice", nil, nil); err != nil {
+		slog.Error("voice: could not store a turn", "conversation_id", t.convID, "error", err)
+	}
+}
+
+// watch turns the agent's own channels into events on the hub for as long as the session runs: what the user said becomes "heard", what June said becomes "said", each tool call becomes "tool", and the session's state changes become "state". It also files the conversation as voice turns, and files what is left when the session ends.
 func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
+	transcript := &voiceTranscript{store: v.store}
+	defer transcript.flush()
 	for {
 		select {
 		case <-ctx.Done():
@@ -340,10 +397,12 @@ func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 		case chunk := <-run.Text():
 			switch {
 			case chunk.TurnBoundary:
+				transcript.flush()
 				v.setState(id, "listening")
 				// The end-of-turn marker is the one thing the live session sends per turn, so it is where the turn's token count is read and filed.
 				v.recordTurnUsage(run.Usage())
 			case chunk.Sender == agent.SenderYou:
+				transcript.heard(chunk.Text)
 				v.emit(id, "heard", chunk.Text)
 				if isStopPhrase(chunk.Text) {
 					// end waits for the run to return, and the run may be blocked writing the next chunk to the channel this loop reads, so it cannot be waited on from here.
@@ -356,6 +415,7 @@ func (v *VoiceSession) watch(ctx context.Context, id string, run voiceRunner) {
 			case chunk.Text != "":
 				// The first transcribed word of a reply is the closest thing to the first sound the agent reports outside its logs, so it is what marks the session as speaking.
 				v.setState(id, "speaking")
+				transcript.said(chunk.Text)
 				v.emit(id, "said", chunk.Text)
 			}
 		case tool := <-run.Tools():
