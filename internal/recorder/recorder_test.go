@@ -417,43 +417,74 @@ func loudSamples() []byte {
 	return b
 }
 
-// Sound on either side means the right sink is being recorded, and a warning then is noise in the middle of a call: in the real 2026-09-02 case the user was talking through a standup while everyone else on the call was muted and the call side sent exact zeros.
-func TestRecorder_NoSilenceWarningWhileSoundKeepsArriving(t *testing.T) {
-	r, cap, _ := newTestRecorder(t, &fakeStore{})
-	var got notifications
-	r.notify = got.add
-	// The window is wide enough that a busy CI runner pausing the writer goroutine does not read as a dead stream; the 30 ms it used to be failed on both Linux and Windows runners. The sleep below spans three windows, so a watchdog that listened to the call side alone would fire.
-	r.silenceAfter = 250 * time.Millisecond
-	stop, finished := make(chan struct{}), make(chan struct{})
-	r.capture = func(mic, system io.Writer) (capturer, time.Time, time.Time, error) {
+// feedStreams makes r's capture write the given samples to the microphone and the call stream every 2 ms. The returned function stops the writer and waits for it, which the real capture guarantees before the files are closed and this fake must too.
+func feedStreams(r *Recorder, cap *fakeCapture, mic, call []byte) (stop func()) {
+	done, finished := make(chan struct{}), make(chan struct{})
+	r.capture = func(micW, callW io.Writer) (capturer, time.Time, time.Time, error) {
 		go func() {
 			defer close(finished)
 			for {
 				select {
-				case <-stop:
+				case <-done:
 					return
 				case <-time.After(2 * time.Millisecond):
-					mic.Write(loudSamples())
-					system.Write(make([]byte, 3200))
+					micW.Write(mic)
+					callW.Write(call)
 				}
 			}
 		}()
 		now := time.Now()
 		return cap, now, now, nil
 	}
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+// Sound on both sides means the right sink is being recorded, and a warning then is noise in the middle of a call.
+func TestRecorder_NoSilenceWarningWhileSoundKeepsArriving(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	// The window is wide enough that a busy CI runner pausing the writer goroutine does not read as a dead stream; the 30 ms it used to be failed on both Linux and Windows runners. The sleep below spans three windows.
+	r.silenceAfter = 250 * time.Millisecond
+	stopFeeding := feedStreams(r, cap, loudSamples(), loudSamples())
 	if err := r.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	// The writer has to be off the files before stop closes them, which the real capture guarantees and this fake must too.
 	defer func() {
-		close(stop)
-		<-finished
+		stopFeeding()
 		r.stop()
 	}()
 
 	time.Sleep(750 * time.Millisecond)
 	if got.contains("audio") {
 		t.Errorf("a recording that is capturing sound must not warn, got %v", got.sent)
+	}
+}
+
+// A call that moves to another output device leaves the monitored sink silent while the microphone keeps working, so the call side alone going quiet has to warn, and the notice has to say what went quiet.
+func TestRecorder_WarnsWhenOnlyTheCallSideGoesSilent(t *testing.T) {
+	r, cap, _ := newTestRecorder(t, &fakeStore{})
+	var got notifications
+	r.notify = got.add
+	r.silenceAfter = 250 * time.Millisecond
+	stopFeeding := feedStreams(r, cap, loudSamples(), make([]byte, 3200))
+	if err := r.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		stopFeeding()
+		r.stop()
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !got.contains("nothing from the") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !got.contains("nothing from the") {
+		t.Errorf("expected a warning that nothing is coming from the call, got %v", got.sent)
 	}
 }
 

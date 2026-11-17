@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// defaultSilenceAfter is how long BOTH streams may stay quiet before the user is told. It was 45 seconds on the call side alone, which fired on 2026-09-02 in the middle of the user's own standup update (everyone else muted, so the call side was exact zeros) and again a minute after a call had ended. Sound on either side now counts, and the window is minutes rather than seconds.
+// defaultSilenceAfter is how long either stream may stay quiet before the user is told. It is minutes rather than seconds because a call where everyone else is muted, or one that has ended, sends exact zeros for a while.
 const defaultSilenceAfter = 3 * time.Minute
 
 // silenceFloor is the sample magnitude below which a stream counts as silent. A stream recorded from a sink nothing plays into is exact zeros; a real room floor with nobody speaking still sits above this.
@@ -40,18 +40,25 @@ func (s *silenceWatch) quietFor() time.Duration {
 }
 
 // shouldWarn decides whether the recording has gone dead. micQuiet and callQuiet are how long each stream has been below the noise floor; dropped is whether the capture reports a stream that is no longer running; window is defaultSilenceAfter or the test override.
+// A stream quiet for the whole window counts even when the other one is still carrying sound, because the call side going silent under a working microphone is how a call that moved to another output device looks.
 // Input: the two quiet durations, the dropped flag and the window. Output: true when the user should be told, and a one-line reason for the notification body.
 func shouldWarn(micQuiet, callQuiet time.Duration, dropped bool, window time.Duration) (bool, string) {
 	if dropped {
 		return true, "An audio stream stopped."
 	}
-	if micQuiet < window || callQuiet < window {
-		return false, ""
+	quiet := window.Round(time.Second)
+	switch micDead, callDead := micQuiet >= window, callQuiet >= window; {
+	case micDead && callDead:
+		return true, fmt.Sprintf("Nothing from the microphone or the call for %s.", quiet)
+	case callDead:
+		return true, fmt.Sprintf("Nothing from the call for %s, though the microphone is picking up sound.", quiet)
+	case micDead:
+		return true, fmt.Sprintf("Nothing from the microphone for %s, though the call is coming through.", quiet)
 	}
-	return true, fmt.Sprintf("Nothing from the microphone or the call for %s.", window.Round(time.Second))
+	return false, ""
 }
 
-// watchSilence warns once, at any point in the recording, when shouldWarn says the recording is dead: every stream quiet for the window, or a stream dropped. The mid-call case it exists for is the output device changing under the recording — earbuds connecting, or dying and the audio hopping back to the speakers — which is otherwise silently lost for the rest of the meeting.
+// watchSilence warns once, at any point in the recording, when shouldWarn says the recording is dead: a stream quiet for the window, or a stream dropped. The mid-call case it exists for is the output device changing under the recording — earbuds connecting, or dying and the audio hopping back to the speakers — which is otherwise silently lost for the rest of the meeting.
 // ponytail: the warning tells the user to fix it by hand. Re-running the active-sink detection and re-attaching the monitor stream to the new sink mid-recording would fix it without them, and is the named follow-up.
 func (r *Recorder) watchSilence(mic, call *silenceWatch, window time.Duration, dropped func() bool, done <-chan struct{}) {
 	tick := time.NewTicker(window / 3)
