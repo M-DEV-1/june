@@ -527,8 +527,11 @@ func (b GeminiBrain) AfterScreenRun(ctx context.Context, trace TurnTrace, outcom
 	b.Agent.AfterScreenRun(ctx, trace, outcome)
 }
 
-// shouldFallBack reports whether an ask failed in the one way another model can fix: the API said 503 UNAVAILABLE, the model itself is overloaded. Input: the error from askText, possibly wrapped. Output: true only for a 503 API error.
+// shouldFallBack reports whether an ask failed in a way another model can fix: the API said 503 UNAVAILABLE because the model is overloaded, or a request to it stalled past geminiRequestTimeout. Input: the error from askText, possibly wrapped. Output: true for either.
 func shouldFallBack(err error) bool {
+	if errors.Is(err, errRequestStalled) {
+		return true
+	}
 	// The SDK returns APIError by value; the pointer form is accepted too so a caller that wraps one is not missed.
 	var byValue genai.APIError
 	var byPointer *genai.APIError
@@ -726,11 +729,23 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	return tr, capError(tr.ToolHops)
 }
 
-// generateRound sends one GenerateContent request of a text ask's tool loop under an Ask.ModelRound span. Input: the client, the model, the round's index, and the request. Output: the response or the SDK's error.
+// geminiRequestTimeout is how long one GenerateContent request of a text ask may take, set above the 45 seconds the screen-vision call is budgeted and well under the 134 seconds a stalled request was seen to take. A variable only so a test can shrink it.
+var geminiRequestTimeout = 60 * time.Second
+
+// errRequestStalled is what generateRound fails with when a request ran past geminiRequestTimeout while the ask itself was still within its own deadline.
+var errRequestStalled = errors.New("the model did not answer in time")
+
+// generateRound sends one GenerateContent request of a text ask's tool loop under an Ask.ModelRound span and a geminiRequestTimeout deadline. Input: the client, the model, the round's index, and the request. Output: the response, the SDK's error, or errRequestStalled when only the request's own deadline passed.
 func generateRound(ctx context.Context, client *genai.Client, model string, round int, contents []*genai.Content, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
 	ctx, span := obs.StartSpan(ctx, "Ask.ModelRound", attribute.String("ask.model", model), attribute.Int("ask.round", round))
 	defer span.End()
-	return client.Models.GenerateContent(ctx, model, contents, cfg)
+	reqCtx, cancel := context.WithTimeout(ctx, geminiRequestTimeout)
+	defer cancel()
+	resp, err := client.Models.GenerateContent(reqCtx, model, contents, cfg)
+	if err != nil && ctx.Err() == nil && reqCtx.Err() != nil {
+		return nil, fmt.Errorf("%w (%s): %w", errRequestStalled, geminiRequestTimeout, err)
+	}
+	return resp, err
 }
 
 // maxAskRounds is the hard stop on how many times a tool loop may go round, whatever the step count says. A round that only looked at a screen it had already seen does not spend a step, so without this a model that does nothing but call observe_screen would loop forever. Twice the step cap: a task can afford one wasted look for every step it takes and still finish.
