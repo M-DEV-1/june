@@ -288,8 +288,12 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	// connectttt to livee apiii
 	span.SetAttributes(attribute.String("agent.model", config.VoiceModel()))
 
-	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
-	resp, err := a.brain.GetImplicitContext(handshakeCtx)
+	// The reads below fill the handshake prompt and may take only contextGatherTimeout between them; whatever is not back by then is left out, so a stuck store cannot hold the dial.
+	gatherCtx, cancelGather := context.WithTimeout(handshakeCtx, contextGatherTimeout)
+	defer cancelGather()
+
+	_, ctxSpan := tracer.Start(gatherCtx, "Agent.GetImplicitContext")
+	resp, err := a.brain.GetImplicitContext(gatherCtx)
 	if err != nil {
 		ctxSpan.RecordError(err)
 		ctxSpan.SetStatus(codes.Error, "failed to fetch context")
@@ -301,14 +305,14 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	for _, node := range resp {
 		contextParts = append(contextParts, "  "+node)
 	}
-	contextParts = append(contextParts, a.surfacePendingFolds(handshakeCtx)...)
+	contextParts = append(contextParts, a.surfacePendingFolds(gatherCtx)...)
 
-	contextParts = a.buildHandshakeContext(handshakeCtx, contextParts)
+	contextParts = a.buildHandshakeContext(gatherCtx, contextParts)
 
 	contextStr := strings.Join(contextParts, "\n")
 
 	// Personal context is read whole, not searched — it is small by construction and every entry is something the user stated themselves.
-	personalEntries, err := a.brain.PersonalContext(handshakeCtx)
+	personalEntries, err := a.brain.PersonalContext(gatherCtx)
 	if err != nil {
 		slog.Warn("personal context fetch failed, continuing without it", "error", err)
 	}
@@ -371,7 +375,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		return fmt.Errorf("live session refused: %w", err)
 	}
 	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
-	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel(), cfg)
+	session, err := connectLive(handshakeCtx, client, config.VoiceModel(), cfg)
 	if err != nil {
 		wsSpan.RecordError(err)
 		wsSpan.End()
@@ -430,6 +434,42 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	case <-sessCtx.Done():
 		return sessCtx.Err()
 	}
+}
+
+// contextGatherTimeout is how long the reads that fill the handshake prompt may take together, before the Live dial starts. They are local store reads that finish in milliseconds, so this only matters when something is stuck. A variable only so a test can shrink it.
+var contextGatherTimeout = 10 * time.Second
+
+// liveConnectTimeout is how long the Live websocket dial may take before connectLive gives up on it. A variable only so a test can shrink it.
+var liveConnectTimeout = 15 * time.Second
+
+// connectLive dials the Live API and returns the session, or an error once liveConnectTimeout has passed or ctx is done. The SDK's Connect ignores its context, so it is run in the background and abandoned on timeout: a server that accepts the connection and never answers would otherwise hold the redial loop for as long as the SDK's own limit. A session that arrives after the timeout is closed so no socket is left open.
+func connectLive(ctx context.Context, client *genai.Client, model string, cfg *genai.LiveConnectConfig) (*genai.Session, error) {
+	type dialed struct {
+		session *genai.Session
+		err     error
+	}
+	result := make(chan dialed, 1)
+	go func() {
+		session, err := client.Live.Connect(ctx, model, cfg)
+		result <- dialed{session, err}
+	}()
+	timer := time.NewTimer(liveConnectTimeout)
+	defer timer.Stop()
+	var cause error
+	select {
+	case r := <-result:
+		return r.session, r.err
+	case <-timer.C:
+		cause = fmt.Errorf("no answer within %s", liveConnectTimeout)
+	case <-ctx.Done():
+		cause = ctx.Err()
+	}
+	go func() {
+		if r := <-result; r.session != nil {
+			r.session.Close()
+		}
+	}()
+	return nil, cause
 }
 
 // voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
