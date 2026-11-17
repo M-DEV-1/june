@@ -428,6 +428,36 @@ func TestScheduler_Close_CatchesUpADaySleptThrough(t *testing.T) {
 	}
 }
 
+// TestScheduler_Close_CatchesUpYesterdayBeforeTodaysCloseHour pins the gap the October 2026 nights fell through: the catch-up above only ran once today's close hour had passed, so a laptop that is never on after 22:00 never got yesterday's entry either (Oct 6 had 126 episodes and no day row). Yesterday is over whatever the clock says now, so it closes on the first tick of the day.
+func TestScheduler_Close_CatchesUpYesterdayBeforeTodaysCloseHour(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	n := time.Now()
+	afternoon := time.Date(n.Year(), n.Month(), n.Day(), 14, 0, 0, 0, n.Location())
+	yesterdayNoon := afternoon.AddDate(0, 0, -1).Add(-2 * time.Hour)
+
+	stub := &stubStore{Store: store, summaries: func(ctx context.Context, since, until time.Time) ([]db.WindowSummary, error) {
+		if yesterdayNoon.Before(since) || yesterdayNoon.After(until) {
+			return nil, nil
+		}
+		return []db.WindowSummary{{CreatedAt: yesterdayNoon, Content: "wrote the recorder"}}, nil
+	}}
+	s := New(stub, func(ctx context.Context, prompt string) (string, error) {
+		return "Yesterday was the recorder.", nil
+	}, func(string, string) {}, config.ProactiveConfig{BriefHour: -1})
+	s.closeHour = 22
+	s.now = func() time.Time { return afternoon }
+
+	s.tick(ctx)
+
+	if entry, _ := store.DiaryEntry(ctx, afternoon.AddDate(0, 0, -1).Format(time.DateOnly), "day"); entry != "Yesterday was the recorder." {
+		t.Errorf("yesterday's diary entry = %q, want it written at 14:00 without waiting for today's close hour", entry)
+	}
+	if entry, _ := store.DiaryEntry(ctx, afternoon.Format(time.DateOnly), "day"); entry != "" {
+		t.Errorf("today was closed before its close hour: %q", entry)
+	}
+}
+
 // TestScheduler_Close_GivesEachDayItsOwnDeadline checks the catch-up day and today are closed under a deadline each, not both under one. Each close makes two brain calls, so four calls had to fit in one duty timeout on the first tick after a night the machine slept through, and the deadline expiring made yesterday's close eat the budget today's needed.
 func TestScheduler_Close_GivesEachDayItsOwnDeadline(t *testing.T) {
 	ctx := context.Background()
