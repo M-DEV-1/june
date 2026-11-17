@@ -81,7 +81,8 @@ func startDaemon(t *testing.T, world fixture.World) *daemon {
 	}
 	cmd := exec.Command(juneBin, "--daemon")
 	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = root, env, out, out
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Pdeathsig kills the daemon when the test process dies without running its cleanups, as it does when go test hits its timeout.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
