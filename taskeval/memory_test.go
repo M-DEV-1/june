@@ -109,14 +109,14 @@ func lineWith(text string, parts ...string) error {
 	return fmt.Errorf("no tool result line has all of %q", parts)
 }
 
-// TestMemory runs every memory task against a daemon seeded with each seed's world, and appends one line per task to out/results.jsonl.
+// TestMemory runs every memory task against its own daemon seeded with each seed's world, and appends one line per task to out/results.jsonl. A task gets a fresh daemon because the daemon keeps running an ask after the harness gives up on it, and that ask would otherwise share the model and the memory figures with the next task.
 func TestMemory(t *testing.T) {
 	for _, s := range seeds(t) {
 		world := fixture.Build(s.Seed)
 		t.Run(fmt.Sprintf("seed=%d", s.Seed), func(t *testing.T) {
-			d := startDaemon(t, world)
 			for _, task := range memoryTasks {
 				t.Run(task.name, func(t *testing.T) {
+					d := startDaemon(t, world)
 					run, err := runTask(t, d, task.name, task.question(world), task.vars(world))
 					if err == nil && !live {
 						err = task.toolsHave(world, run.Tools)
