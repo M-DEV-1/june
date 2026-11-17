@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -925,6 +927,27 @@ func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
 	case sent := <-fs.sentContent:
 		t.Fatalf("expected nothing left to re-deliver, got %+v", sent.Turns)
 	default:
+	}
+}
+
+// TestConnect_FailedResumedHandshakeDropsTheHandle verifies a redial whose handshake the server refuses forgets the resumption handle, so the next dial starts a fresh session instead of failing the same way on the same handle.
+func TestConnect_FailedResumedHandshakeDropsTheHandle(t *testing.T) {
+	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused", http.StatusBadRequest)
+	}))
+	defer refuser.Close()
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws"+strings.TrimPrefix(refuser.URL, "http"))
+
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "key")
+	a.setResumeHandle("stale-handle")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := a.Connect(ctx, nil)
+	if err == nil || !strings.Contains(err.Error(), "websocket handshake failed") {
+		t.Fatalf("Connect error = %v, want the handshake failure", err)
+	}
+	if got := a.getResumeHandle(); got != "" {
+		t.Errorf("resume handle after a refused resumed handshake = %q, want it cleared", got)
 	}
 }
 

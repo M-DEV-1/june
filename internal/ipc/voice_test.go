@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -343,15 +344,28 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/events", s.Events)
 	mux.HandleFunc("/voice/start", v.Start)
 	mux.HandleFunc("/voice/status", v.Status)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+
 	start := voicePost(t, srv, "/voice/start")
 	start.Body.Close()
 
 	waitState(t, srv, "idle")
+
+	// The idle event that ends the session carries why it ended, since the window otherwise just sees the session vanish.
+	idle := mustEvent(t, events)
+	for idle.Type != "state" || idle.Text != "idle" {
+		idle = mustEvent(t, events)
+	}
+	if !strings.Contains(idle.Detail, run.err.Error()) {
+		t.Errorf("idle event detail = %q, want it to carry the failure %q", idle.Detail, run.err)
+	}
 
 	if n := run.calls.Load(); n != int64(voiceMaxConsecutiveFailures) {
 		t.Fatalf("Run was called %d times before giving up, want %d", n, voiceMaxConsecutiveFailures)

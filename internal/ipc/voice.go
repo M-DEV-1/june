@@ -190,7 +190,7 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	v.mu.Lock()
 	if v.id != "" {
 		v.mu.Unlock()
-		http.Error(w, "a voice session is already running", http.StatusConflict)
+		refuseStart(w, http.StatusConflict, "a voice session is already running")
 		return
 	}
 	v.seq++
@@ -204,10 +204,10 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errNoVoiceKey) {
 			// Plain text, since the hover shows the body as it is. The window has a key box in Settings and in setup, so that is where this points rather than at a file.
 			markNoKey(w)
-			http.Error(w, noVoiceKeySentence, http.StatusServiceUnavailable)
+			refuseStart(w, http.StatusServiceUnavailable, noVoiceKeySentence)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		refuseStart(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -221,7 +221,7 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 		mic.Close()
 		speaker.Close()
 		v.clearReservation(id)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		refuseStart(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -233,12 +233,13 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		mic.Close()
 		speaker.Close()
-		http.Error(w, "voice session was stopped while starting", http.StatusConflict)
+		refuseStart(w, http.StatusConflict, "voice session was stopped while starting")
 		return
 	}
 	v.state, v.cancel, v.done, v.mic, v.speaker = "listening", cancel, done, mic, speaker
 	v.mu.Unlock()
 
+	slog.Info("voice session started", "id", id)
 	v.emit(id, "state", "listening")
 	v.touched()
 	go v.watch(ctx, id, run)
@@ -248,6 +249,12 @@ func (v *VoiceSession) Start(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"id": id})
+}
+
+// refuseStart answers a POST /voice/start that did not produce a session and logs why, so a start that went nowhere leaves a line in the log. Input: the response, its status code and the plain-text reason sent as the body.
+func refuseStart(w http.ResponseWriter, code int, reason string) {
+	slog.Warn("voice start refused", "status", code, "reason", reason)
+	http.Error(w, reason, code)
 }
 
 // clearReservation releases the id Start reserved for a session whose hardware never came up, but only while that reservation is still standing — a concurrent Stop may already have cleared it, in which case there is nothing left for this to undo.
@@ -275,6 +282,7 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 	var delay time.Duration
 	failures := 0
 	for {
+		slog.Info("daemon voice session dialing", "id", id, "failures_so_far", failures)
 		err := run.Run(ctx, micChan)
 		if ctx.Err() != nil {
 			return
@@ -290,7 +298,7 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 		failures++
 		if failures >= voiceMaxConsecutiveFailures {
 			slog.Error("daemon voice session failed too many times in a row, giving up — check that the Gemini API key (GEMINI_API_KEY) is set and valid", "id", id, "error", err, "attempts", failures)
-			v.giveUp(id)
+			v.giveUp(id, fmt.Sprintf("gave up after %d failed attempts: %v", failures, err))
 			return
 		}
 		if delay == 0 {
@@ -307,8 +315,8 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 	}
 }
 
-// giveUp tears a session down from inside dial itself once retrying it has stopped being worth it: it releases the microphone and the speaker and broadcasts idle, the same as Stop, but does not wait on done — dial is the very goroutine that closes done, on its way out right after this returns, so waiting on it here would deadlock. It does still call cancel, same as Stop/end: without it the session's ctx is never cancelled, and watch's goroutine — parked on ctx.Done() and the agent's channels — leaks forever instead of returning once dial gives up. Input: the id of the session dial was running. Output: nothing. A stop landing at the same moment is safe either way: whichever of the two clears v.id first does the teardown, and the other finds nothing left of this session to do.
-func (v *VoiceSession) giveUp(id string) {
+// giveUp tears a session down from inside dial itself once retrying it has stopped being worth it: it releases the microphone and the speaker and broadcasts idle with the reason in Detail, the same as Stop otherwise, but does not wait on done — dial is the very goroutine that closes done, on its way out right after this returns, so waiting on it here would deadlock. It does still call cancel, same as Stop/end: without it the session's ctx is never cancelled, and watch's goroutine — parked on ctx.Done() and the agent's channels — leaks forever instead of returning once dial gives up. Input: the id of the session dial was running and why it is giving up. Output: nothing. A stop landing at the same moment is safe either way: whichever of the two clears v.id first does the teardown, and the other finds nothing left of this session to do.
+func (v *VoiceSession) giveUp(id, reason string) {
 	v.mu.Lock()
 	if v.id != id {
 		v.mu.Unlock()
@@ -327,7 +335,8 @@ func (v *VoiceSession) giveUp(id string) {
 	if speaker != nil {
 		speaker.Close()
 	}
-	v.emit(id, "state", "idle")
+	slog.Info("voice session stopped", "id", id, "reason", reason)
+	v.hub.broadcast(Event{ID: id, Type: "state", Text: "idle", Detail: reason, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 	v.touched()
 }
 
@@ -426,6 +435,7 @@ func (v *VoiceSession) end() {
 		speaker.Close()
 	}
 	if id != "" {
+		slog.Info("voice session stopped", "id", id, "reason", "stop requested")
 		v.emit(id, "state", "idle")
 		v.touched()
 	}

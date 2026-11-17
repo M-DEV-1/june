@@ -387,6 +387,11 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		wsSpan.End()
 		span.RecordError(err)
 		span.End()
+		// A handle the server will not resume from fails every redial the same way, so the next dial starts a fresh session instead.
+		if priorHandle != "" {
+			slog.Warn("resumed handshake failed, dropping the resumption handle", "error", err)
+			a.setResumeHandle("")
+		}
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
 	wsSpan.End()
