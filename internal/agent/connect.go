@@ -85,6 +85,16 @@ func thinkingConfigFor(model string) *genai.ThinkingConfig {
 	return cfg
 }
 
+// voiceThinkingConfig is thinkingConfig for the live voice session, with thought summaries switched off: the window only needs a "thinking" state, and a reply's spoken transcript has begun with the model's own reasoning while summaries were being requested. Output: the thinking config, or nil when switching thoughts off leaves nothing to send.
+func voiceThinkingConfig() *genai.ThinkingConfig {
+	cfg := thinkingConfig()
+	cfg.IncludeThoughts = false
+	if *cfg == (genai.ThinkingConfig{}) {
+		return nil
+	}
+	return cfg
+}
+
 // compressionTriggerTokens is the context size at which the Live API compresses the session's history. At native audio's ~25 tokens/sec, 64k tokens is roughly the first 42 minutes of a session before compression ever kicks in. The model's own context window is 128k, so this sits at half of it, leaving headroom for the system prompt and tool schemas on top. Raised from an initial 25000 (the SDK's own suggested default) — if voice first-response latency degrades noticeably in live use, this and compressionTargetTokens are the knob to turn back down (toward 40000/16000, the previous step, before reverting all the way to 25000/8000).
 const compressionTriggerTokens = 64000
 
@@ -345,7 +355,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		// Requesting session resumption (even with an empty handle) makes the server send SessionResumptionUpdate messages so a handle can be captured for a future reconnect; a non-empty handle here resumes the previous session instead of starting cold.
 		SessionResumption:   &genai.SessionResumptionConfig{Handle: priorHandle},
 		RealtimeInputConfig: realtimeInputConfig(),
-		ThinkingConfig:      thinkingConfig(),
+		ThinkingConfig:      voiceThinkingConfig(),
 		// InputAudioTranscription is what makes voice per-turn retrieval possible at all (see receiveLoop's InputTranscription handling below) — it does NOT change how audio is generated or played; it's purely an additive text side-channel alongside the native audio-in/audio-out the Live API already provides.
 		InputAudioTranscription: inputTranscriptionConfig(),
 		// OutputAudioTranscription is enabled for the same reason but has no consumer yet — June's own spoken replies transcribed to text is what conversation persistence needs, deliberately left for that later piece of work rather than half-wiring a consumer with nowhere to store the result.
@@ -749,18 +759,21 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			var textContent string
 
 			for _, part := range msg.ServerContent.ModelTurn.Parts {
-				if part.Text != "" {
-					if part.Thought {
+				// A thought part only feeds the log and the window's "thinking" state. It is never played, whatever else the part carries.
+				if part.Thought {
+					if part.Text != "" {
 						slog.Debug("june thought", "text", part.Text)
 						select {
 						case a.TextResponseChan <- ResponseChunk{Text: part.Text, IsThought: true}:
 						default:
 						}
-					} else {
-						// Not forwarded to TextResponseChan: under ResponseModalities=[Audio], non-thought ModelTurn text parts are incomplete fragments — OutputTranscription (handled above) is the complete-text source.
-						slog.Debug("june response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
-						textContent = part.Text
 					}
+					continue
+				}
+				if part.Text != "" {
+					// Not forwarded to TextResponseChan: under ResponseModalities=[Audio], non-thought ModelTurn text parts are incomplete fragments — OutputTranscription (handled above) is the complete-text source.
+					slog.Debug("june response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
+					textContent = part.Text
 				}
 				// if part is audio
 				if part.InlineData != nil {
