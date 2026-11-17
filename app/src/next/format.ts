@@ -204,6 +204,16 @@ export function hotkeyKeys(accel: string): string[] {
     );
 }
 
+/** Picks a Gemini key out of what was copied. Input: the clipboard's text, and the daemon's rule for a plausible key as GET /setup's key_pattern (absent from an older daemon). Output: the key with the space around it trimmed, or "" when the text does not match the rule or there is no rule to match it against. */
+export function keyOnClipboard(text: string, pattern: string | undefined): string {
+  const key = text.trim();
+  try {
+    return pattern && new RegExp(pattern).test(key) ? key : "";
+  } catch {
+    return "";
+  }
+}
+
 /** How far a download has got, as one line a person can read. Input: the bytes fetched so far, the bytes in all, and the rate in bytes a second (0 when not known yet). Output: "1.2 GB of 2.1 GB · 6.3 MB/s · about 3 min left", dropping whichever part there is nothing to say about yet. */
 export function downloadLine(done: number, total: number, bps: number): string {
   const parts = [total > 0 ? `${bytes(done)} of ${bytes(total)}` : done > 0 ? bytes(done) : ""];

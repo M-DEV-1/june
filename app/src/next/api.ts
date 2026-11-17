@@ -332,6 +332,8 @@ export type SetupView = {
   data_dir: string;
   /** Linux only: whether June's GNOME extension answers with window frames, which screen control needs. false until the first logout after installing; absent where there is no such check. */
   window_frames?: boolean;
+  /** The daemon's rule for what a Gemini key looks like, as a regular expression; absent from a daemon that predates it. */
+  key_pattern?: string;
 };
 
 /** What POST and DELETE /setup/gemini-key answer once the key is written: the daemon restarts itself straight after, because the key is read once at start and threaded into everything built then. Both refuse 409 with "recording", "processing" or "downloading" as the error word while that restart would cut a meeting or a download short, with nothing changed. */

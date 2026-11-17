@@ -51,6 +51,8 @@ type SetupView struct {
 	Hotkey         string `json:"hotkey"`
 	RestartPending bool   `json:"restart_pending"`
 	DataDir        string `json:"data_dir"`
+	// KeyPattern is plausibleKey as a regular expression, for the window to recognise a Gemini key on the clipboard by the rule the save route applies.
+	KeyPattern string `json:"key_pattern"`
 }
 
 // MicTestResult is POST /setup/mic-test. Peak is on the same 0-1 scale as the level events the meter draws; Heard is whether the loudest moment reached what dictation counts as speech; Consent is "allowed", "blocked" or "unknown"; Error says why the microphone could not be opened, "" when it was.
@@ -135,6 +137,7 @@ func (s *setupRoutes) get(w http.ResponseWriter, r *http.Request) {
 		Hotkey:         readableHotkey(windowHotkey()),
 		RestartPending: lifecycle.RestartPending(),
 		DataDir:        s.d.DataDir,
+		KeyPattern:     plausibleKey.String(),
 	}
 	for _, b := range brainList(r.Context(), cfg, home, onPath, nil) {
 		if b.Default {
