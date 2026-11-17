@@ -74,6 +74,8 @@ if [ "$is_gnome" = true ] && command -v gnome-extensions >/dev/null 2>&1; then
 		"$here/gnome-extension/check-shell-version.sh" || true
 	fi
 	gnome-extensions enable june@june.local >/dev/null 2>&1 || true
+	# The enable call above says nothing about whether the shell loaded the extension. Its state, or the shell's error for it, is printed so a refused extension is seen here.
+	gnome-extensions info june@june.local 2>&1 | sed 's/^/  /' || true
 	echo "Window-raising extension installed: on Wayland, log out and back in once to finish enabling it."
 fi
 

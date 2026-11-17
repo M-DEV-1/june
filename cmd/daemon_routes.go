@@ -237,6 +237,7 @@ func registerDaemonRoutes(mux *http.ServeMux, d routeDependencies) {
 		ResumeTracking: pauses.resume,
 		Server:         ipcServer,
 		RestartBlocker: d.restartBlocker,
+		WindowFrames:   setupWindowFrames,
 	})
 	// Every setup route but the read can restart June on the user's behalf, saving the key above all, and the window they came from expects to come back (see restartAsks).
 	for pattern, h := range setup {

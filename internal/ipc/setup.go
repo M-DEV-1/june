@@ -38,6 +38,8 @@ type SetupDeps struct {
 	// RestartBlocker names what a restart right now would cut short: "recording" while a meeting is being recorded, "processing" while one is still being transcribed and written up, "downloading" while local features are downloading or installing, and "" when nothing would. Saving or removing the key restarts June, so both refuse while it names anything; the restart POST /setup/complete owes waits until it names nothing. nil is a daemon with nothing to protect.
 	// cmd's blocker also names what the person is in the middle of: "voice" while a conversation is open, "dictating", "acting" while a screen job is running, paused or waiting on an answer, and "asking" while an answer is being written. The key routes refuse for those the same way, and the restart setup owes waits for them and then for a quiet spell (restartQuiet).
 	RestartBlocker func() string
+	// WindowFrames says whether the desktop's window-frame source answers, which screen control needs: nil when there is no such source to wait for, otherwise whether it answers now. nil is a daemon that reports nothing.
+	WindowFrames func(context.Context) *bool
 }
 
 // SetupView is GET /setup.
@@ -51,6 +53,8 @@ type SetupView struct {
 	Hotkey         string `json:"hotkey"`
 	RestartPending bool   `json:"restart_pending"`
 	DataDir        string `json:"data_dir"`
+	// WindowFrames is SetupDeps.WindowFrames' answer, asked only until setup is done, and left out when it has none.
+	WindowFrames *bool `json:"window_frames,omitempty"`
 	// KeyPattern is plausibleKey as a regular expression, for the window to recognise a Gemini key on the clipboard by the rule the save route applies.
 	KeyPattern string `json:"key_pattern"`
 }
@@ -138,6 +142,9 @@ func (s *setupRoutes) get(w http.ResponseWriter, r *http.Request) {
 		RestartPending: lifecycle.RestartPending(),
 		DataDir:        s.d.DataDir,
 		KeyPattern:     plausibleKey.String(),
+	}
+	if s.d.WindowFrames != nil && !cfg.SetupDone {
+		view.WindowFrames = s.d.WindowFrames(r.Context())
 	}
 	for _, b := range brainList(r.Context(), cfg, home, onPath, nil) {
 		if b.Default {
