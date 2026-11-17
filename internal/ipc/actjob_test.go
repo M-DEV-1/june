@@ -127,6 +127,13 @@ func TestActRoutes_StartThenReadThenFinish(t *testing.T) {
 	if job.State != actjob.Done {
 		t.Fatalf("job state = %q, want done", job.State)
 	}
+	// The runner publishes the done state a moment before it emits the done event, so wait for the event too.
+	for time.Now().Before(deadline) {
+		if evs := events(); len(evs) > 0 && strings.Contains(evs[len(evs)-1].Detail, `"kind":"done"`) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 
 	got := post(t, j, "GET", "/act/"+started.ID, "")
 	if got.Code != http.StatusOK {
