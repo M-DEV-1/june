@@ -453,6 +453,26 @@ func TestPlainAskPrompt_LeavesOutTheScreenBlocks(t *testing.T) {
 	}
 }
 
+// do and branch are offered to the live voice session only, so the guidance about them is in its prompt and in no text ask's, whatever the provider.
+func TestTextPrompts_LeaveOutTheGuidanceForToolsOnlyVoiceHas(t *testing.T) {
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "")
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.Local)
+	handshake, _ := a.HandshakePrompt(t.Context(), now)
+	for name, text := range map[string]string{"plain": a.plainAskPrompt(t.Context(), now), "lean": a.LeanPrompt(t.Context(), now), "handshake": handshake} {
+		if strings.Contains(text, jobToolsGuidance) {
+			t.Errorf("the %s text prompt tells the model to call do or branch, which an ask refuses", name)
+		}
+	}
+	if voice := systemInstructionText(now, "linux", "amd64", "bash", "", "", 0); !strings.Contains(voice, jobToolsGuidance) {
+		t.Error("the voice prompt lost its guidance on do and branch")
+	}
+	for _, name := range []string{"do", "branch"} {
+		if askAllowedTools[name] || subtaskAllowedTools[name] {
+			t.Errorf("%q is now allowed in an ask, so the text prompts need its guidance back", name)
+		}
+	}
+}
+
 // offeredToolNames reads the names of the function declarations out of one request body the Gemini text path sent.
 func offeredToolNames(t *testing.T, body string) map[string]bool {
 	t.Helper()
