@@ -50,3 +50,6 @@ notes-local/
 design/
 node_modules/
 __pycache__/
+
+# Task eval results, one JSON line per task run
+taskeval/out/
