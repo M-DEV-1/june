@@ -16,7 +16,6 @@ import (
 type memoryAskSizes struct {
 	System, Turn, Tools int
 	PerTool             map[string]int
-	SystemText          string
 }
 
 func (s memoryAskSizes) total() int { return s.System + s.Turn + s.Tools }
@@ -77,7 +76,6 @@ func askOneMemoryQuestion(t *testing.T) memoryAskSizes {
 	sizes := memoryAskSizes{PerTool: map[string]int{}}
 	for _, p := range req.SystemInstruction.Parts {
 		sizes.System += len(p.Text)
-		sizes.SystemText += p.Text
 	}
 	for _, c := range req.Contents {
 		for _, p := range c.Parts {
@@ -95,11 +93,17 @@ func askOneMemoryQuestion(t *testing.T) memoryAskSizes {
 	return sizes
 }
 
-// TestMemoryAskRequestSize logs what a plain memory question sends, part by part, so a change to the prompt or the tool list shows its effect with go test -v.
-func TestMemoryAskRequestSize(t *testing.T) {
+// maxMemoryAskBytes caps the request a plain memory question sends. Measured 27,347 bytes (about 6,800 tokens at four bytes to a token) with the store, understanding doc and recalled lines askOneMemoryQuestion builds, and set 10% above that, so a new tool, a longer tool description or a longer prompt block fails here before it slows every text ask.
+const maxMemoryAskBytes = 30100
+
+// TestMemoryAskStaysUnderItsSizeBudget fails when a plain memory question sends more than maxMemoryAskBytes, and logs the size part by part so go test -v shows where a change landed.
+func TestMemoryAskStaysUnderItsSizeBudget(t *testing.T) {
 	got := askOneMemoryQuestion(t)
 	if got.total() == 0 {
 		t.Fatal("the ask sent nothing")
+	}
+	if got.total() > maxMemoryAskBytes {
+		t.Errorf("a plain memory question sends %d bytes, over the budget of %d", got.total(), maxMemoryAskBytes)
 	}
 	t.Logf("system %d bytes (~%d tokens), tools %d (~%d), turn %d (~%d), total %d (~%d)", got.System, got.System/4, got.Tools, got.Tools/4, got.Turn, got.Turn/4, got.total(), got.total()/4)
 	names := make([]string, 0, len(got.PerTool))
