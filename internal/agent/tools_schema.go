@@ -258,16 +258,14 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "query_store",
 				Description: "Run one read-only SQL query straight against June's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer, counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
-					"query_memory searches by meaning and ranks by relevance; this reads the tables directly, so use it whenever the real answer is a COUNT, a GROUP BY, a MIN/MAX, or a join across tables rather than the ten most-relevant rows. " +
-					"The connection itself is read-only, INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA-writes fail at the database, not by a filter on your text, so only SELECT, PRAGMA table_info(...), and EXPLAIN can do anything. " +
-					"Exactly one statement per call, no trailing statements after a semicolon. " +
+					"Only SELECT, PRAGMA table_info(...) and EXPLAIN do anything: writes fail at the database, not by a filter on your text. " +
 					"Every *_at/*_time column is UTC text, for anything the user would call \"today\" or an hour of day, wrap it: datetime(created_at,'localtime') BETWEEN ... " +
 					"Results render as a header line of column names, then one line per row with values separated by a TAB, window titles routinely contain pipes and spaces, so a tab is the only separator that stays unambiguous. A query matching nothing says \"no rows matched\" plainly. Output is capped in rows and characters, add LIMIT or aggregate rather than pulling raw rows if you hit the cap. " +
 					"Meetings are NOT episodes: an episode is a screen capture, so searching episodes for an app called Teams or Zoom finds the window and never the meeting. A meeting's minutes are a note with kind='meeting'. " +
 					"An action note carries its state as a [state/priority] prefix at the start of content, so the things still owed are kind='action' AND content LIKE '[open/%'. " +
 					"episodes_fts and memory_fts are full-text indexes: use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id, or \"memory_fts MATCH 'word'\" where source names the table ref_id points into. " +
 					"There is no table called \"memory\", and none called \"tasks\". Facts are in notes, captures in episodes, conversations in threads; memory_fts is only the full-text shadow of notes. The schema below is the whole of it, read from the store itself — nothing outside it exists. " +
-					"Schema, read from the store itself. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
+					"Schema. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
