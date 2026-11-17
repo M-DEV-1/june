@@ -4,6 +4,7 @@ package audio
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -43,9 +44,12 @@ func NewSpeaker() (Speaker, error) {
 		pulse.PlaybackLatency(0.05),
 	}
 	// Played through the echo-cancel sink when there is one, so the canceller on EchoCancelSource knows what June said and can take it back out of the mic (see capture_linux.go).
+	sinkName := "default"
 	if sink, err := c.SinkByID(EchoCancelSink); err == nil {
 		opts = append(opts, pulse.PlaybackSink(sink))
+		sinkName = EchoCancelSink
 	}
+	slog.Info("speaker opened", "sink", sinkName)
 	stream, err := c.NewPlayback(pulse.Int16Reader(s.readFn), opts...)
 	if err != nil {
 		c.Close()

@@ -5,6 +5,7 @@ package audio
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,8 @@ type pulseMic struct {
 	// voice marks the voice session's mic, which gets a fresh echoGuard on every StartCapture. Dictation and the mic test leave guard nil: the user starts speaking right after the key press, which the open-time mute would cut.
 	voice bool
 	guard *echoGuard
+	// releaseEchoCancel unloads the echo canceller the voice session loaded. nil on every other mic.
+	releaseEchoCancel func()
 }
 
 // NewMic returns an uninitialised mic; hardware is connected lazily in StartCapture.
@@ -37,9 +40,9 @@ func NewMic() (Microphone, error) {
 	return &pulseMic{}, nil
 }
 
-// NewVoiceMic is NewMic for the voice session: each StartCapture also mutes the first second and silences chunks that are only June's own voice coming back (see echoGuard).
+// NewVoiceMic is NewMic for the voice session: each StartCapture also mutes the first second and silences chunks that are only June's own voice coming back (see echoGuard). It also loads the audio server's echo canceller when it has none, before the session opens its speaker, and Close unloads it again if it was loaded here.
 func NewVoiceMic() (Microphone, error) {
-	return &pulseMic{voice: true}, nil
+	return &pulseMic{voice: true, releaseEchoCancel: startEchoCancel()}, nil
 }
 
 func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
@@ -78,10 +81,13 @@ func (m *pulseMic) StartCapture(ctx context.Context) (<-chan []byte, error) {
 		pulse.RecordChannels(proto.ChannelMap{proto.ChannelMono}),
 		pulse.RecordLatency(0.05),
 	}
-	// The echo-cancelled source, when the audio server has one (see ~/.config/pipewire/pipewire.conf.d/99-june-echo-cancel.conf). It subtracts whatever is played through EchoCancelSink and suppresses room noise, so the mic stops hearing June's own replies and answering them; recording from the default mic instead is what looped a session on 2026-09-07. Absent, the default mic is used as before.
+	// The echo-cancelled source, when the audio server has one (the voice session loads it, see NewVoiceMic). It subtracts whatever is played through EchoCancelSink and suppresses room noise, so the mic stops hearing June's own replies and answering them. Absent, the default mic is used.
+	source := "default"
 	if src, err := c.SourceByID(EchoCancelSource); err == nil {
 		opts = append(opts, pulse.RecordSource(src))
+		source = EchoCancelSource
 	}
+	slog.Info("microphone opened", "source", source, "voice", m.voice)
 	stream, err := c.NewRecord(pulse.Int16Writer(m.writeFn), opts...)
 	if err != nil {
 		cancel()
@@ -152,10 +158,14 @@ func (m *pulseMic) CurrentAmplitude() float64 {
 
 func (m *pulseMic) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.isCapturing = false
 	if m.cancel != nil {
 		m.cancel()
+	}
+	release := m.releaseEchoCancel
+	m.mu.Unlock()
+	if release != nil {
+		release()
 	}
 	return nil
 }
