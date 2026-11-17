@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -914,5 +917,84 @@ func TestReceiveLoop_ResumedSessionThatDiesSilently_DropsTheHandle(t *testing.T)
 				t.Errorf("resume handle = %q, want %q", got, tc.wantHandle)
 			}
 		})
+	}
+}
+
+// silentServer accepts TCP connections and never answers on them, standing in for a Live endpoint that is reachable but hangs the handshake. Input: the test. Output: the websocket base URL to give the client.
+func silentServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	return "ws://" + ln.Addr().String()
+}
+
+// TestConnect_UnansweredHandshake_FailsWithinTheBoundEachTime verifies a dial to a server that never answers returns an error after liveConnectTimeout, and that a second dial straight after does the same, so a redial loop is never stuck behind the first.
+func TestConnect_UnansweredHandshake_FailsWithinTheBoundEachTime(t *testing.T) {
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", silentServer(t))
+	defer func(d time.Duration) { liveConnectTimeout = d }(liveConnectTimeout)
+	liveConnectTimeout = 100 * time.Millisecond
+
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "key")
+	for attempt := 1; attempt <= 2; attempt++ {
+		started := time.Now()
+		err := a.Connect(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "no answer within") {
+			t.Fatalf("attempt %d: Connect error = %v, want the timeout", attempt, err)
+		}
+		if took := time.Since(started); took > 2*time.Second {
+			t.Errorf("attempt %d took %v, want it to fail near the %v bound", attempt, took, liveConnectTimeout)
+		}
+	}
+}
+
+// hangingContextBrain is a brain whose handshake-context read never returns until its context ends.
+type hangingContextBrain struct{ toolTestBrain }
+
+func (b *hangingContextBrain) GetImplicitContext(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestConnect_StuckContextRead_DoesNotHoldTheDial verifies a store read that never returns costs at most contextGatherTimeout, after which the dial carries on without that context.
+func TestConnect_StuckContextRead_DoesNotHoldTheDial(t *testing.T) {
+	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused", http.StatusBadRequest)
+	}))
+	defer refuser.Close()
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws"+strings.TrimPrefix(refuser.URL, "http"))
+	defer func(d time.Duration) { contextGatherTimeout = d }(contextGatherTimeout)
+	contextGatherTimeout = 100 * time.Millisecond
+
+	a := NewAgent(nil, nil, &hangingContextBrain{}, nil, "key")
+	started := time.Now()
+	err := a.Connect(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "websocket handshake failed") {
+		t.Fatalf("Connect error = %v, want the dial to be reached and refused", err)
+	}
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("Connect took %v, want it to stop waiting on the stuck read near the %v bound", took, contextGatherTimeout)
 	}
 }
