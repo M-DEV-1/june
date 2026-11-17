@@ -9,6 +9,7 @@ import (
 
 	"june/internal/brain"
 	"june/internal/config"
+	"june/internal/util"
 )
 
 // TextEngine owns the local text-generation llama-server as a child process, the same way Engine owns the embedding one, so June's unattended text jobs answer from a local model instead of spending metered API quota.
@@ -62,7 +63,7 @@ func NewTextEngine(cfg config.JuneConfig) *TextEngine {
 		args = append(args, "-dev", dev)
 	}
 	// IdleTimeout is a count of milliseconds stored in a time.Duration, exactly like EmbedConfig.IdleTimeout, so it is converted to a real duration by multiplying by time.Millisecond.
-	return newTextEngine(cfg.LocalText.ResolvedBinary(cfg), args, cfg.LocalText.BaseURL(), cfg.LocalText.Timeout(), cfg.LocalText.Idle()*time.Millisecond)
+	return newTextEngine(cfg.LocalText.ResolvedBinary(cfg), util.MmapForDevice(args), cfg.LocalText.BaseURL(), cfg.LocalText.Timeout(), cfg.LocalText.Idle()*time.Millisecond)
 }
 
 // newTextEngine wires a TextEngine to the server binary and the arguments that make it listen at baseURL, with timeoutSeconds bounding each Generate call through brain.LlamaServer and idle as the no-use shutdown timeout. NewTextEngine is the production entry point; this exists separately so the tests can spawn a stand-in process with their own arguments.

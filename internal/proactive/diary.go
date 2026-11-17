@@ -12,19 +12,19 @@ import (
 )
 
 // maybeClose writes the day's diary entry once the close hour has passed, provided the day has seen any activity at all and no entry exists yet. The entry's existence is the done-marker, so a daemon started after the close hour still closes the day.
-// Yesterday is checked first, because a machine asleep at yesterday's close hour never got yesterday's row and the day is otherwise lost for good — it is also today's "yesterday's entry" prompt input and the dream's material.
+// Yesterday is checked first and on every tick, because a machine asleep at yesterday's close hour never got yesterday's row and the day is otherwise lost for good — it is also today's "yesterday's entry" prompt input and the dream's material.
 func (s *Scheduler) maybeClose(ctx context.Context) {
 	if s.closeHour < 0 {
 		return
 	}
 	now := s.now()
-	if now.Hour() < s.closeHour {
-		return
-	}
-	// One second before today began: the timeline it composes covers the whole of yesterday and the prompt's date line names yesterday.
+	// One second before today began: the timeline it composes covers the whole of yesterday and the prompt's date line names yesterday. Yesterday is over whatever the clock says, so its catch-up is not held until today's close hour: a laptop never on after 22:00 would otherwise never get any day's entry.
 	// A deadline each, because each close makes two brain calls: sharing one deadline meant four calls had to fit in it on the first tick after a night the machine slept through, and yesterday's close ate the time today's needed.
 	yesterday := db.DayStart(now).Add(-time.Second)
 	s.duty(ctx, func(ctx context.Context) { s.closeOneDay(ctx, "close-yesterday", yesterday) })
+	if now.Hour() < s.closeHour {
+		return
+	}
 	s.duty(ctx, func(ctx context.Context) { s.closeOneDay(ctx, "close", now) })
 }
 

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"june/internal/config"
+
 	"google.golang.org/genai"
 )
 
@@ -98,6 +100,47 @@ func TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText(t *testing.T) {
 	case extra := <-a.TextResponseChan:
 		t.Fatalf("expected no further chunk (final ModelTurn text must not be forwarded), got %+v", extra)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestVoiceThinkingConfig_NeverAsksForThoughts verifies no Live model the picker offers is sent a request for thought summaries.
+func TestVoiceThinkingConfig_NeverAsksForThoughts(t *testing.T) {
+	defer config.SetVoiceModel("")
+	for _, m := range config.LiveVoiceModels {
+		config.SetVoiceModel(m.Name)
+		if cfg := voiceThinkingConfig(); cfg != nil && cfg.IncludeThoughts {
+			t.Errorf("%s: thought summaries requested for the voice session", m.Name)
+		}
+	}
+}
+
+// TestReceiveLoop_ThoughtPartAudio_IsNeverPlayed verifies audio carried by a thought part is dropped while audio in an ordinary part still reaches the speaker.
+func TestReceiveLoop_ThoughtPartAudio_IsNeverPlayed(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	a := NewAgent(nil, speaker, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	audio := &genai.Blob{Data: []byte{1, 2}, MIMEType: "audio/pcm"}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		ModelTurn: &genai.Content{Parts: []*genai.Part{{Thought: true, InlineData: audio}}},
+	}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		ModelTurn: &genai.Content{Parts: []*genai.Part{{InlineData: audio}}},
+	}}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for speaker.plays.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := speaker.plays.Load(); got != 1 {
+		t.Errorf("expected only the ordinary part's audio to be played, got %d plays", got)
 	}
 }
 
@@ -240,11 +283,13 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 // fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio June is in the middle of playing.
 type fakeSpeaker struct {
 	flushes atomic.Int32
+	// plays counts Play calls, so a test can assert that audio did or did not reach the speaker.
+	plays atomic.Int32
 	// amplitude is what CurrentAmplitude reports — the barge-in path uses it to tell a real interruption from the room's own noise coming back through the mic while June is audibly speaking.
 	amplitude atomic.Uint64
 }
 
-func (s *fakeSpeaker) Play(pcm []byte) error { return nil }
+func (s *fakeSpeaker) Play(pcm []byte) error { s.plays.Add(1); return nil }
 func (s *fakeSpeaker) Flush()                { s.flushes.Add(1) }
 func (s *fakeSpeaker) Close() error          { return nil }
 func (s *fakeSpeaker) CurrentAmplitude() float64 {
@@ -903,5 +948,16 @@ func TestConnect_FailedResumedHandshakeDropsTheHandle(t *testing.T) {
 	}
 	if got := a.getResumeHandle(); got != "" {
 		t.Errorf("resume handle after a refused resumed handshake = %q, want it cleared", got)
+	}
+}
+
+// TestVoiceInstruction_RepliesInEnglishByDefault verifies the voice prompt tells the model to answer in English unless asked otherwise, since the input transcript carries no language hint and can mislabel the language.
+func TestVoiceInstruction_RepliesInEnglishByDefault(t *testing.T) {
+	text := systemInstructionText(time.Now(), "linux", "amd64", "bash", "", "", 0)
+	if !strings.Contains(text, "Reply in English") {
+		t.Error("voice instruction does not default replies to English")
+	}
+	if strings.Contains(text, "Reply in the language they used") {
+		t.Error("voice instruction still tells the model to mirror the transcript's language")
 	}
 }

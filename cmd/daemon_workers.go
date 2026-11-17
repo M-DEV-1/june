@@ -358,10 +358,13 @@ func within(name string, bound time.Duration, step func()) {
 }
 
 // fallThrough answers from primary, and from fallback when primary fails for any reason. It is for a job the user started and is watching: unlike the unattended duties, which hand over only on a spent allowance, a job that cannot get a plan out of its brain is a job that has visibly died, and on 2026-09-08 three died in a row because the Codex chain was spent while Claude sat idle. Input: the two brains. Output: one brain.
+// A primary asked under a deadline gets half of what is left of it, and the fallback gets the rest,, so a primary that runs out its time cannot leave the fallback an expired context.
 // A caller that has stopped is not handed on: the fallback would be started only to be killed, and its failure would be what the stopped job reported. When both fail the error names both, since the first is usually the one that explains the job — a failed job said only "claude -p failed (success)" while the reason sat in a warn line (2026-10-03).
 func fallThrough(primary, fallback brain.Brain) brain.Brain {
 	return func(ctx context.Context, prompt string) (string, error) {
-		out, err := primary(ctx, prompt)
+		first, release := halfOfBudget(ctx)
+		out, err := primary(first, prompt)
+		release()
 		if err == nil {
 			return out, nil
 		}
@@ -375,6 +378,15 @@ func fallThrough(primary, fallback brain.Brain) brain.Brain {
 		}
 		return "", fmt.Errorf("the default brain failed (%w), and so did the fallback (%w)", err, fbErr)
 	}
+}
+
+// halfOfBudget limits a first attempt to half the time its caller has left, so the brain behind it always has the other half. Input: the caller's context. Output: a context that ends at the halfway point and the func that releases it; a caller with no deadline has no budget to split and gets its own context back.
+func halfOfBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, time.Until(deadline)/2)
 }
 
 // whenUsable asks b only while the router would offer provider id at all, so a fallback asked directly rather than through the router does not spend a run on a login the router already knows is dead or an allowance it knows is spent. Input: the router id and the brain. Output: the brain, failing at once with a sentence saying why when the provider is not usable.

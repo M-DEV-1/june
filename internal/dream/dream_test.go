@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,9 @@ type fakeBrain struct {
 	report           string
 	reportErr        error
 	asked            []string
+
+	// hypErr, when set, fails both of the hypothesis stage's calls, the judging and the extraction.
+	hypErr error
 }
 
 func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
@@ -37,10 +41,10 @@ func (f *fakeBrain) fn(ctx context.Context, prompt string) (string, error) {
 	switch {
 	case strings.Contains(prompt, "testing your private hypotheses"):
 		f.asked = append(f.asked, "verdicts")
-		return f.verdicts, nil
+		return f.verdicts, f.hypErr
 	case strings.Contains(prompt, "Pull out the ones worth tracking"):
 		f.asked = append(f.asked, "extract")
-		return f.extract, nil
+		return f.extract, f.hypErr
 	case strings.Contains(prompt, "Rewrite your standing understanding"):
 		f.asked = append(f.asked, "und")
 		return f.und, nil
@@ -106,9 +110,6 @@ func TestTick_ConditionsGate(t *testing.T) {
 		prep  func(t *testing.T, s *db.Store, r *Runner)
 		wants bool
 	}{
-		{"outside the window", func(t *testing.T, s *db.Store, r *Runner) {
-			r.now = func() time.Time { return at(12, 0) }
-		}, false},
 		{"disabled by a negative hour", func(t *testing.T, s *db.Store, r *Runner) {
 			r.dreamHour = -1
 		}, false},
@@ -181,6 +182,27 @@ func TestTick_ConditionsGate(t *testing.T) {
 	}
 }
 
+// A night the machine slept through runs the next day, as soon as the usual idle-on-mains conditions hold: five nights in a row went undreamt in October 2026 because the laptop was off between 23:00 and 03:28 every night, while it sat idle on mains for stretches of every afternoon. At noon the night key is yesterday, and yesterday's run is the one that finishes.
+func TestTick_MissedNightRunsTheNextDay(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	noon := at(12, 0)
+	night := noon.AddDate(0, 0, -1).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day the machine slept through the end of."); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, brain, yesProbes(), noon)
+	r.Tick(ctx)
+
+	if len(brain.askedKinds()) == 0 {
+		t.Fatal("the missed night was not dreamt at noon")
+	}
+	if run, ok, _ := store.DreamRun(ctx, night); !ok || !run.Finished {
+		t.Errorf("yesterday's run = %+v ok=%v, want finished", run, ok)
+	}
+}
+
 // A resumed night runs only the stages missing from stages_done: with 'hyp' already committed, only the understanding rewrite and the closing diary-writing call are asked for, and the night still finishes.
 func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	ctx := context.Background()
@@ -209,6 +231,48 @@ func TestTick_ResumeSkipsDoneStages(t *testing.T) {
 	}
 	if entry, _ := store.DiaryEntry(ctx, night, "dream"); !strings.Contains(entry, "already committed on an earlier wake") {
 		t.Errorf("dream report does not note the resumed stage: %q", entry)
+	}
+}
+
+// A failing hypothesis stage does not stop the stages that never read its output: they commit on the same wake, the night stays unfinished, and the next wake retries the hypothesis stage alone and finishes the night.
+func TestTick_FailedHypothesisStageLeavesTheIndependentStagesCommitted(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	night := at(23, 30).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day.\n\nHypotheses:\nHe codes at night. (likely)"); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "Rewritten.", hypErr: errors.New("the brain refused")}
+	r := newRunner(store, brain, yesProbes(), at(23, 30))
+
+	r.Tick(ctx)
+
+	run, _, _ := store.DreamRun(ctx, night)
+	done := strings.Fields(run.StagesDone)
+	if run.Finished || slices.Contains(done, db.StageHyp) {
+		t.Fatalf("run = %+v, want unfinished with the hypothesis stage still owed", run)
+	}
+	for _, stage := range []string{db.StageUnd, db.StageCompact, db.StageProcedures, db.StageLessons, "prune"} {
+		if !slices.Contains(done, stage) {
+			t.Errorf("stage %q did not commit after the hypothesis stage failed, stages_done = %q", stage, run.StagesDone)
+		}
+	}
+
+	brain.hypErr = nil
+	r.Tick(ctx)
+
+	run, _, _ = store.DreamRun(ctx, night)
+	if !run.Finished || !slices.Contains(strings.Fields(run.StagesDone), db.StageHyp) {
+		t.Errorf("run = %+v, want the retry to commit the hypothesis stage and finish the night", run)
+	}
+	unds := 0
+	for _, kind := range brain.askedKinds() {
+		if kind == "und" {
+			unds++
+		}
+	}
+	if unds != 1 {
+		t.Errorf("the understanding rewrite ran %d times, want once: the retry must not redo a committed stage", unds)
 	}
 }
 
@@ -834,14 +898,20 @@ func TestDream_StopsRetryingANightWhoseBrainKeepsFailing(t *testing.T) {
 		return "", errors.New("API error (status 402 Payment Required)")
 	}
 
+	// One attempt is a tick that reached the brain at all; a failed hypothesis stage lets the next stage try the brain in the same attempt.
+	attempts := 0
 	for i := 0; i < 12; i++ {
+		before := calls
 		r.Tick(ctx)
+		if calls > before {
+			attempts++
+		}
 	}
 
-	if calls > failedAttemptCap {
-		t.Errorf("a dead brain cost %d calls across 12 ticks, want no more than %d", calls, failedAttemptCap)
+	if attempts > failedAttemptCap {
+		t.Errorf("a dead brain was retried on %d of 12 ticks, want no more than %d", attempts, failedAttemptCap)
 	}
-	if calls == 0 {
+	if attempts == 0 {
 		t.Error("the night never tried at all")
 	}
 }

@@ -138,8 +138,31 @@ func TestClaudeToolServer_RefusesAnythingButAPostToItsOwnPath(t *testing.T) {
 	}
 }
 
-// claudeStub answers as the CLI would: it does the MCP handshake against the tool server named in the arguments, calls the tools it was asked to call, and prints the result object `claude -p --output-format json` prints.
+// stubCall is one tool call a stand-in command line makes over MCP: the tool's name and the arguments it sends, which are a look's {"purpose":"looking"} when args is nil.
+type stubCall struct {
+	name string
+	args map[string]any
+}
+
+// arguments is the arguments object the call sends.
+func (c stubCall) arguments() map[string]any {
+	if c.args == nil {
+		return map[string]any{"purpose": "looking"}
+	}
+	return c.args
+}
+
+// claudeStub is claudeStubCalls for calls that need no arguments of their own, one per name.
 func claudeStub(callNames []string, result string, usage string) claudeRunner {
+	calls := make([]stubCall, len(callNames))
+	for i, name := range callNames {
+		calls[i] = stubCall{name: name}
+	}
+	return claudeStubCalls(calls, result, usage)
+}
+
+// claudeStubCalls answers as the CLI would: it does the MCP handshake against the tool server named in the arguments, makes the tool calls it was given, and prints the result object `claude -p --output-format json` prints.
+func claudeStubCalls(calls []stubCall, result string, usage string) claudeRunner {
 	return func(ctx context.Context, args []string, stdin string) ([]byte, error) {
 		url := ""
 		for i, arg := range args {
@@ -178,8 +201,8 @@ func claudeStub(callNames []string, result string, usage string) claudeRunner {
 		if err := post("tools/list", 1, nil); err != nil {
 			return nil, err
 		}
-		for i, name := range callNames {
-			if err := post("tools/call", 2+i, map[string]any{"name": name, "arguments": map[string]any{"purpose": "looking"}}); err != nil {
+		for i, c := range calls {
+			if err := post("tools/call", 2+i, map[string]any{"name": c.name, "arguments": c.arguments()}); err != nil {
 				return nil, err
 			}
 		}
