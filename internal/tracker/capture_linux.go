@@ -22,19 +22,19 @@ import (
 //   - GTK4: accessibility is on by default.
 //   - Qt: set QT_ACCESSIBILITY=1 in the environment.
 //   - Electron: launch with --force-renderer-accessibility.
-func extractText() (string, error) {
+func extractText() (screenRead, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), captureTimeout)
 	defer cancel()
 
 	return atspiTextWithin(ctx), nil
 }
 
-// atspiTextWithin reads the focused window's accessibility text and gives up at ctx's deadline whatever the bus is doing. Input: a context carrying the budget. Output: the text, or "" when the budget ran out first.
+// atspiTextWithin reads the focused window's accessibility text and page address and gives up at ctx's deadline whatever the bus is doing. Input: a context carrying the budget. Output: the text and address, both empty when the budget ran out first.
 // The budget has to be enforced from out here because the context does not reach all the way in: dialling the accessibility bus goes through dbus.Dial, Auth and Hello, none of which take a context, so a bus that accepted the connection and then stopped talking would otherwise hold the caller for good. The context is still passed down as well, so the method calls that do honour it stop on their own instead of running on unread.
-func atspiTextWithin(ctx context.Context) string {
-	return withBudget(ctx, func() string {
-		text, _ := atspiExtract(ctx)
-		return text
+func atspiTextWithin(ctx context.Context) screenRead {
+	return withBudget(ctx, func() screenRead {
+		r, _ := atspiExtract(ctx)
+		return r
 	})
 }
 
@@ -355,20 +355,21 @@ func activeOrFallback(ref aref, app, title string, active, focused bool, scan fu
 }
 
 // atspiExtract does the real work so we can return errors internally without leaking them to the caller.
-func atspiExtract(ctx context.Context) (string, error) {
+func atspiExtract(ctx context.Context) (screenRead, error) {
 	conn, err := dialTheBus(ctx)
 	if err != nil {
-		return "", err
+		return screenRead{}, err
 	}
 	defer conn.Close()
 
 	// Read the window the desktop last activated. Choosing by STATE_ACTIVE instead pulls in windows that have lost focus but kept the bit, which is how a Teams tab's text ended up filed against whatever the user was really doing.
 	if w := focus(); w != nil {
 		if ref, _, ok := w.state.get(); ok {
-			return trimText(documentText(walkWindow(ctx, conn, ref))), nil
+			tree := walkWindow(ctx, conn, ref)
+			return screenRead{text: trimText(documentText(tree)), url: pageURL(tree)}, nil
 		}
 		if w.hearsTheDesktop() {
-			return "", nil
+			return screenRead{}, nil
 		}
 	}
 
@@ -376,10 +377,11 @@ func atspiExtract(ctx context.Context) (string, error) {
 	root := aref{Name: "org.a11y.atspi.Registry", Path: "/org/a11y/atspi/accessible/root"}
 	apps, err := getChildren(ctx, conn, root)
 	if err != nil {
-		return "", err
+		return screenRead{}, err
 	}
 
 	var parts []string
+	var url string
 	seen := make(map[string]struct{})
 
 	for _, app := range apps {
@@ -399,6 +401,9 @@ func atspiExtract(ctx context.Context) (string, error) {
 			}
 			// found the focused window — walk its subtree, then apply documentText's role-aware rule: browser chrome lives outside any DOCUMENT_WEB node, so keep only that when present; native apps have none and fall back to the full tree.
 			tree := walkWindow(ctx, conn, win)
+			if url == "" {
+				url = pageURL(tree)
+			}
 			if t := strings.TrimSpace(documentText(tree)); t != "" {
 				if _, dup := seen[t]; !dup {
 					seen[t] = struct{}{}
@@ -409,11 +414,7 @@ func atspiExtract(ctx context.Context) (string, error) {
 		}
 	}
 
-	if len(parts) == 0 {
-		return "", nil
-	}
-
-	return trimText(strings.Join(parts, "\n")), nil
+	return screenRead{text: trimText(strings.Join(parts, "\n")), url: url}, nil
 }
 
 // extractMeetingWindow finds a call in progress anywhere on the desktop and reads it, whether or not it has focus, returning its app, its window title and its text. ok is false when no meeting window is open.

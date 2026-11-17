@@ -58,7 +58,7 @@ type Daemon struct {
 	paused    atomic.Bool
 
 	// The three calls the capture path makes outside this process, held as fields so a test can stand in one that never answers and prove the caller still comes back. NewDaemon points them at the real ones.
-	text       func() (string, error)
+	text       func() (screenRead, error)
 	media      func(ctx context.Context) bool
 	screenshot func(ctx context.Context) ([]byte, error)
 	bounds     captureBounds
@@ -420,8 +420,16 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 	}
 }
 
+// screenRead is what one accessibility read of the focused window returned: its text, and the address of the web page it shows when it shows one.
+type screenRead struct {
+	text string
+	url  string
+}
+
 type captureOut struct {
-	text  string
+	text string
+	// url is the address of the page in the focused window, or "" when it shows none.
+	url   string
 	sight Sight
 	// frames holds one JPEG per monitor, the monitor the user is on first.
 	frames [][]byte
@@ -429,6 +437,7 @@ type captureOut struct {
 
 func applyCapture(ev *Activity, out captureOut) {
 	ev.ScreenText = out.text
+	ev.URL = out.url
 	ev.UserActivity = out.sight.UserActivity
 	ev.VisibleText = out.sight.VisibleText
 	if len(out.frames) > 0 {
@@ -442,14 +451,20 @@ func applyCapture(ev *Activity, out captureOut) {
 func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastVisionTime *time.Time) captureOut {
 	// The accessibility read takes no context — the platform readers each open their own connection — so it is bounded from out here instead.
 	textCtx, cancelText := context.WithTimeout(ctx, d.bounds.text)
-	text := withBudget(textCtx, func() string {
-		t, err := d.text()
+	page := withBudget(textCtx, func() screenRead {
+		r, err := d.text()
 		if err != nil {
-			return ""
+			return screenRead{}
 		}
-		return t
+		return r
 	})
 	cancelText()
+	text := page.text
+	// The address is attached to whatever the capture emits, including a capture whose text did not change, because the page can change without its text doing so.
+	withURL := func(out captureOut) captureOut {
+		out.url = page.url
+		return out
+	}
 	d.lastCapture.Store(time.Now().UnixNano())
 
 	// vision only escalates for a real foreground app, never the bare desktop — or we'd snap and describe the wallpaper on a loop while the user is idle.
@@ -460,7 +475,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	cancelMedia()
 
 	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
-		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
+		return withURL(resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil))
 	}
 
 	shotCtx, cancelShot := context.WithTimeout(ctx, d.bounds.screenshot)
@@ -472,7 +487,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	// The limiter is stamped on the attempt, not on the success: a portal that refuses, or a compositor too busy to answer, otherwise left the interval unstarted and the next capture two seconds later tried the screenshot again.
 	*lastVisionTime = time.Now()
 	if grab.err != nil || len(grab.png) == 0 {
-		return resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil)
+		return withURL(resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil))
 	}
 	png := grab.png
 
@@ -485,7 +500,7 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	if desc == "" {
 		desc = strings.TrimSpace(act.Title)
 	}
-	return resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, screenFrames(png))
+	return withURL(resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, screenFrames(png)))
 }
 
 // resolveCapture decides what a capture emits and updates the right per-tier "last text" tracker.

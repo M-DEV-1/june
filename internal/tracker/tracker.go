@@ -17,6 +17,8 @@ type Activity struct {
 	// Both persist: writeEpisodeJPEG stores the primary as frames/{id}.jpg and each extra as frames/{id}-b.jpg, {id}-c.jpg (internal/db/image.go), read back with Store.EpisodeExtraImages. The vision call sees the whole canvas, not the primary monitor: tieredCapture in internal/tracker/daemon.go passes visionFn the one PNG grabScreen returned, which spans every monitor, and screenFrames only splits that same PNG per monitor afterwards for storage. What is captured is gated by the blocklist and by June's own window, not by which monitor a window sits on — skipReason runs before any capture starts, so it covers the vision tier and the accessibility tier alike.
 	ImageJPEG []byte
 	ExtraJPEG [][]byte
+	// URL is the address of the web page the focused window shows, without query string or fragment, or "" when it shows none or the browser publishes no address.
+	URL string
 }
 
 // Sight is the structured vision extract for one capture.
