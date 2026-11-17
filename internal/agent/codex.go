@@ -284,7 +284,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	defer span.End()
 	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so every tool call runs under them and a concurrent ask never shares this one's screenshot.
 	ctx = withAsk(ctx, question)
-	instruction := a.LeanPrompt(ctx, start)
+	instruction := a.plainAskPrompt(ctx, start)
 	var handshake []string
 
 	// Fetched again here, separately from the copy HandshakePrompt already rendered into instruction: a screen round drops instruction for screenTaskInstruction() and needs its own, trimmed personal context back (see screenPersonalContext), which the untrimmed handshake copy cannot supply.
@@ -303,6 +303,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 
 	decls := a.askToolDeclarations()
 	tools := codexTools(decls)
+	plainDecls := withoutDeclarations(decls, screenActionTools)
+	plainTools := codexTools(plainDecls)
 	screenTools := codexTools(trimToDeclarations(decls, screenRoundTools))
 	// One key names this ask to the backend for the whole of it. What ties its rounds to the prompt cache is codexPromptCacheKey, which is the same on every ask.
 	session := codexSessionKey()
@@ -340,9 +342,10 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	// steps is how many rounds have actually spent one of the maxAskIterations steps, the same hard cap askText enforces.
 	steps := 0
 	for i := 0; i < maxAskRounds; i++ {
-		prompt, thread, offered := instruction, historyItems, tools
-		offeredNames := declNames(decls)
+		prompt, thread, offered := instruction, historyItems, plainTools
+		offeredNames := declNames(plainDecls)
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
+			offered, offeredNames = tools, declNames(decls)
 			if screenPrompt == "" {
 				screenPrompt = screenTaskInstruction()
 				if personal := screenPersonalContext(personalEntries, frontFromToolHops(tr.ToolHops)); personal != "" {
