@@ -10,7 +10,7 @@ func TestAskAgy_RunsToolsAndFillsTheTrace(t *testing.T) {
 	a := NewAgent(nil, nil, &toolTestBrain{retrieveRelevantResult: []string{"recalled line"}}, nil, "")
 	fake := &fakeAgySession{
 		responses: []string{`{"status":"SUCCESS","response":"  Brave is in front.  "}`},
-		toolCalls: map[int][]string{0: {"observe_screen"}},
+		toolCalls: map[int][]stubCall{0: {{name: "observe_screen"}}},
 	}
 	newProc := func() agySessionRunner { return fake }
 	t.Cleanup(a.CloseAgySession)

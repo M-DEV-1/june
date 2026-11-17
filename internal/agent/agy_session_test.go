@@ -18,13 +18,13 @@ import (
 	"june/internal/db"
 )
 
-// fakeAgySession is a scripted agySessionRunner: each Send call consumes the next entry of responses (making it that turn's "result" event) unless sendErr is armed, in which case that one Send fails instead, as a broken pipe would. toolCalls, when set, names the june tools to call over MCP before a given turn's response — index-aligned with responses — so a test can check that hops still get recorded through a session's long-lived tool server.
+// fakeAgySession is a scripted agySessionRunner: each Send call consumes the next entry of responses (making it that turn's "result" event) unless sendErr is armed, in which case that one Send fails instead, as a broken pipe would. toolCalls, when set, lists the june tools to call over MCP before a given turn's response — index-aligned with responses — so a test can check that hops still get recorded through a session's long-lived tool server.
 type fakeAgySession struct {
 	mu        sync.Mutex
 	startErr  error
 	sendErr   bool
 	responses []string
-	toolCalls map[int][]string
+	toolCalls map[int][]stubCall
 	sends     []string
 	lastEnv   []string
 	starts    int
@@ -59,8 +59,8 @@ func (f *fakeAgySession) Send(line string) error {
 	if failing {
 		return errors.New("fakeAgySession: broken pipe")
 	}
-	for _, name := range f.toolCalls[turn] {
-		if err := callFakeAgyTool(env, name); err != nil {
+	for _, call := range f.toolCalls[turn] {
+		if err := callFakeAgyTool(env, call); err != nil {
 			return err
 		}
 	}
@@ -81,7 +81,7 @@ func (f *fakeAgySession) Kill() {
 }
 
 // callFakeAgyTool calls one june tool over MCP against the server named in env's HOME's mcp config, the way the real agy CLI would from inside a turn.
-func callFakeAgyTool(env []string, name string) error {
+func callFakeAgyTool(env []string, call stubCall) error {
 	home := ""
 	for _, e := range env {
 		if v, ok := strings.CutPrefix(e, "HOME="); ok {
@@ -107,7 +107,7 @@ func callFakeAgyTool(env []string, name string) error {
 	if url == "" {
 		return errors.New("fakeAgySession: no june server in the mcp config")
 	}
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": map[string]any{"purpose": "looking"}}})
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": call.name, "arguments": call.arguments()}})
 	resp, err := http.Post(url, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return err
