@@ -365,6 +365,8 @@ export type Feature = {
   error: string;
   requires: string[];
   needs_restart: boolean;
+  /** Setup downloads this one by itself when the machine is on mains power, once the person is past the brain screen; absent from a daemon that predates it. */
+  background?: boolean;
 };
 
 /** GET /components' whole body. */
@@ -722,6 +724,11 @@ export const juneApi = createApi({
       query: (id) => ({ url: `/components/${encodeURIComponent(id)}/install`, method: "POST", body: { variant: "auto" }, responseHandler: "content-type" }),
       invalidatesTags: ["Component"],
     }),
+    /** Asks the daemon to start the downloads of the small features setup fetches unasked (voice typing, who said what), which it does only while the machine is on mains power and has room, and leaves alone any already installed, queued or failed. Answers the ids it queued, none when the machine is on battery. */
+    startBackgroundFeatures: build.mutation<{ queued: string[] }, void>({
+      query: () => ({ url: "/components/background", method: "POST", responseHandler: "content-type" }),
+      invalidatesTags: ["Component"],
+    }),
     /** Stops a queued or running download; the part already fetched is kept so a later Set up resumes it. */
     cancelFeature: build.mutation<unknown, string>({
       query: (id) => ({ url: `/components/${encodeURIComponent(id)}/cancel`, method: "POST", responseHandler: "content-type" }),
@@ -819,6 +826,7 @@ export const {
   useOpenMicSettingsMutation,
   useComponentsQuery,
   useInstallFeatureMutation,
+  useStartBackgroundFeaturesMutation,
   useCancelFeatureMutation,
   useRemoveFeatureMutation,
   useUpdateQuery,

@@ -120,7 +120,7 @@
   },
   "features": [
     {
-      "id": "transcribe", "title": "Voice typing & meeting transcripts", "requires": [], "needs_restart": false,
+      "id": "transcribe", "title": "Voice typing & meeting transcripts", "requires": [], "needs_restart": false, "background": true,
       "variants": [
         {"name": "cuda", "os": "windows", "needs": "cuda", "components": ["whisper-bin@win-cuda", "whisper-medium", "silero-vad"]},
         {"name": "cpu", "os": "windows", "components": ["whisper-bin@win-cpu", "whisper-small", "silero-vad"]},
@@ -128,7 +128,7 @@
       ]
     },
     {
-      "id": "speakers", "title": "Who said what", "requires": ["transcribe"], "needs_restart": false,
+      "id": "speakers", "title": "Who said what", "requires": ["transcribe"], "needs_restart": false, "background": true,
       "variants": [
         {"name": "cpu", "os": "windows", "components": ["sherpa-bin@win", "sherpa-seg", "sherpa-emb"]},
         {"name": "cpu", "os": "linux", "components": ["sherpa-bin@linux", "sherpa-seg", "sherpa-emb"]}

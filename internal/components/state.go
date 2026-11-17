@@ -202,6 +202,8 @@ type featureView struct {
 	Error         string   `json:"error"`
 	Requires      []string `json:"requires"`
 	NeedsRestart  bool     `json:"needs_restart"`
+	// Background says first-run setup downloads this feature by itself, on mains power: it is marked so in the manifest and its build here is small enough (see backgroundMaxBytes).
+	Background bool `json:"background"`
 }
 
 // view works out one feature's state. Input: the feature, the machine, the receipts and the failures on record. Output: the view, and false when the feature has no build for this platform, which leaves it off the list.
@@ -235,6 +237,7 @@ func (s *Service) view(f *feature, p Platform, recs map[string]receipt, failed m
 	if v.DownloadBytes == 0 {
 		v.DownloadBytes = all
 	}
+	v.Background = f.Background && v.DownloadBytes <= backgroundMaxBytes
 	v.PartialBytes = s.featurePartialBytes(f)
 	switch {
 	case installed && old:

@@ -64,13 +64,14 @@ type featureVariant struct {
 	Components []string `json:"components"`
 }
 
-// feature is what the window offers: a thing June can do once some components are installed.
+// feature is what the window offers: a thing June can do once some components are installed. Background marks one that first-run setup downloads without being asked, when it is small enough and the machine is on mains power (see startBackground).
 type feature struct {
 	ID           string           `json:"id"`
 	Title        string           `json:"title"`
 	Requires     []string         `json:"requires"`
 	NeedsRestart bool             `json:"needs_restart"`
 	MinRAMMB     int              `json:"min_ram_mb"`
+	Background   bool             `json:"background"`
 	Variants     []featureVariant `json:"variants"`
 }
 
