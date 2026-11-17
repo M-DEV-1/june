@@ -241,6 +241,21 @@ func windowFramesCheck(ctx context.Context) doctorCheck {
 	}
 }
 
+// gnomeExtensionFile is where packaging/install.sh puts June's GNOME extension, under the home directory.
+const gnomeExtensionFile = ".local/share/gnome-shell/extensions/june@june.local/extension.js"
+
+// setupWindowFrames is what GET /setup reports as window_frames. Output: nil unless this is a Linux desk where install.sh put the extension, otherwise whether the running shell answers with window frames, which windowFramesCheck decides. false there means the extension is installed but the shell has not loaded it yet, which one logout fixes.
+func setupWindowFrames(ctx context.Context) *bool {
+	home, _ := os.UserHomeDir()
+	if runtime.GOOS != "linux" || !util.Exists(filepath.Join(home, gnomeExtensionFile)) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	loaded := windowFramesCheck(ctx).OK
+	return &loaded
+}
+
 // pointerCheck reports whether pointer and keyboard consent is saved, and, when it is, the desk's live monitor count next to the exact file a re-grant needs deleted. A restore token saved from an older, narrower grant keeps restoring that same grant forever — the portal never asks again on its own — so a click on a monitor the grant does not cover fails deep inside the coordinate mapping. Input: the saved token's path, and the desk's monitor count (-1 when it could not be read). Output: the check.
 func pointerCheck(tokenPath string, monitors int) doctorCheck {
 	if _, err := os.Stat(tokenPath); err != nil {
