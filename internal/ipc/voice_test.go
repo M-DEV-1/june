@@ -16,6 +16,7 @@ import (
 	"june/internal/agent"
 	"june/internal/audio"
 	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
@@ -290,6 +291,50 @@ func TestVoiceEvents_HeardSaidAndStateReachASubscriber(t *testing.T) {
 		}
 		if ev.ID != body.ID {
 			t.Fatalf("event id = %q, want %q", ev.ID, body.ID)
+		}
+	}
+}
+
+// TestVoiceSession_FilesWhatWasSaidAsVoiceTurns verifies a session's speech lands in one conversation as voice turns: each side's pieces joined into one turn, a turn filed when the other side starts or the turn ends, and whatever is still held filed when the session stops.
+func TestVoiceSession_FilesWhatWasSaidAsVoiceTurns(t *testing.T) {
+	store := dbtest.Open(t)
+	srv, _, _, _, run := newVoiceServerStore(t, store)
+
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+	voicePost(t, srv, "/voice/start").Body.Close()
+	<-run.running
+
+	run.text <- agent.ResponseChunk{Text: "what was", Sender: agent.SenderYou}
+	run.text <- agent.ResponseChunk{Text: "I doing", Sender: agent.SenderYou}
+	run.text <- agent.ResponseChunk{Text: "The API"}
+	run.text <- agent.ResponseChunk{Text: " doc."}
+	run.text <- agent.ResponseChunk{TurnBoundary: true}
+	run.text <- agent.ResponseChunk{Text: "thanks", Sender: agent.SenderYou}
+	// Stopping before the session has read the last piece would drop it, so wait for it to be broadcast.
+	for ev := mustEvent(t, events); ev.Type != "heard" || ev.Text != "thanks"; ev = mustEvent(t, events) {
+	}
+	voicePost(t, srv, "/voice/stop").Body.Close()
+
+	want := []struct{ role, text string }{{"you", "what was I doing"}, {"june", "The API doc."}, {"you", "thanks"}}
+	var turns []db.Turn
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		convs, err := store.ListConversations(context.Background(), 10)
+		if err == nil && len(convs) == 1 {
+			turns, _ = store.ConversationTurns(context.Background(), convs[0].ID)
+			if len(turns) == len(want) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(turns) != len(want) {
+		t.Fatalf("filed %d turns, want %d: %+v", len(turns), len(want), turns)
+	}
+	for i, w := range want {
+		if turns[i].Role != w.role || turns[i].Text != w.text || turns[i].Kind != "voice" {
+			t.Errorf("turn %d = %s/%q/%s, want %s/%q/voice", i, turns[i].Role, turns[i].Text, turns[i].Kind, w.role, w.text)
 		}
 	}
 }
