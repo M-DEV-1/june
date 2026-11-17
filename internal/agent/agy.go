@@ -342,9 +342,9 @@ func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, mod
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, agyAskTimeout)
 	defer cancel()
-	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
-	ctx = withAskLookState(ctx)
-	instruction := a.LeanPrompt(start)
+	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so the session's tool server runs each call under them and a concurrent ask never shares this one's screenshot.
+	ctx = withAsk(ctx, question)
+	instruction := a.LeanPrompt(ctx, start)
 	var handshake []string
 
 	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)

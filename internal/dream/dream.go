@@ -1,4 +1,4 @@
-// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses June's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
+// Package dream is the daemon's overnight loop: whenever the machine sits idle on mains after the dream hour, that same night or, if the machine was off, any time the next day, it tests the hypotheses June's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
 package dream
 
 import (
@@ -184,14 +184,6 @@ func (r *Runner) nightKey(now time.Time) string {
 	return now.AddDate(0, 0, -1).Format(time.DateOnly)
 }
 
-// inWindow reports whether the hour lies in [dreamHour, briefHour), handling the usual case where the window wraps midnight.
-func (r *Runner) inWindow(hour int) bool {
-	if r.dreamHour < r.briefHour {
-		return hour >= r.dreamHour && hour < r.briefHour
-	}
-	return hour >= r.dreamHour || hour < r.briefHour
-}
-
 // windowStart is the local instant the night's window opened, for the missing-diary grace check.
 func (r *Runner) windowStart(night string) time.Time {
 	d, err := time.ParseInLocation(time.DateOnly, night, time.Local)
@@ -252,16 +244,13 @@ func (r *Runner) userAway(now, lastEpisode time.Time) bool {
 	return lastEpisode.IsZero() || now.Sub(lastEpisode) >= idleAfter
 }
 
-// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when the window is closed or any start condition fails, and otherwise starts or resumes the night's run. Conditions, all required: inside the window, the night not yet finished, on mains, the user idle (screen locked, or away per userAway), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
+// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when any start condition fails, and otherwise starts or resumes the night's run. There is no window gate: nightKey makes a daytime tick resolve to the previous night, so a night the machine slept through (five in a row in October 2026, the laptop off every night and idle on mains every afternoon) runs the next day instead of never. Conditions, all required: the night not yet finished, on mains, the user idle (screen locked, or away per userAway), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
 func (r *Runner) Tick(ctx context.Context) {
 	if r.dreamHour < 0 {
 		return
 	}
 	now := r.now().In(time.Local)
 	forced := r.consumeForceMarker()
-	if !forced && !r.inWindow(now.Hour()) {
-		return
-	}
 	// Past the curfew the whole run waits for tomorrow night: a dream started at 03:20 could still be making brain calls at 03:40, so the gate is on starting at all, with a resumed run equally held. Only Claude spends the user's usage windows, so a non-claude dream brain is exempt.
 	if !forced && !r.CurfewExempt && now.Hour()*60+now.Minute() >= brainCurfewMinutes && now.Hour() < r.briefHour {
 		return
@@ -334,7 +323,7 @@ func (r *Runner) consumeForceMarker() bool {
 	return true
 }
 
-// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
+// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A failed hypothesis stage lets the other stages run first, then returns its error without the morning report. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
 func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) error {
 	if r.OnNight != nil {
 		r.OnNight(true)
@@ -376,15 +365,21 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		notes = append(notes, "Tonight's diary entry was missing, so the day's screen summaries stood in for it.")
 	}
 
+	// No later stage reads the hypothesis stage's report, so a failed hypothesis stage does not hold them back: they run and commit their own tokens, the night is left unfinished below, and the next wake retries the hypothesis stage alone.
 	var hyp *stageReport
+	var hypErr error
 	if !slices.Contains(done, db.StageHyp) {
 		rep, err := r.hypStage(ctx, night, fallback)
 		if err != nil {
 			slog.Warn("dreaming: hypothesis stage did not commit", "night", night, "error", err)
-			return stageFailure(ctx, err)
+			if ctx.Err() != nil {
+				return nil
+			}
+			hypErr = err
+		} else {
+			hyp = &rep
+			slog.Info("dreaming: hypothesis stage committed", "night", night, "tested", rep.tested, "promoted", rep.promoted, "retired", rep.retired, "adopted", rep.adopted)
 		}
-		hyp = &rep
-		slog.Info("dreaming: hypothesis stage committed", "night", night, "tested", rep.tested, "promoted", rep.promoted, "retired", rep.retired, "adopted", rep.adopted)
 	}
 
 	undRan := false
@@ -468,6 +463,9 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		}
 	}
 
+	if hypErr != nil {
+		return hypErr
+	}
 	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, replay, notes); err != nil {
 		slog.Warn("dreaming: finishing the night failed", "night", night, "error", err)
 		return stageFailure(ctx, err)

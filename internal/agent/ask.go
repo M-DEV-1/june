@@ -165,6 +165,11 @@ func questionFrom(ctx context.Context) string {
 	return q
 }
 
+// withAsk is the first thing every ask loop does with its context: it carries the ask's question and a fresh look state, so each tool the ask runs reads this ask's own words and screen state. Input: the ask's context and its question. Output: the context to run the ask's tools under, including through the tool server a command-line brain calls back into.
+func withAsk(ctx context.Context, question string) context.Context {
+	return WithQuestion(withAskLookState(ctx), question)
+}
+
 // screenTargetPtr reads the agent's remembered screen target (see tools.go's screenTarget) as the pointer TurnTrace.LastTarget carries, nil when nothing has been pointed at or acted on yet.
 func (a *Agent) screenTargetPtr() *ScreenTarget {
 	if t, ok := a.screenTarget(); ok {
@@ -240,14 +245,31 @@ func (a *Agent) HandshakePrompt(ctx context.Context, now time.Time) (instruction
 	return handshakeInstruction(now, personalContextBlock(personalEntries), strings.Join(contextParts, "\n"), toolsCount), contextParts
 }
 
+// understandingBlock fetches the diary's standing understanding of the user, the roughly 300-word doc dreaming rewrites nightly, and frames it for the lean prompt's tail. The voice handshake does not need it: GetImplicitContext already leads its context block with the same doc (db.leadWithUnderstanding), and a text ask is the only path that carried no context at all. Input: ctx for the store read. Output: the framed block, or "" when the doc is empty or the read fails, so the prompt before the first dream is unchanged.
+func (a *Agent) understandingBlock(ctx context.Context) string {
+	if a.brain == nil {
+		return ""
+	}
+	doc, err := a.brain.DiaryEntry(ctx, "", "understanding")
+	if err != nil {
+		slog.Warn("understanding fetch failed, continuing without it", "error", err)
+		return ""
+	}
+	doc = strings.TrimSpace(doc)
+	if doc == "" {
+		return ""
+	}
+	return "Your standing understanding of them, which you rewrite every night from their days; it is yours to lean on when tailoring anything to how they work, not something to look up or deny knowing:\n" + doc
+}
+
 // LeanPrompt builds the system instruction a text ask sends: the same skeleton, tool guidance and stop line HandshakePrompt builds, but with no personal-context block and no retrieved-memory block. The user's decision behind it: only voice needs memory pushed ahead of time, because voice has to be proactive with no chance to reach for a tool mid-turn; a text ask can call query_memory, recall or personal_context when it actually needs a fact, so paying for the roughly nine thousand tokens of memory context on every question is waste the tools already recover for free. Input: the moment, for the clock line. Output: the instruction text.
-func (a *Agent) LeanPrompt(now time.Time) string {
+func (a *Agent) LeanPrompt(ctx context.Context, now time.Time) string {
 	tools := liveTools()
 	toolsCount := 0
 	if len(tools) > 0 {
 		toolsCount = len(tools[0].FunctionDeclarations)
 	}
-	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + leanInstructionTail(now)
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + leanInstructionTail(now, a.understandingBlock(ctx))
 }
 
 // textCommunicationStyle is the <communication_style> block for the text-ask paths (this file): unlike voiceCommunicationStyle, these replies are rendered as markdown in the chat pane (see app/src/next/chat-markdown.tsx), so the rules here are about how a written reply should read rather than how a spoken one should sound.
@@ -259,9 +281,12 @@ const textCommunicationStyle = `- Lead with the answer, then the reasons; every 
 - Whatever you find, say it. An empty result is an answer: "nothing in there about that, want me to look somewhere else?" A partial one is too: say what you actually got. No meta-acknowledgements ("got it", "sure", "noted") and no narrating your own process.
 - Reply in the language they used, and keep that language to the end of the reply.`
 
-// leanInstructionTail is systemInstructionTail with the personal-context and retrieved-memory blocks left out, keeping only the clock a text ask still needs to resolve "yesterday" or "this morning" for itself. Input: the moment. Output: the tail text.
-func leanInstructionTail(now time.Time) string {
-	return fmt.Sprintf("\n\nRight now it is %s, use this as your anchor for anything time-related (\"yesterday\", \"this morning\"); convert the period they mean into concrete since/until dates yourself.", nowAnchor(now))
+// leanInstructionTail is systemInstructionTail with the personal-context and retrieved-memory blocks left out, keeping the standing understanding (bounded at about 300 words, so it costs a text ask a few hundred tokens where the memory block cost nine thousand) and the clock a text ask still needs to resolve "yesterday" or "this morning" for itself. Input: the moment and the understanding block ("" for none). Output: the tail text.
+func leanInstructionTail(now time.Time, understanding string) string {
+	if understanding != "" {
+		understanding = "\n\n" + understanding
+	}
+	return fmt.Sprintf("%s\n\nRight now it is %s, use this as your anchor for anything time-related (\"yesterday\", \"this morning\"); convert the period they mean into concrete since/until dates yourself.", understanding, nowAnchor(now))
 }
 
 // handshakeInstruction lays the ask paths' system instruction out for a prompt cache: everything that reads the same on every ask first (systemInstructionStable, then screenTaskGuidance), and only then the parts that change between asks (the personal block, the memory lines and the clock). Measured 2026-09-05 on Codex: with the changing parts in the middle, the cache matched 3,840 of a 10,300-token opening round; the one round where they happened not to change matched 9,984. Input: the moment, the personal context block ("" for none), the assembled context lines and the tool count. Output: the instruction text.
@@ -546,11 +571,9 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// One of the two hard stops on this loop, alongside maxAskIterations: no request past this deadline can go out. See askWallClock.
 	ctx, cancel := context.WithTimeout(ctx, askWallClock)
 	defer cancel()
-	// Carried on ctx so a screen tool deep in the loop — click, checking whether the front window changed out from under it — can tell whether this very question named the window it now finds in front.
-	ctx = WithQuestion(ctx, question)
-	// The picture draw maps coordinates against and what the pictures cost belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
-	ctx = withAskLookState(ctx)
-	instruction := a.LeanPrompt(now)
+	// Carried on ctx so a screen tool deep in the loop can tell whether this very question named the window it now finds in front or consented to the step it is about to take, and so a concurrent ask never shares this one's screenshot or what the pictures cost.
+	ctx = withAsk(ctx, question)
+	instruction := a.LeanPrompt(ctx, now)
 	var handshake []string
 
 	recallCtx, cancel := context.WithTimeout(ctx, recallTimeout)
@@ -812,10 +835,8 @@ func capError(hops []ToolHop) error {
 func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Content, question string) (TurnTrace, error) {
 	start := time.Now()
 	now := start
-	// See the matching line in askText: a screen tool later in this ctx's lifetime can read the question back off it.
-	ctx = WithQuestion(ctx, question)
-	// The look allowance and the picture draw maps coordinates against belong to this ask; see the matching line in askText. A voice turn never delivers the picture itself (see lookSeen), but draw still needs the state a look leaves behind to map a point back onto the screen.
-	ctx = withAskLookState(ctx)
+	// See the matching line in askText. A voice turn never delivers the picture itself (see lookSeen), but draw still needs the state a look leaves behind to map a point back onto the screen.
+	ctx = withAsk(ctx, question)
 	instruction, handshake := a.HandshakePrompt(ctx, now)
 
 	tr := TurnTrace{

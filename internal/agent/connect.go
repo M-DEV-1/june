@@ -85,6 +85,16 @@ func thinkingConfigFor(model string) *genai.ThinkingConfig {
 	return cfg
 }
 
+// voiceThinkingConfig is thinkingConfig for the live voice session, with thought summaries switched off: the window only needs a "thinking" state, and a reply's spoken transcript has begun with the model's own reasoning while summaries were being requested. Output: the thinking config, or nil when switching thoughts off leaves nothing to send.
+func voiceThinkingConfig() *genai.ThinkingConfig {
+	cfg := thinkingConfig()
+	cfg.IncludeThoughts = false
+	if *cfg == (genai.ThinkingConfig{}) {
+		return nil
+	}
+	return cfg
+}
+
 // compressionTriggerTokens is the context size at which the Live API compresses the session's history. At native audio's ~25 tokens/sec, 64k tokens is roughly the first 42 minutes of a session before compression ever kicks in. The model's own context window is 128k, so this sits at half of it, leaving headroom for the system prompt and tool schemas on top. Raised from an initial 25000 (the SDK's own suggested default) — if voice first-response latency degrades noticeably in live use, this and compressionTargetTokens are the knob to turn back down (toward 40000/16000, the previous step, before reverting all the way to 25000/8000).
 const compressionTriggerTokens = 64000
 
@@ -288,8 +298,12 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	// connectttt to livee apiii
 	span.SetAttributes(attribute.String("agent.model", config.VoiceModel()))
 
-	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
-	resp, err := a.brain.GetImplicitContext(handshakeCtx)
+	// The reads below fill the handshake prompt and may take only contextGatherTimeout between them; whatever is not back by then is left out, so a stuck store cannot hold the dial.
+	gatherCtx, cancelGather := context.WithTimeout(handshakeCtx, contextGatherTimeout)
+	defer cancelGather()
+
+	_, ctxSpan := tracer.Start(gatherCtx, "Agent.GetImplicitContext")
+	resp, err := a.brain.GetImplicitContext(gatherCtx)
 	if err != nil {
 		ctxSpan.RecordError(err)
 		ctxSpan.SetStatus(codes.Error, "failed to fetch context")
@@ -301,14 +315,14 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	for _, node := range resp {
 		contextParts = append(contextParts, "  "+node)
 	}
-	contextParts = append(contextParts, a.surfacePendingFolds(handshakeCtx)...)
+	contextParts = append(contextParts, a.surfacePendingFolds(gatherCtx)...)
 
-	contextParts = a.buildHandshakeContext(handshakeCtx, contextParts)
+	contextParts = a.buildHandshakeContext(gatherCtx, contextParts)
 
 	contextStr := strings.Join(contextParts, "\n")
 
 	// Personal context is read whole, not searched — it is small by construction and every entry is something the user stated themselves.
-	personalEntries, err := a.brain.PersonalContext(handshakeCtx)
+	personalEntries, err := a.brain.PersonalContext(gatherCtx)
 	if err != nil {
 		slog.Warn("personal context fetch failed, continuing without it", "error", err)
 	}
@@ -345,7 +359,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		// Requesting session resumption (even with an empty handle) makes the server send SessionResumptionUpdate messages so a handle can be captured for a future reconnect; a non-empty handle here resumes the previous session instead of starting cold.
 		SessionResumption:   &genai.SessionResumptionConfig{Handle: priorHandle},
 		RealtimeInputConfig: realtimeInputConfig(),
-		ThinkingConfig:      thinkingConfig(),
+		ThinkingConfig:      voiceThinkingConfig(),
 		// InputAudioTranscription is what makes voice per-turn retrieval possible at all (see receiveLoop's InputTranscription handling below) — it does NOT change how audio is generated or played; it's purely an additive text side-channel alongside the native audio-in/audio-out the Live API already provides.
 		InputAudioTranscription: inputTranscriptionConfig(),
 		// OutputAudioTranscription is enabled for the same reason but has no consumer yet — June's own spoken replies transcribed to text is what conversation persistence needs, deliberately left for that later piece of work rather than half-wiring a consumer with nowhere to store the result.
@@ -371,7 +385,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		return fmt.Errorf("live session refused: %w", err)
 	}
 	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
-	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel(), cfg)
+	session, err := connectLive(handshakeCtx, client, config.VoiceModel(), cfg)
 	if err != nil {
 		wsSpan.RecordError(err)
 		wsSpan.End()
@@ -430,6 +444,42 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	case <-sessCtx.Done():
 		return sessCtx.Err()
 	}
+}
+
+// contextGatherTimeout is how long the reads that fill the handshake prompt may take together, before the Live dial starts. They are local store reads that finish in milliseconds, so this only matters when something is stuck. A variable only so a test can shrink it.
+var contextGatherTimeout = 10 * time.Second
+
+// liveConnectTimeout is how long the Live websocket dial may take before connectLive gives up on it. A variable only so a test can shrink it.
+var liveConnectTimeout = 15 * time.Second
+
+// connectLive dials the Live API and returns the session, or an error once liveConnectTimeout has passed or ctx is done. The SDK's Connect ignores its context, so it is run in the background and abandoned on timeout: a server that accepts the connection and never answers would otherwise hold the redial loop for as long as the SDK's own limit. A session that arrives after the timeout is closed so no socket is left open.
+func connectLive(ctx context.Context, client *genai.Client, model string, cfg *genai.LiveConnectConfig) (*genai.Session, error) {
+	type dialed struct {
+		session *genai.Session
+		err     error
+	}
+	result := make(chan dialed, 1)
+	go func() {
+		session, err := client.Live.Connect(ctx, model, cfg)
+		result <- dialed{session, err}
+	}()
+	timer := time.NewTimer(liveConnectTimeout)
+	defer timer.Stop()
+	var cause error
+	select {
+	case r := <-result:
+		return r.session, r.err
+	case <-timer.C:
+		cause = fmt.Errorf("no answer within %s", liveConnectTimeout)
+	case <-ctx.Done():
+		cause = ctx.Err()
+	}
+	go func() {
+		if r := <-result; r.session != nil {
+			r.session.Close()
+		}
+	}()
+	return nil, cause
 }
 
 // voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
@@ -738,12 +788,11 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			pendingBargeIn = time.Time{}
 			slog.Info("barge-in detected: server interrupted model generation", "user_spoke", userSpoke)
 			flushJuneSpeech()
-			a.speaker.Flush()
-
-			// The notice explains a cut-off answer, so it is only honest when the user actually cut in. It was written 62 times in one day with no user transcript behind almost any of them, each one telling the user they interrupted a reply they never touched.
+			// With no user speech behind it the interrupt is the room, so the audio already queued is left to finish and no notice is written: it explains a cut-off answer, and it was written 62 times in one day telling the user they interrupted a reply they never touched.
 			if !userSpoke {
 				continue
 			}
+			a.speaker.Flush()
 			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does.
 			select {
 			case a.TextResponseChan <- ResponseChunk{Text: "[june stopped]", Sender: SenderSystem}:
@@ -762,18 +811,21 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			var textContent string
 
 			for _, part := range msg.ServerContent.ModelTurn.Parts {
-				if part.Text != "" {
-					if part.Thought {
+				// A thought part only feeds the log and the window's "thinking" state. It is never played, whatever else the part carries.
+				if part.Thought {
+					if part.Text != "" {
 						slog.Debug("june thought", "text", part.Text)
 						select {
 						case a.TextResponseChan <- ResponseChunk{Text: part.Text, IsThought: true}:
 						default:
 						}
-					} else {
-						// Not forwarded to TextResponseChan: under ResponseModalities=[Audio], non-thought ModelTurn text parts are incomplete fragments — OutputTranscription (handled above) is the complete-text source.
-						slog.Debug("june response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
-						textContent = part.Text
 					}
+					continue
+				}
+				if part.Text != "" {
+					// Not forwarded to TextResponseChan: under ResponseModalities=[Audio], non-thought ModelTurn text parts are incomplete fragments — OutputTranscription (handled above) is the complete-text source.
+					slog.Debug("june response fragment (not forwarded, see OutputTranscription)", "text", part.Text)
+					textContent = part.Text
 				}
 				// if part is audio
 				if part.InlineData != nil {

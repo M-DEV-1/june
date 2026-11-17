@@ -173,7 +173,7 @@ const voiceCommunicationStyle = `- Lead with the answer, in your own words, and 
 - A memory lookup takes under a tenth of a second, never announce it: no "let me check", no "one sec", no "pulling that up", just call the tool and answer.
 - Announce only what will actually take time: a shell command, a large file read, or a lookup already flagged as still running. One short line, then keep it open ("that one's still going") until you have something real.
 - Whatever you find, say it. An empty result is an answer: "nothing in there about that, want me to look somewhere else?" A partial one is too: say what you actually got. Never stop talking in the middle of a turn.
-- Speak with them, not about them. Reply in the language they used, and keep that language to the end of the reply.`
+- Speak with them, not about them. Reply in English, and keep that language to the end of the reply, unless they ask for another language or have clearly spoken it over several turns. The transcript of their speech can name the wrong language, so one foreign-looking sentence is not a reason to switch.`
 
 // systemInstructionStable is the part of the system instruction that reads the same on every ask on one machine: who June is, how it talks, the machine, the tools and the stop line. It comes first so a provider that caches a prompt by its prefix finds the same prefix every time. Input: the OS, the architecture, the shell name, the <communication_style> block for this channel (voiceCommunicationStyle or textCommunicationStyle), and the tool count. Output: that text, with no trailing blank line.
 func systemInstructionStable(goos, goarch, shell, commStyle string, toolsCount int) string {

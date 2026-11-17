@@ -191,3 +191,25 @@ func TestEveryMeteredAfter_RecordsEachRun(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A primary that blocks until its context ends must not take the whole of its caller's deadline: the fallback is asked with time left and its answer is returned.
+func TestFallThrough_AnswersFromTheFallbackWhenThePrimaryRunsOutItsTime(t *testing.T) {
+	primary := func(ctx context.Context, prompt string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	fallback := func(ctx context.Context, prompt string) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "the fallback's answer", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	got, err := fallThrough(primary, fallback)(ctx, "prompt")
+
+	if err != nil || got != "the fallback's answer" {
+		t.Fatalf("fallThrough = %q, %v, want the fallback's answer", got, err)
+	}
+}

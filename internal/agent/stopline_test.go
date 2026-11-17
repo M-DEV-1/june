@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -145,5 +147,65 @@ func TestExecuteTool_TypeText_RefusesWhenTheFieldNoLongerHoldsTheKeyboard(t *tes
 	}
 	if !strings.Contains(got, "no place to type") {
 		t.Errorf("result = %q, want the refusal", got)
+	}
+}
+
+// codexCallsRound is the stream body for one Codex round that makes every call in calls and then completes.
+func codexCallsRound(calls []stubCall) string {
+	var events []string
+	for i, c := range calls {
+		args, _ := json.Marshal(c.arguments())
+		quoted, _ := json.Marshal(string(args))
+		id := fmt.Sprint(i)
+		events = append(events, `{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_`+id+`","call_id":"call_`+id+`","name":"`+c.name+`","arguments":`+string(quoted)+`}}`)
+	}
+	return sse(append(events, `{"type":"response.completed","response":{"model":"gpt-5.5","usage":{}}}`)...)
+}
+
+// A tool call run for an ask sees that ask's own question on every command-line brain: with "yes, submit it" a click on Submit goes through and a click on Delete is stopped.
+func TestAsk_ToolCallsSeeTheQuestionOnEveryCLIBrain(t *testing.T) {
+	const question = "yes, submit it"
+	calls := []stubCall{
+		{name: "observe_screen"},
+		{name: "click", args: map[string]any{"n": 1.0}},
+		{name: "click", args: map[string]any{"n": 2.0}},
+	}
+	brains := []struct {
+		name string
+		ask  func(t *testing.T, a *Agent) (TurnTrace, error)
+	}{
+		{"claude", func(t *testing.T, a *Agent) (TurnTrace, error) {
+			return a.askClaude(t.Context(), claudeStubCalls(calls, "Done.", `{}`), "sonnet", nil, question)
+		}},
+		{"agy", func(t *testing.T, a *Agent) (TurnTrace, error) {
+			t.Cleanup(a.CloseAgySession)
+			fake := &fakeAgySession{responses: []string{`{"status":"SUCCESS","response":"Done."}`}, toolCalls: map[int][]stubCall{0: calls}}
+			return a.askAgy(t.Context(), func() agySessionRunner { return fake }, "gemini-3-pro", nil, question)
+		}},
+		{"codex", func(t *testing.T, a *Agent) (TurnTrace, error) {
+			var bodies []map[string]any
+			return a.askCodex(t.Context(), codexScript(t, &bodies, codexCallsRound(calls), answerRound), nil, question)
+		}},
+	}
+	for _, b := range brains {
+		t.Run(b.name, func(t *testing.T) {
+			a, f := actingAgent(t)
+			a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
+				return "settings", "Account", []act.Node{
+					{Role: "push button", Label: "Submit", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-submit"},
+					{Role: "push button", Label: "Delete", X: 10, Y: 60, W: 80, H: 30, Showing: true, Ref: "r-delete"},
+				}, nil
+			}
+			tr, err := b.ask(t, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(f.clicked) != 1 || f.clicked[0] != "r-submit" {
+				t.Errorf("clicked = %v, want only Submit", f.clicked)
+			}
+			if len(tr.ToolHops) != len(calls) || !strings.HasPrefix(tr.ToolHops[2].Result, "Stopped before ") {
+				t.Errorf("hops = %+v, want the click on Delete stopped", tr.ToolHops)
+			}
+		})
 	}
 }

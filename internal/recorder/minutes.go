@@ -22,10 +22,10 @@ var minutesInstruction = `You are writing the minutes of a meeting from an autom
 
 The transcript labels every line with who spoke it:
   [me]      — the person whose computer recorded this, captured from their microphone. Always the same one person.
-  [call:S1], [call:S2], ... — the other people on the call, captured from the computer's speakers and separated by voice. Each number is one person for the whole meeting: everything labelled [call:S3] is the same voice from start to finish. The numbers are arbitrary and carry no meaning beyond that.
+  [call:S1], [call:S2], ... — the other people on the call, captured from the computer's speakers and separated by voice. Each number is one voice for the whole meeting: everything labelled [call:S3] is the same voice from start to finish. One person may appear under more than one number, because the separation sometimes splits a single voice in two. The numbers are arbitrary and carry no meaning beyond that.
   [call]    — a line the voice separation could not place. Treat it as an unknown speaker, not as a person in its own right and not as the same person as any other bare [call] line.
 
-Because a numbered speaker is one consistent person, a name established anywhere applies everywhere that number appears. If [call:S4] is addressed as "Velmuth" once, then every [call:S4] line in the meeting is Velmuth, including the ones before the name was used.
+Because a numbered speaker is one consistent voice, a name established anywhere applies everywhere that number appears. If [call:S4] is addressed as "Velmuth" once, then every [call:S4] line in the meeting is Velmuth, including the ones before the name was used. Count the people in the meeting from what was said and shown, not from how many numbers there are: a number with only a few lines that continues another number's sentence, topic or role is most likely the same person, and should be written about as one person.
 
 The separation is good but not perfect. When people talk over each other the voices blend, so a line may land on the wrong number, and a person who spoke only briefly may be merged into someone else. Where a line's content plainly contradicts its number — a name, a role, an obvious continuation of someone else's sentence — trust the content and say the attribution is unclear rather than forcing it.
 
@@ -41,7 +41,7 @@ These do NOT name anybody, and you must never take a name from them:
 Rules for naming:
   - Attribute a line to a named person only when one of the two sources above actually points to it. Otherwise describe the role: "the interviewer", "the person presenting", "a second participant".
   - Never write "them", "the other side", or "the other participant" as if it were one person. Never write a speaker label like "[call:S2]" in the minutes themselves — name the person, or describe their role.
-  - A name is a claim you must be able to point at evidence for. Knowing that [call:S2] and [call:S5] are two different people does not tell you either of their names.
+  - A name is a claim you must be able to point at evidence for. A line's number does not tell you the speaker's name, and [call:S2] and [call:S5] are not necessarily two different people.
   - Name everyone you can. Work at it: a name used once in the whole meeting, a person thanked at the end, a name in the meeting chat on screen, someone answering when addressed — all of these bind a name to a voice, and a name you can support is always better than a description.
   - When you genuinely cannot name someone, never leave them as a bare label. Describe them in a sentence or two that would let the reader work out who it was: what they were responsible for, what they talked about, who they answered to or were answering, when in the meeting they spoke, whether they were presenting. "The person who demoed the shipping upload and kept asking about custom shipping factors" is useful. "A second participant" is not — it tells the reader nothing they could act on or recognise.
   - The transcript comes from speech recognition, so names in it may be misspelled. Where the screen context has the same name spelled properly, use that spelling.

@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"june/internal/act"
+	"june/internal/config"
 
 	"google.golang.org/genai"
 )
@@ -98,6 +102,47 @@ func TestReceiveLoop_ModelTurn_ForwardsThoughtButNotFinalText(t *testing.T) {
 	case extra := <-a.TextResponseChan:
 		t.Fatalf("expected no further chunk (final ModelTurn text must not be forwarded), got %+v", extra)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestVoiceThinkingConfig_NeverAsksForThoughts verifies no Live model the picker offers is sent a request for thought summaries.
+func TestVoiceThinkingConfig_NeverAsksForThoughts(t *testing.T) {
+	defer config.SetVoiceModel("")
+	for _, m := range config.LiveVoiceModels {
+		config.SetVoiceModel(m.Name)
+		if cfg := voiceThinkingConfig(); cfg != nil && cfg.IncludeThoughts {
+			t.Errorf("%s: thought summaries requested for the voice session", m.Name)
+		}
+	}
+}
+
+// TestReceiveLoop_ThoughtPartAudio_IsNeverPlayed verifies audio carried by a thought part is dropped while audio in an ordinary part still reaches the speaker.
+func TestReceiveLoop_ThoughtPartAudio_IsNeverPlayed(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	a := NewAgent(nil, speaker, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 2),
+		responses: make(chan genai.LiveSendToolResponseParameters, 2),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	audio := &genai.Blob{Data: []byte{1, 2}, MIMEType: "audio/pcm"}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		ModelTurn: &genai.Content{Parts: []*genai.Part{{Thought: true, InlineData: audio}}},
+	}}
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		ModelTurn: &genai.Content{Parts: []*genai.Part{{InlineData: audio}}},
+	}}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for speaker.plays.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := speaker.plays.Load(); got != 1 {
+		t.Errorf("expected only the ordinary part's audio to be played, got %d plays", got)
 	}
 }
 
@@ -240,11 +285,13 @@ func TestReceiveLoop_InputTranscriptionFinished_DoesNotAutoInject(t *testing.T) 
 // fakeSpeaker is a no-op audio.Speaker for receiveLoop tests that exercise the barge-in (Interrupted) path, which calls Flush() on the real speaker — a nil speaker panics there. It counts Flush calls so a test can assert that a tool-delivery interrupt does NOT throw away the audio June is in the middle of playing.
 type fakeSpeaker struct {
 	flushes atomic.Int32
+	// plays counts Play calls, so a test can assert that audio did or did not reach the speaker.
+	plays atomic.Int32
 	// amplitude is what CurrentAmplitude reports — the barge-in path uses it to tell a real interruption from the room's own noise coming back through the mic while June is audibly speaking.
 	amplitude atomic.Uint64
 }
 
-func (s *fakeSpeaker) Play(pcm []byte) error { return nil }
+func (s *fakeSpeaker) Play(pcm []byte) error { s.plays.Add(1); return nil }
 func (s *fakeSpeaker) Flush()                { s.flushes.Add(1) }
 func (s *fakeSpeaker) Close() error          { return nil }
 func (s *fakeSpeaker) CurrentAmplitude() float64 {
@@ -724,6 +771,41 @@ func TestReceiveLoop_NoiseInterruptWhileJuneSpeaks_IsNotABargeIn(t *testing.T) {
 	}
 }
 
+// TestReceiveLoop_InterruptWithNoSpeechAndQuietSpeaker_LeavesTheSpeakerAlone covers the interrupt that is neither held open nor attributed to a tool delivery: nobody was transcribed and the speaker reads quiet, as in a pause between sentences. The audio already queued must not be thrown away and no stop notice written.
+func TestReceiveLoop_InterruptWithNoSpeechAndQuietSpeaker_LeavesTheSpeakerAlone(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	a := NewAgent(nil, speaker, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	// A message the loop must still process, so "no stop notice" can be told apart from "not read yet".
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	for {
+		select {
+		case chunk := <-a.TextResponseChan:
+			if chunk.Sender == SenderSystem {
+				t.Fatalf("an interrupt with no user speech must not write a stop notice, got %+v", chunk)
+			}
+			if chunk.TurnBoundary {
+				if n := speaker.flushes.Load(); n != 0 {
+					t.Errorf("an interrupt with no user speech must not flush the speaker, got %d flushes", n)
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the turn boundary chunk")
+		}
+	}
+}
+
 // TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn is the production bug: the mic transcribed June's own greeting back as a "user said (voice)" turn 4 seconds after she said it, so June answered herself and then answered that answer, looping for minutes with no one talking to it. A transcript that duplicates what June just said, arriving inside the echo window, must never reach TextResponseChan as a user turn.
 func TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn(t *testing.T) {
 	logs := captureLogs(t)
@@ -1002,5 +1084,95 @@ func TestReceiveLoop_SpokenGoAhead_EndsWithTheTurn(t *testing.T) {
 	}
 	if len(screen.clicked) != 1 {
 		t.Errorf("clicked = %v, want only the click made in the turn the user said yes in", screen.clicked)
+	}
+}
+
+// silentServer accepts TCP connections and never answers on them, standing in for a Live endpoint that is reachable but hangs the handshake. Input: the test. Output: the websocket base URL to give the client.
+func silentServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	return "ws://" + ln.Addr().String()
+}
+
+// TestConnect_UnansweredHandshake_FailsWithinTheBoundEachTime verifies a dial to a server that never answers returns an error after liveConnectTimeout, and that a second dial straight after does the same, so a redial loop is never stuck behind the first.
+func TestConnect_UnansweredHandshake_FailsWithinTheBoundEachTime(t *testing.T) {
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", silentServer(t))
+	defer func(d time.Duration) { liveConnectTimeout = d }(liveConnectTimeout)
+	liveConnectTimeout = 100 * time.Millisecond
+
+	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "key")
+	for attempt := 1; attempt <= 2; attempt++ {
+		started := time.Now()
+		err := a.Connect(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "no answer within") {
+			t.Fatalf("attempt %d: Connect error = %v, want the timeout", attempt, err)
+		}
+		if took := time.Since(started); took > 2*time.Second {
+			t.Errorf("attempt %d took %v, want it to fail near the %v bound", attempt, took, liveConnectTimeout)
+		}
+	}
+}
+
+// hangingContextBrain is a brain whose handshake-context read never returns until its context ends.
+type hangingContextBrain struct{ toolTestBrain }
+
+func (b *hangingContextBrain) GetImplicitContext(ctx context.Context) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestConnect_StuckContextRead_DoesNotHoldTheDial verifies a store read that never returns costs at most contextGatherTimeout, after which the dial carries on without that context.
+func TestConnect_StuckContextRead_DoesNotHoldTheDial(t *testing.T) {
+	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "refused", http.StatusBadRequest)
+	}))
+	defer refuser.Close()
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws"+strings.TrimPrefix(refuser.URL, "http"))
+	defer func(d time.Duration) { contextGatherTimeout = d }(contextGatherTimeout)
+	contextGatherTimeout = 100 * time.Millisecond
+
+	a := NewAgent(nil, nil, &hangingContextBrain{}, nil, "key")
+	started := time.Now()
+	err := a.Connect(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "websocket handshake failed") {
+		t.Fatalf("Connect error = %v, want the dial to be reached and refused", err)
+	}
+	if took := time.Since(started); took > 2*time.Second {
+		t.Errorf("Connect took %v, want it to stop waiting on the stuck read near the %v bound", took, contextGatherTimeout)
+	}
+}
+
+// TestVoiceInstruction_RepliesInEnglishByDefault verifies the voice prompt tells the model to answer in English unless asked otherwise, since the input transcript carries no language hint and can mislabel the language.
+func TestVoiceInstruction_RepliesInEnglishByDefault(t *testing.T) {
+	text := systemInstructionText(time.Now(), "linux", "amd64", "bash", "", "", 0)
+	if !strings.Contains(text, "Reply in English") {
+		t.Error("voice instruction does not default replies to English")
+	}
+	if strings.Contains(text, "Reply in the language they used") {
+		t.Error("voice instruction still tells the model to mirror the transcript's language")
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"june/internal/agent"
 	"june/internal/audio"
 	"june/internal/db"
+	"june/internal/db/dbtest"
 )
 
 // voiceFakeMic is a Microphone that hands out a channel nobody writes to and records that it was closed, so a test can assert Stop frees the real device without opening one. Its amplitude is settable under a mutex (sync/atomic has no Float64) so the level-ticker tests can drive what CurrentAmplitude reports without touching real hardware.
@@ -294,6 +295,50 @@ func TestVoiceEvents_HeardSaidAndStateReachASubscriber(t *testing.T) {
 	}
 }
 
+// TestVoiceSession_FilesWhatWasSaidAsVoiceTurns verifies a session's speech lands in one conversation as voice turns: each side's pieces joined into one turn, a turn filed when the other side starts or the turn ends, and whatever is still held filed when the session stops.
+func TestVoiceSession_FilesWhatWasSaidAsVoiceTurns(t *testing.T) {
+	store := dbtest.Open(t)
+	srv, _, _, _, run := newVoiceServerStore(t, store)
+
+	events, closeSSE := readSSE(t, srv)
+	defer closeSSE()
+	voicePost(t, srv, "/voice/start").Body.Close()
+	<-run.running
+
+	run.text <- agent.ResponseChunk{Text: "what was", Sender: agent.SenderYou}
+	run.text <- agent.ResponseChunk{Text: "I doing", Sender: agent.SenderYou}
+	run.text <- agent.ResponseChunk{Text: "The API"}
+	run.text <- agent.ResponseChunk{Text: " doc."}
+	run.text <- agent.ResponseChunk{TurnBoundary: true}
+	run.text <- agent.ResponseChunk{Text: "thanks", Sender: agent.SenderYou}
+	// Stopping before the session has read the last piece would drop it, so wait for it to be broadcast.
+	for ev := mustEvent(t, events); ev.Type != "heard" || ev.Text != "thanks"; ev = mustEvent(t, events) {
+	}
+	voicePost(t, srv, "/voice/stop").Body.Close()
+
+	want := []struct{ role, text string }{{"you", "what was I doing"}, {"june", "The API doc."}, {"you", "thanks"}}
+	var turns []db.Turn
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		convs, err := store.ListConversations(context.Background(), 10)
+		if err == nil && len(convs) == 1 {
+			turns, _ = store.ConversationTurns(context.Background(), convs[0].ID)
+			if len(turns) == len(want) {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(turns) != len(want) {
+		t.Fatalf("filed %d turns, want %d: %+v", len(turns), len(want), turns)
+	}
+	for i, w := range want {
+		if turns[i].Role != w.role || turns[i].Text != w.text || turns[i].Kind != "voice" {
+			t.Errorf("turn %d = %s/%q/%s, want %s/%q/voice", i, turns[i].Role, turns[i].Text, turns[i].Kind, w.role, w.text)
+		}
+	}
+}
+
 // TestVoiceHeard_StopEndsTheSession covers the spoken way out: the window can be hidden while a session runs, so "stop" has to end it from the daemon's side rather than from a key the hidden window never sees.
 func TestVoiceHeard_StopEndsTheSession(t *testing.T) {
 	for _, said := range []string{"stop", "Stop.", "June, stop!", "June STOP"} {
@@ -377,6 +422,69 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	if active || id != "" {
 		t.Fatalf("status after giving up = %v/%q, want inactive with no id", active, id)
 	}
+}
+
+// voiceDroppingRunner is a voiceRunner whose first drops runs each last lived before ending in an error, and whose next run holds until cancelled, standing in for a conversation that keeps working and is cut by the network now and then.
+type voiceDroppingRunner struct {
+	lived time.Duration
+	drops int64
+	calls atomic.Int64
+}
+
+func (f *voiceDroppingRunner) Run(ctx context.Context, mic <-chan []byte) error {
+	if f.calls.Add(1) > f.drops {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	select {
+	case <-time.After(f.lived):
+		return errors.New("read: connection reset by peer")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (f *voiceDroppingRunner) Text() <-chan agent.ResponseChunk {
+	return make(chan agent.ResponseChunk)
+}
+func (f *voiceDroppingRunner) Tools() <-chan agent.ToolActivity { return make(chan agent.ToolActivity) }
+func (f *voiceDroppingRunner) Usage() agent.TokenUsage          { return agent.TokenUsage{} }
+
+// TestVoiceDial_HealthyRunsThatDropAreNotConsecutiveFailures verifies a session whose runs each work for a while before dropping is never given up on, however many times it drops, while a run that dies at once still counts (see TestVoiceDial_GivesUpAfterConsecutiveFailures).
+func TestVoiceDial_HealthyRunsThatDropAreNotConsecutiveFailures(t *testing.T) {
+	origDelay, origMax, origAttempts, origHealthy := voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures, voiceHealthyRun
+	voiceReconnectDelay = time.Millisecond
+	voiceMaxReconnectDelay = 2 * time.Millisecond
+	voiceMaxConsecutiveFailures = 2
+	voiceHealthyRun = 20 * time.Millisecond
+	t.Cleanup(func() {
+		voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures, voiceHealthyRun = origDelay, origMax, origAttempts, origHealthy
+	})
+
+	run := &voiceDroppingRunner{lived: 40 * time.Millisecond, drops: 5}
+	s := New(nil, nil, nil, nil)
+	v := NewVoice(s, nil, "", nil)
+	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
+		return &voiceFakeMic{ch: make(chan []byte)}, &voiceFakeSpeaker{}, run, nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/voice/start", v.Start)
+	mux.HandleFunc("/voice/stop", v.Stop)
+	mux.HandleFunc("/voice/status", v.Status)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	voicePost(t, srv, "/voice/start").Body.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for run.calls.Load() <= run.drops && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := run.calls.Load(); n <= run.drops {
+		t.Fatalf("Run was called %d times, want more than the %d drops: the session was given up on", n, run.drops)
+	}
+	if active, _, _ := voiceStatus(t, srv); !active {
+		t.Error("the session is no longer active after runs that each worked before dropping")
+	}
+	voicePost(t, srv, "/voice/stop").Body.Close()
 }
 
 // TestStart_DoesNotHoldTheLockAcrossOpeningHardware checks that Start releases the session mutex before it dials the microphone and the speaker, so GET /voice/status and POST /voice/stop keep answering while that hardware call is in flight — the same shape Dictation.Start already uses. Held across it, a slow (or wedged) device open blocks every other voice route for as long as the open takes.

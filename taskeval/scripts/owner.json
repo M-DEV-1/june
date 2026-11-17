@@ -1,0 +1,4 @@
+[
+  {"call": "query_memory", "args": {"query": "who owns {{project}}"}},
+  {"say": "{{owner}} owns {{project}}."}
+]

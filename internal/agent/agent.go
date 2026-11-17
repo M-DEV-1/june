@@ -30,6 +30,8 @@ type ContextReader interface {
 	// PersonalContext/SetPersonalContext/DeletePersonalContext back the personal_context tool (tools.go) and the block the system prompt opens with. Separate from notes on purpose: these are the things the user stated about themselves, edited in place by subject, and no inference path writes here.
 	PersonalContext(ctx context.Context) ([]db.PersonalEntry, error)
 	SetPersonalContext(ctx context.Context, subject, content string) error
+	// DiaryEntry backs the standing-understanding block both ask prompts carry: the diary row with an empty day and kind "understanding", which dreaming and the evening close rewrite. Nothing on the ask paths writes it.
+	DiaryEntry(ctx context.Context, day, kind string) (string, error)
 	DeletePersonalContext(ctx context.Context, subject string) error
 	// SetActionStatus backs the "revise" tool's state path (tools.go). An action item is a notes row whose content carries its own status, so a plain content edit could technically reach one — but it would overwrite that structure with prose and silently un-track the item, which is why correcting one goes through here instead. SetActionPriority sets how much an action item matters and is called from the proactive briefing flow, not from any agent tool.
 	SetActionStatus(ctx context.Context, id int64, status string) error

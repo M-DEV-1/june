@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// launchWait is how long open_app waits for a launched application's window to show before saying it did not. The Spotify snap took more than 12 seconds to show its window on this desk on 2026-09-08, and the model can observe_screen after that.
-const launchWait = 30 * time.Second
+// launchWait is how long open_app waits for a launched application's window to show before handing the turn back. It is short because a voice turn is silent while a tool runs; a window that takes longer is reported as still opening, and the model can observe_screen later. A variable only so a test can shrink it.
+var launchWait = 8 * time.Second
 
 // launchPoll is how often the window list is read while waiting. A variable so tests cost no wall time.
 var launchPoll = 500 * time.Millisecond
@@ -71,7 +71,7 @@ func shortcutEntries(roots ...string) map[string]string {
 	return out
 }
 
-// openApp brings an installed application to the front, starting it when it is not running. Input: the application as the user named it. Output: the window that came forward, in the same words switch_window uses; an error naming the application when nothing installed matches it, or when it started but no window of it showed within launchWait.
+// openApp brings an installed application to the front, starting it when it is not running. Input: the application as the user named it. Output: the window that came forward, in the same words switch_window uses; an error naming the application when nothing installed matches it, or a plain report that it started and is still opening when no window of it showed within launchWait.
 func (a *Agent) openApp(ctx context.Context, app string) string {
 	if app == "" {
 		return toolError("open_app needs the application to open")
@@ -127,7 +127,7 @@ func (a *Agent) openApp(ctx context.Context, app string) string {
 			return a.switchOutcome(ctx, app, before, "launched "+filepath.Base(entry)+", then "+how, nil)
 		}
 		if !time.Now().Before(deadline) || ctx.Err() != nil {
-			return toolError(fmt.Sprintf("started %q but no window of it showed within %s; call observe_screen to see what is in front now", app, launchWait))
+			return fmt.Sprintf("started %q from %s and it is still opening: no window of it showed in %s; call observe_screen in a moment to see it", app, filepath.Base(entry), launchWait)
 		}
 		time.Sleep(launchPoll)
 	}

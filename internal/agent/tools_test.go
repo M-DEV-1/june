@@ -34,6 +34,8 @@ type toolTestBrain struct {
 	windowEpisodes  []db.Episode
 	windowSummaries []db.WindowSummary
 	subjectRecall   []string
+	// understanding is what DiaryEntry("", "understanding") returns, the doc both ask prompts carry.
+	understanding string
 
 	// searchMemoryResult/searchMemoryCalledFocus back SearchMemory — used by buildHandshakeContext's tests (F2) to verify the [working]-buffer focus signal actually drives a SearchMemory call.
 	searchMemoryResult      []db.MemoryHit
@@ -151,6 +153,12 @@ func (b *toolTestBrain) NotesOfKindSince(ctx context.Context, kind string, since
 		}
 	}
 	return out, nil
+}
+func (b *toolTestBrain) DiaryEntry(ctx context.Context, day, kind string) (string, error) {
+	if day == "" && kind == "understanding" {
+		return b.understanding, nil
+	}
+	return "", nil
 }
 func (b *toolTestBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	if b.personalErr != nil {
@@ -1527,6 +1535,24 @@ func TestExecuteTool_OpenApp_LaunchesTheDesktopEntryAndRaisesItsWindow(t *testin
 	}
 	if got := a.executeTool(context.Background(), "open_app", map[string]any{"app": "Figma"}); !strings.Contains(got, "no installed application") {
 		t.Errorf("unknown app = %q, want it said plainly", got)
+	}
+}
+
+// An application whose window has not shown by the end of the wait is still starting, not broken, so open_app answers with a plain report rather than an error.
+func TestExecuteTool_OpenApp_SlowWindowIsReportedAsStillOpening(t *testing.T) {
+	raiser := &fakeRaiser{available: true}
+	a, _ := switchingAgent(t, func() (string, string) { return "claude-desktop", "Claude" })
+	a.UseWindowRaiser(raiser)
+	a.desktopEntries = func() map[string]string {
+		return map[string]string{"/apps/spotify_spotify.desktop": "Spotify"}
+	}
+	launched := 0
+	a.launchApp = func(string) error { launched++; return nil }
+	defer func(wait time.Duration) { launchWait = wait }(launchWait)
+	launchWait, launchPoll = 20*time.Millisecond, 0
+	got := a.executeTool(WithQuestion(context.Background(), "open spotify"), "open_app", map[string]any{"app": "spotify"})
+	if launched != 1 || strings.HasPrefix(got, "error") || !strings.Contains(got, "still opening") {
+		t.Errorf("launched = %d, result = %q, want one launch and a still-opening report, not an error", launched, got)
 	}
 }
 
