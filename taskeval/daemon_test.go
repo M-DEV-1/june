@@ -92,10 +92,31 @@ func startDaemon(t *testing.T, world fixture.World) *daemon {
 		out.Close()
 		if t.Failed() {
 			t.Logf("daemon log tail:\n%s", tail(filepath.Join(data, "june.log"), 15))
+			keepLog(t, filepath.Join(data, "june.log"))
 		}
 	})
 	d.waitReady(t)
 	return d
+}
+
+// keepLog copies the daemon's log to out/ under the failed test's name and the time, because the temp data directory is deleted when the test ends.
+func keepLog(t *testing.T, logPath string) {
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Logf("could not keep the daemon log: %v", err)
+		return
+	}
+	name := strings.NewReplacer("/", "_", "=", "").Replace(t.Name())
+	dest := filepath.Join("out", time.Now().Format("20060102-150405")+"-"+name+".log")
+	if err := os.MkdirAll("out", 0o755); err != nil {
+		t.Logf("could not keep the daemon log: %v", err)
+		return
+	}
+	if err := os.WriteFile(dest, raw, 0o644); err != nil {
+		t.Logf("could not keep the daemon log: %v", err)
+		return
+	}
+	t.Logf("daemon log kept at taskeval/%s", dest)
 }
 
 // freePort returns a TCP port on 127.0.0.1 that nothing is listening on.
