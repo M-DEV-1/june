@@ -740,12 +740,11 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			pendingBargeIn = time.Time{}
 			slog.Info("barge-in detected: server interrupted model generation", "user_spoke", userSpoke)
 			flushJuneSpeech()
-			a.speaker.Flush()
-
-			// The notice explains a cut-off answer, so it is only honest when the user actually cut in. It was written 62 times in one day with no user transcript behind almost any of them, each one telling the user they interrupted a reply they never touched.
+			// With no user speech behind it the interrupt is the room, so the audio already queued is left to finish and no notice is written: it explains a cut-off answer, and it was written 62 times in one day telling the user they interrupted a reply they never touched.
 			if !userSpoke {
 				continue
 			}
+			a.speaker.Flush()
 			// The generation is already cancelled server-side and cannot be resumed, so the answer just stops mid-sentence. Whatever streamed stays in the transcript; this line says why it ends where it does.
 			select {
 			case a.TextResponseChan <- ResponseChunk{Text: "[june stopped]", Sender: SenderSystem}:
