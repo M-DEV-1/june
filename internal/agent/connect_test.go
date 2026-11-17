@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -885,23 +883,36 @@ func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
 	}
 }
 
-// TestConnect_FailedResumedHandshakeDropsTheHandle verifies a redial whose handshake the server refuses forgets the resumption handle, so the next dial starts a fresh session instead of failing the same way on the same handle.
-func TestConnect_FailedResumedHandshakeDropsTheHandle(t *testing.T) {
-	refuser := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "refused", http.StatusBadRequest)
-	}))
-	defer refuser.Close()
-	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws"+strings.TrimPrefix(refuser.URL, "http"))
-
-	a := NewAgent(nil, nil, &toolTestBrain{}, nil, "key")
-	a.setResumeHandle("stale-handle")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := a.Connect(ctx, nil)
-	if err == nil || !strings.Contains(err.Error(), "websocket handshake failed") {
-		t.Fatalf("Connect error = %v, want the handshake failure", err)
-	}
-	if got := a.getResumeHandle(); got != "" {
-		t.Errorf("resume handle after a refused resumed handshake = %q, want it cleared", got)
+// TestReceiveLoop_ResumedSessionThatDiesSilently_DropsTheHandle verifies a resumed session that fails before the server has sent anything forgets the resumption handle, so the next dial starts fresh instead of failing the same way, while a session that was cut off after the server had spoken keeps it.
+func TestReceiveLoop_ResumedSessionThatDiesSilently_DropsTheHandle(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		serverSent bool
+		wantHandle string
+	}{
+		{"dies before the server says anything", false, ""},
+		{"cut off after the server has spoken", true, "resume-me"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewAgent(nil, nil, nil, nil, "")
+			a.setResumeHandle("resume-me")
+			fs := &fakeLiveSession{
+				msgCh:     make(chan *genai.LiveServerMessage, 2),
+				responses: make(chan genai.LiveSendToolResponseParameters, 1),
+				closeErr:  errors.New("fake session closed"),
+			}
+			if tc.serverSent {
+				fs.msgCh <- &genai.LiveServerMessage{}
+			}
+			close(fs.msgCh)
+			errChan := make(chan error, 2)
+			a.receiveLoop(context.Background(), fs, "test-model", errChan)
+			if err := <-errChan; err == nil {
+				t.Fatal("expected the receive loop to report the failure")
+			}
+			if got := a.getResumeHandle(); got != tc.wantHandle {
+				t.Errorf("resume handle = %q, want %q", got, tc.wantHandle)
+			}
+		})
 	}
 }

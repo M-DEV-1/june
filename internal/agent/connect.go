@@ -377,11 +377,6 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		wsSpan.End()
 		span.RecordError(err)
 		span.End()
-		// A handle the server will not resume from fails every redial the same way, so the next dial starts a fresh session instead.
-		if priorHandle != "" {
-			slog.Warn("resumed handshake failed, dropping the resumption handle", "error", err)
-			a.setResumeHandle("")
-		}
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
 	wsSpan.End()
@@ -589,6 +584,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 	// recentJuneSpeech holds June's last few completed utterances, for telling the mic hearing her own voice apart from the user talking (see matchesRecentJuneSpeech). Session-scoped in the same way as the buffers above.
 	var recentJuneSpeech []juneUtterance
 
+	// heardServer is whether any message has arrived from the server yet on this session.
+	var heardServer bool
+
 	// turnUsage accumulates the Live API's own token counts for the turn currently in progress, the same way askVoice's eval loop does with TurnTrace.Usage — most server messages of a turn carry no UsageMetadata and addLive is then a no-op, so this only grows on the messages that do. Session-scoped in the same way as the buffers above.
 	turnUsage := TokenUsage{Provider: ProviderGemini}
 
@@ -644,9 +642,15 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if err != nil {
 			recvSpan.RecordError(err)
 			recvSpan.SetStatus(codes.Error, "receive failed")
+			// A resumed session that dies before the server has said anything is most likely one whose handle the server will not resume from, which would fail every redial the same way, so the next dial starts a fresh session. A session cut off after it has been talking keeps its handle, and so does one that is being shut down on purpose.
+			if !heardServer && recvCtx.Err() == nil && a.getResumeHandle() != "" {
+				slog.Warn("resumed session died before the server said anything, dropping the resumption handle", "error", err)
+				a.setResumeHandle("")
+			}
 			errChan <- fmt.Errorf("receive loop error: %w", err)
 			return
 		}
+		heardServer = true
 
 		// The Live API reports usage on the server message that finishes a response rather than on a response object, so a turn that runs tools reports usage once per round and they add up here the same way askVoice's eval loop totals TurnTrace.Usage (see TokenUsage.addLive in ask.go). Most messages of a turn carry no UsageMetadata at all, and addLive is then a no-op.
 		turnUsage.addLive(msg.UsageMetadata)
