@@ -1,0 +1,4 @@
+[
+  {"call": "query_memory", "args": {"query": "{{person}} phone number"}},
+  {"say": "I have no phone number for {{person}} in memory."}
+]
