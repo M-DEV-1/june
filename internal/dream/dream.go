@@ -1,4 +1,4 @@
-// Package dream is the daemon's overnight loop: while the machine sits idle on mains between the dream hour and the morning brief, it tests the hypotheses June's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
+// Package dream is the daemon's overnight loop: whenever the machine sits idle on mains after the dream hour, that same night or, if the machine was off, any time the next day, it tests the hypotheses June's diary has accumulated against the week's evidence, adopts new ones, rewrites the standing understanding of the user, and leaves a morning report in the diary. Every model call goes to the configured dream brain, with the local shadow model standing in whenever that brain fails.
 package dream
 
 import (
@@ -184,14 +184,6 @@ func (r *Runner) nightKey(now time.Time) string {
 	return now.AddDate(0, 0, -1).Format(time.DateOnly)
 }
 
-// inWindow reports whether the hour lies in [dreamHour, briefHour), handling the usual case where the window wraps midnight.
-func (r *Runner) inWindow(hour int) bool {
-	if r.dreamHour < r.briefHour {
-		return hour >= r.dreamHour && hour < r.briefHour
-	}
-	return hour >= r.dreamHour || hour < r.briefHour
-}
-
 // windowStart is the local instant the night's window opened, for the missing-diary grace check.
 func (r *Runner) windowStart(night string) time.Time {
 	d, err := time.ParseInLocation(time.DateOnly, night, time.Local)
@@ -252,16 +244,13 @@ func (r *Runner) userAway(now, lastEpisode time.Time) bool {
 	return lastEpisode.IsZero() || now.Sub(lastEpisode) >= idleAfter
 }
 
-// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when the window is closed or any start condition fails, and otherwise starts or resumes the night's run. Conditions, all required: inside the window, the night not yet finished, on mains, the user idle (screen locked, or away per userAway), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
+// Tick is the per-wake entry point, called from the daemon's five-minute ticker. It returns without a trace when any start condition fails, and otherwise starts or resumes the night's run. There is no window gate: nightKey makes a daytime tick resolve to the previous night, so a night the machine slept through (five in a row in October 2026, the laptop off every night and idle on mains every afternoon) runs the next day instead of never. Conditions, all required: the night not yet finished, on mains, the user idle (screen locked, or away per userAway), the recorder quiescent, and the evening close's diary entry present — or missingDiaryGrace past the dream hour, in which case day summaries stand in.
 func (r *Runner) Tick(ctx context.Context) {
 	if r.dreamHour < 0 {
 		return
 	}
 	now := r.now().In(time.Local)
 	forced := r.consumeForceMarker()
-	if !forced && !r.inWindow(now.Hour()) {
-		return
-	}
 	// Past the curfew the whole run waits for tomorrow night: a dream started at 03:20 could still be making brain calls at 03:40, so the gate is on starting at all, with a resumed run equally held. Only Claude spends the user's usage windows, so a non-claude dream brain is exempt.
 	if !forced && !r.CurfewExempt && now.Hour()*60+now.Minute() >= brainCurfewMinutes && now.Hour() < r.briefHour {
 		return

@@ -118,7 +118,7 @@ func (m MeetingsConfig) OfferEnabled() bool { return m.Offer == nil || *m.Offer 
 
 // DreamConfig sets when the overnight dreaming loop may run, and reserves the knobs the later local-model slice will need.
 type DreamConfig struct {
-	// Hour is the local hour the dreaming window opens; the window closes at the morning brief hour. Zero means DefaultDreamHour, negative disables dreaming.
+	// Hour is the local hour after which a night may be dreamt; a night the machine slept through is dreamt the next day instead, whenever it sits idle on mains. Zero means DefaultDreamHour, negative disables dreaming.
 	Hour int `json:"hour"`
 	// ModelPath is the GGUF the future local dreaming model loads. Unused this slice.
 	ModelPath string `json:"model_path"`
