@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"june/internal/config"
 
@@ -62,8 +63,7 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 	// only enabled when OTEL_EXPORTER_OTLP_ENDPOINT is set -- most won't have a collector running, and blocking on the gRPC dial added 3-5s startup cost.
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
-		slog.Info("tracing disabled (set OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 to enable)")
-		return closeLog, nil
+		return startLocalSpans(closeLog), nil
 	}
 
 	exporter, err := otlptracegrpc.New(ctx,
@@ -94,17 +94,38 @@ func InitTelemetry(ctx context.Context, isTest bool) (func(context.Context) erro
 
 	slog.Info("Telemetry baseline initialized", "exporter", "otlp-grpc", "endpoint", "localhost:4317")
 
-	// shutdown
-	shutdown := func(shutdownCtx context.Context) error {
+	return shutdownProvider(closeLog), nil
+}
+
+// startLocalSpans makes finished spans land in spans.jsonl, and returns a shutdown that flushes it and then runs closeLog. With JUNE_SPANS=off, or when the file cannot be opened, it records nothing and returns closeLog.
+func startLocalSpans(closeLog func(context.Context) error) func(context.Context) error {
+	if !spansEnabled() {
+		slog.Info("tracing disabled (JUNE_SPANS=off; set OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 to export to a collector)")
+		return closeLog
+	}
+	sink, err := newSpanSink(spansPath(), maxSpansBytes)
+	if err != nil {
+		slog.Warn("could not open the span file, tracing disabled", "error", err)
+		return closeLog
+	}
+	tp = sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sink), sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	slog.Info("spans are written to the local span file", "path", spansPath())
+	return shutdownProvider(closeLog)
+}
+
+// shutdownProvider returns a shutdown that stops the tracer provider (flushing its processors) and then runs closeLog. The provider is shut down on a fresh five-second context, because the one main passes is already cancelled by the signal that stopped the daemon and the SDK skips flushing under a cancelled context.
+func shutdownProvider(closeLog func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
 		slog.Info("Shutting down telemetry provider...")
-		err := tp.Shutdown(shutdownCtx)
-		if cerr := closeLog(shutdownCtx); err == nil {
+		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		err := tp.Shutdown(flushCtx)
+		if cerr := closeLog(ctx); err == nil {
 			err = cerr
 		}
 		return err
 	}
-
-	return shutdown, nil
 }
 
 // GetTracer returns a tracer for a specific logical service.
