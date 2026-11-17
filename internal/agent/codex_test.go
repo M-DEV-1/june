@@ -399,7 +399,7 @@ func TestAskCodex_RunsToolsThroughTheGateAndFillsTheTrace(t *testing.T) {
 	if parts := first[0].(map[string]any)["content"].([]any); len(parts) != 2 || !strings.Contains(parts[0].(map[string]any)["text"].(string), "recalled line") || parts[1].(map[string]any)["text"] != "list my files" {
 		t.Errorf("first content = %v", parts)
 	}
-	if bodies[0]["instructions"] == "" || len(bodies[0]["tools"].([]any)) != len(a.askToolDeclarations()) {
+	if bodies[0]["instructions"] == "" || len(bodies[0]["tools"].([]any)) != len(withoutDeclarations(a.askToolDeclarations(), screenActionTools)) {
 		t.Errorf("first body instructions/tools = %v / %d", bodies[0]["instructions"], len(bodies[0]["tools"].([]any)))
 	}
 	second := bodies[1]["input"].([]any)

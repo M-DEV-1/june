@@ -55,6 +55,8 @@ type SetupView struct {
 	DataDir        string `json:"data_dir"`
 	// WindowFrames is SetupDeps.WindowFrames' answer, asked only until setup is done, and left out when it has none.
 	WindowFrames *bool `json:"window_frames,omitempty"`
+	// KeyPattern is plausibleKey as a regular expression, for the window to recognise a Gemini key on the clipboard by the rule the save route applies.
+	KeyPattern string `json:"key_pattern"`
 }
 
 // MicTestResult is POST /setup/mic-test. Peak is on the same 0-1 scale as the level events the meter draws; Heard is whether the loudest moment reached what dictation counts as speech; Consent is "allowed", "blocked" or "unknown"; Error says why the microphone could not be opened, "" when it was.
@@ -139,6 +141,7 @@ func (s *setupRoutes) get(w http.ResponseWriter, r *http.Request) {
 		Hotkey:         readableHotkey(windowHotkey()),
 		RestartPending: lifecycle.RestartPending(),
 		DataDir:        s.d.DataDir,
+		KeyPattern:     plausibleKey.String(),
 	}
 	if s.d.WindowFrames != nil && !cfg.SetupDone {
 		view.WindowFrames = s.d.WindowFrames(r.Context())

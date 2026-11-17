@@ -79,6 +79,40 @@ if [ "$is_gnome" = true ] && command -v gnome-extensions >/dev/null 2>&1; then
 	echo "Window-raising extension installed: on Wayland, log out and back in once to finish enabling it."
 fi
 
+# A Wayland session never hands a global key grab to June's hidden window, so the shortcut that shows June (Ctrl+Alt+Space, as on Windows) is a GNOME custom keybinding that runs june-window-toggle, which signals the window the way the Tauri window's listen_for_toggle_signal expects. internal/ipc/settings.go finds the binding by that command name to show the shortcut in setup.
+if [ "$is_gnome" = true ] && command -v gsettings >/dev/null 2>&1; then
+	cat > "$bin/june-window-toggle" <<'EOF'
+#!/bin/sh
+# Shows or hides June's window: signals the window process named in window.pid in June's data directory. The pid is checked against /proc first, because a window that died without removing its pid file leaves a number the system may have given to an unrelated program, and SIGHUP ends most programs.
+pid="$(cat "${JUNE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/june}/window.pid" 2>/dev/null)" || exit 0
+case "$pid" in '' | *[!0-9]*) exit 0 ;; esac
+grep -aq june-window "/proc/$pid/cmdline" 2>/dev/null && kill -HUP "$pid"
+exit 0
+EOF
+	chmod 0755 "$bin/june-window-toggle"
+
+	media_keys=org.gnome.settings-daemon.plugins.media-keys
+	# ponytail: a home directory path with a space or a quote in it would be split by GNOME's command parsing; add quoting to the command if that is ever seen.
+	register_hotkey() {
+		local list path
+		list="$(gsettings get "$media_keys" custom-keybindings)" || return 1
+		# An existing June binding is left as it is, whoever made it.
+		for path in $(grep -o "'[^']*'" <<<"$list" | tr -d "'"); do
+			case "$(gsettings get "$media_keys.custom-keybinding:$path" command)" in *june-window-toggle*) return 0 ;; esac
+		done
+		path=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/june/
+		gsettings set "$media_keys.custom-keybinding:$path" name June || return 1
+		gsettings set "$media_keys.custom-keybinding:$path" command "$bin/june-window-toggle" || return 1
+		gsettings set "$media_keys.custom-keybinding:$path" binding '<Control><Alt>space' || return 1
+		# The binding is added to the list last, and the list is the user's own with one path appended.
+		case "$list" in
+		"@as []" | "[]") gsettings set "$media_keys" custom-keybindings "['$path']" ;;
+		*) gsettings set "$media_keys" custom-keybindings "${list%]}, '$path']" ;;
+		esac
+	}
+	register_hotkey || echo "Could not register June's shortcut with GNOME; set one in Settings > Keyboard that runs $bin/june-window-toggle." >&2
+fi
+
 # The service used to load ~/.config/june/env with EnvironmentFile, which put its keys in the daemon's environment ahead of <data dir>/env; the window's first-run setup saves keys to the latter, and godotenv never overrides a variable already set, so a key saved there would have been ignored. The old file's lines are merged in instead, still winning over the same key in the data dir's file, as they did before.
 data="${JUNE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/june}"
 legacy_env="$HOME/.config/june/env"
