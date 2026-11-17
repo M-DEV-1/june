@@ -38,6 +38,16 @@ func WaitHealthy(ctx context.Context, baseURL string, exited <-chan struct{}, ti
 	}
 }
 
+// DropDeviceArg removes the "-dev <name>" or "--device <name>" pair from a llama-server argument list. Input: the arguments. Output: a copy without the pair and the device name removed, or the arguments unchanged and an empty name when no device is pinned.
+func DropDeviceArg(args []string) (rest []string, device string) {
+	for i, a := range args {
+		if (a == "--device" || a == "-dev") && i+1 < len(args) {
+			return append(append([]string{}, args[:i]...), args[i+2:]...), args[i+1]
+		}
+	}
+	return args, ""
+}
+
 // KillChild interrupts a spawned child and waits for it to go, escalating to SIGKILL after five seconds. Input: the command and the channel closed when it exits. A nil cmd is a no-op.
 // It can block for five seconds, so call it without holding a lock.
 func KillChild(cmd *exec.Cmd, exited <-chan struct{}) {

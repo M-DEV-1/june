@@ -230,11 +230,8 @@ func (p *serverProcess) dropDeviceLocked(exited chan struct{}) {
 	default:
 		return // still alive but slow: not a refused device
 	}
-	for i, a := range p.args {
-		if (a == "--device" || a == "-dev") && i+1 < len(p.args) {
-			slog.Warn(p.logTag+" would not start on its GPU device, starting it on whatever device it finds", "device", p.args[i+1])
-			p.args = append(append([]string{}, p.args[:i]...), p.args[i+2:]...)
-			return
-		}
+	if rest, device := util.DropDeviceArg(p.args); device != "" {
+		slog.Warn(p.logTag+" would not start on its GPU device, starting it on whatever device it finds", "device", device)
+		p.args = rest
 	}
 }
