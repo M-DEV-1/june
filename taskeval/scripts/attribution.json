@@ -1,0 +1,4 @@
+[
+  {"call": "query_memory", "args": {"query": "{{topic}} moved"}},
+  {"say": "{{speaker}} said the {{topic}} is moved to {{date}}."}
+]
