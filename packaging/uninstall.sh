@@ -18,7 +18,31 @@ fi
 command -v gnome-extensions >/dev/null 2>&1 && gnome-extensions disable june@june.local >/dev/null 2>&1 || true
 rm -rf "$HOME/.local/share/gnome-shell/extensions/june@june.local"
 
-rm -f "$HOME/.local/bin/june" "$HOME/.local/bin/june-window"
+# The shortcut install.sh registered with GNOME, found by the command it runs, so any other custom keybinding stays in the list as it was.
+if command -v gsettings >/dev/null 2>&1; then
+	media_keys=org.gnome.settings-daemon.plugins.media-keys
+	list="$(gsettings get "$media_keys" custom-keybindings 2>/dev/null || true)"
+	kept=""
+	removed=false
+	for path in $(grep -o "'[^']*'" <<<"$list" | tr -d "'"); do
+		case "$(gsettings get "$media_keys.custom-keybinding:$path" command 2>/dev/null || true)" in
+		*june-window-toggle*)
+			gsettings reset-recursively "$media_keys.custom-keybinding:$path" || true
+			removed=true
+			;;
+		*) kept="${kept:+$kept, }'$path'" ;;
+		esac
+	done
+	if [ "$removed" = true ]; then
+		remaining="@as []"
+		if [ -n "$kept" ]; then
+			remaining="[$kept]"
+		fi
+		gsettings set "$media_keys" custom-keybindings "$remaining" || true
+	fi
+fi
+
+rm -f "$HOME/.local/bin/june" "$HOME/.local/bin/june-window" "$HOME/.local/bin/june-window-toggle"
 # Both entries: the packaged one, and the hidden june-overlay.desktop the daemon writes itself so GNOME keeps the always-mapped overlay window out of June's dock entry. Leaving the second one behind left a stale entry pointing at a binary that is gone.
 rm -f "$HOME/.local/share/applications/june.desktop" "$HOME/.local/share/applications/june-overlay.desktop"
 rm -f "$HOME/.config/systemd/user/june.service"
