@@ -882,3 +882,14 @@ func TestRedeliverBranchNotes_ResumedSessionGetsTheResult(t *testing.T) {
 	default:
 	}
 }
+
+// TestVoiceInstruction_RepliesInEnglishByDefault verifies the voice prompt tells the model to answer in English unless asked otherwise, since the input transcript carries no language hint and can mislabel the language.
+func TestVoiceInstruction_RepliesInEnglishByDefault(t *testing.T) {
+	text := systemInstructionText(time.Now(), "linux", "amd64", "bash", "", "", 0)
+	if !strings.Contains(text, "Reply in English") {
+		t.Error("voice instruction does not default replies to English")
+	}
+	if strings.Contains(text, "Reply in the language they used") {
+		t.Error("voice instruction still tells the model to mirror the transcript's language")
+	}
+}
