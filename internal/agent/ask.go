@@ -271,7 +271,13 @@ func (a *Agent) LeanPrompt(ctx context.Context, now time.Time) string {
 	if len(tools) > 0 {
 		toolsCount = len(tools[0].FunctionDeclarations)
 	}
-	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + leanInstructionTail(now, a.understandingBlock(ctx))
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount, promptBlocks{screen: true}) + "\n\n" + screenTaskGuidance + leanInstructionTail(now, a.understandingBlock(ctx))
+}
+
+// plainAskPrompt is LeanPrompt for the rounds of an ask that has not touched the screen: the same text without the screen blocks, and with the tool count of the list those rounds are offered (see screenActionTools). The round after a screen tool is called is sent screenTaskInstruction, which carries the screen rules, so the Gemini and Codex asks need them here only for a model that never looks. Input: the moment, for the clock line. Output: the instruction text.
+func (a *Agent) plainAskPrompt(ctx context.Context, now time.Time) string {
+	toolsCount := len(withoutDeclarations(a.askToolDeclarations(), screenActionTools))
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount, promptBlocks{}) + leanInstructionTail(now, a.understandingBlock(ctx))
 }
 
 // textCommunicationStyle is the <communication_style> block for the text-ask paths (this file): unlike voiceCommunicationStyle, these replies are rendered as markdown in the chat pane (see app/src/next/chat-markdown.tsx), so the rules here are about how a written reply should read rather than how a spoken one should sound.
@@ -293,7 +299,7 @@ func leanInstructionTail(now time.Time, understanding string) string {
 
 // handshakeInstruction lays the ask paths' system instruction out for a prompt cache: everything that reads the same on every ask first (systemInstructionStable, then screenTaskGuidance), and only then the parts that change between asks (the personal block, the memory lines and the clock). Measured 2026-09-05 on Codex: with the changing parts in the middle, the cache matched 3,840 of a 10,300-token opening round; the one round where they happened not to change matched 9,984. Input: the moment, the personal context block ("" for none), the assembled context lines and the tool count. Output: the instruction text.
 func handshakeInstruction(now time.Time, personal, contextStr string, toolsCount int) string {
-	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount) + "\n\n" + screenTaskGuidance + systemInstructionTail(now, personal, contextStr)
+	return systemInstructionStable(runtime.GOOS, runtime.GOARCH, shellName(), textCommunicationStyle, toolsCount, promptBlocks{screen: true}) + "\n\n" + screenTaskGuidance + systemInstructionTail(now, personal, contextStr)
 }
 
 // screenTaskGuidance tells the ask paths (text and Codex; the live voice handshake in connect.go builds its own prompt and does not include this) that "go somewhere and do X" is a screen task to carry through, not a page to open and leave. Written from three 2026-09-05 traces: one opened a page and answered in nine words without ever looking at the screen, one clicked the nearest button and called a different thing done, and one opened a site's root over the page the user was already reading and spent the rest of its budget getting back. It is deliberately written about screens in general — lists, settings, threads, tables — because a rule that names one kind of site teaches the model nothing about the next one.
@@ -597,7 +603,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	defer span.End()
 	// Carried on ctx so a screen tool deep in the loop can tell whether this very question named the window it now finds in front or consented to the step it is about to take, and so a concurrent ask never shares this one's screenshot or what the pictures cost.
 	ctx = withAsk(ctx, question)
-	instruction := a.LeanPrompt(ctx, now)
+	instruction := a.plainAskPrompt(ctx, now)
 	var handshake []string
 
 	recallCtx, cancel := context.WithTimeout(ctx, recallTimeout)

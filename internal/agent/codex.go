@@ -284,7 +284,7 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	defer span.End()
 	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so every tool call runs under them and a concurrent ask never shares this one's screenshot.
 	ctx = withAsk(ctx, question)
-	instruction := a.LeanPrompt(ctx, start)
+	instruction := a.plainAskPrompt(ctx, start)
 	var handshake []string
 
 	// Fetched again here, separately from the copy HandshakePrompt already rendered into instruction: a screen round drops instruction for screenTaskInstruction() and needs its own, trimmed personal context back (see screenPersonalContext), which the untrimmed handshake copy cannot supply.

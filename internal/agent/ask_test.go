@@ -427,6 +427,32 @@ func TestLeanPrompt_CarriesTheStandingUnderstanding(t *testing.T) {
 	}
 }
 
+// The instruction of a round that has not touched the screen leaves out the screen blocks, still carries the stop line and the understanding doc, and states the number of tools that round is actually offered. Claude and agy have no round that swaps the instruction, so LeanPrompt keeps the screen blocks for them.
+func TestPlainAskPrompt_LeavesOutTheScreenBlocks(t *testing.T) {
+	b := &toolTestBrain{understanding: "He prefers short answers."}
+	a := NewAgent(nil, nil, b, nil, "")
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.Local)
+	plain := a.plainAskPrompt(t.Context(), now)
+	for _, gone := range []string{"<screen_interaction>", screenTaskGuidance} {
+		if strings.Contains(plain, gone) {
+			t.Errorf("a plain ask's instruction carries %.40q...", gone)
+		}
+	}
+	for _, kept := range []string{"<memory_guidelines>", stopLineText, b.understanding} {
+		if !strings.Contains(plain, kept) {
+			t.Errorf("a plain ask's instruction lost %.40q...", kept)
+		}
+	}
+	want := fmt.Sprintf("You have %d tools", len(withoutDeclarations(a.askToolDeclarations(), screenActionTools)))
+	if !strings.Contains(plain, want) {
+		t.Errorf("a plain ask's instruction does not say %q", want)
+	}
+	lean := a.LeanPrompt(t.Context(), now)
+	if !strings.Contains(lean, "<screen_interaction>") || !strings.Contains(lean, screenTaskGuidance) {
+		t.Error("LeanPrompt must keep the screen blocks for the providers that cannot swap their instruction mid-ask")
+	}
+}
+
 // offeredToolNames reads the names of the function declarations out of one request body the Gemini text path sent.
 func offeredToolNames(t *testing.T, body string) map[string]bool {
 	t.Helper()
