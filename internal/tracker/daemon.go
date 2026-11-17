@@ -451,6 +451,8 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	})
 	cancelText()
 	d.lastCapture.Store(time.Now().UnixNano())
+	// The text length before any diffing is what says whether the window publishes anything: an unchanged screen emits no text either, so the emitted episode cannot tell blind from unchanged.
+	slog.Debug("read the focused window's text", "app", act.App, "runes", len([]rune(text)))
 
 	// vision only escalates for a real foreground app, never the bare desktop — or we'd snap and describe the wallpaper on a loop while the user is idle.
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
