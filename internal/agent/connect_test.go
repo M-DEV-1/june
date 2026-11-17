@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"june/internal/act"
+
 	"google.golang.org/genai"
 )
 
@@ -914,5 +916,91 @@ func TestReceiveLoop_ResumedSessionThatDiesSilently_DropsTheHandle(t *testing.T)
 				t.Errorf("resume handle = %q, want %q", got, tc.wantHandle)
 			}
 		})
+	}
+}
+
+// TestReceiveLoop_SpokenGoAhead_UnlocksOnlyTheClickItNames verifies the user's latest finished sentence is the question every tool call carries: after "yes, submit it" a click on a Submit button runs, while a click on a Delete button in the same turn is still stopped for its own go-ahead.
+func TestReceiveLoop_SpokenGoAhead_UnlocksOnlyTheClickItNames(t *testing.T) {
+	submit := act.Node{Role: "push button", Label: "Submit", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-submit"}
+	remove := act.Node{Role: "push button", Label: "Delete", X: 10, Y: 60, W: 80, H: 30, Showing: true, Ref: "r-delete"}
+	a, screen := ringingAgent(t, submit)
+	a.observe = func(ctx context.Context) (string, string, []act.Node, error) {
+		return "mail", "Inbox", []act.Node{submit, remove}, nil
+	}
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 4),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(a.voiceScreenScope(context.Background()))
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{
+		InputTranscription: &genai.Transcription{Text: "yes, submit it"},
+	}}
+	fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{FunctionCalls: []*genai.FunctionCall{
+		{ID: "1", Name: "observe_screen", Args: map[string]any{}},
+		{ID: "2", Name: "click", Args: map[string]any{"n": float64(1)}},
+		{ID: "3", Name: "click", Args: map[string]any{"n": float64(2)}},
+	}}}
+
+	results := map[string]string{}
+	for range 3 {
+		select {
+		case resp := <-fs.responses:
+			fr := resp.FunctionResponses[0]
+			results[fr.ID], _ = fr.Response["output"].(string)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for the tool results, got %v", results)
+		}
+	}
+	if len(screen.clicked) != 1 || screen.clicked[0] != "r-submit" {
+		t.Errorf("clicked = %v, want only the Submit button; results %v", screen.clicked, results)
+	}
+	if !strings.HasPrefix(results["3"], "Stopped before clicking") {
+		t.Errorf("click on Delete = %q, want it stopped", results["3"])
+	}
+}
+
+// TestReceiveLoop_SpokenGoAhead_EndsWithTheTurn verifies a go-ahead only counts in the turn it was given in: a click on Submit still runs after a GenerationComplete, which can arrive part-way through a run of tool calls, and is stopped once the turn has completed.
+func TestReceiveLoop_SpokenGoAhead_EndsWithTheTurn(t *testing.T) {
+	submit := act.Node{Role: "push button", Label: "Submit", X: 10, Y: 20, W: 80, H: 30, Showing: true, Ref: "r-submit"}
+	a, screen := ringingAgent(t, submit)
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 8),
+		responses: make(chan genai.LiveSendToolResponseParameters, 8),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(a.voiceScreenScope(context.Background()))
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	call := func(id, name string, args map[string]any) string {
+		fs.msgCh <- &genai.LiveServerMessage{ToolCall: &genai.LiveServerToolCall{FunctionCalls: []*genai.FunctionCall{{ID: id, Name: name, Args: args}}}}
+		select {
+		case resp := <-fs.responses:
+			out, _ := resp.FunctionResponses[0].Response["output"].(string)
+			return out
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for the result of %s", name)
+			return ""
+		}
+	}
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{InputTranscription: &genai.Transcription{Text: "yes, submit it"}}}
+	call("1", "observe_screen", map[string]any{})
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{GenerationComplete: true}}
+	if got := call("2", "click", map[string]any{"n": float64(1)}); strings.HasPrefix(got, "Stopped") {
+		t.Fatalf("click in the same turn after a GenerationComplete = %q, want it to run", got)
+	}
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+	call("3", "observe_screen", map[string]any{})
+	if got := call("4", "click", map[string]any{"n": float64(1)}); !strings.HasPrefix(got, "Stopped before clicking") {
+		t.Errorf("click in a later turn = %q, want it stopped", got)
+	}
+	if len(screen.clicked) != 1 {
+		t.Errorf("clicked = %v, want only the click made in the turn the user said yes in", screen.clicked)
 	}
 }
