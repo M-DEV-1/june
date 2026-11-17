@@ -428,7 +428,7 @@ func liveTools() []*genai.Tool {
 
 // liveToolsFor is liveTools for a named Live model. Google Search grounding rides beside the function tools on the 2.5 model; on the 3.x Live models the same pairing closes the session with "You exceeded your current quota" before the first word (probed on 2026-09-02, every other part of the handshake passes), so there it is left out and the model has no web search.
 func liveToolsFor(model string) []*genai.Tool {
-	tools := dropApprovalGated(toolDefinitions())
+	tools := dropDeclarations(toolDefinitions(), approvalGatedTools)
 	// Flip point for gemini-3.8-live: its docs list Google Search grounding as supported (read 2026-09-17), so once someone dials a real session with grounding sent beside the function tools and it survives past the first word, exempt config.Live38Model from this branch the way thinkingConfigFor already does. Until that probe it stays off, because a 429 closes the whole voice session a quarter second after connect while a missing web search only degrades it.
 	if strings.HasPrefix(model, "gemini-3") {
 		return tools
@@ -436,8 +436,8 @@ func liveToolsFor(model string) []*genai.Tool {
 	return append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 }
 
-// dropApprovalGated returns the tools with every approvalGatedTools declaration taken out, the same shape askTools builds through askAllowedTools. A tool the session cannot actually run must not be declared: the model spends a round finding out. Input: the declared tools; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
-func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
+// dropDeclarations returns the tools with every declaration named in drop taken out. Input: the declared tools and the set of names to remove; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
+func dropDeclarations(tools []*genai.Tool, drop map[string]bool) []*genai.Tool {
 	out := make([]*genai.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if len(tool.FunctionDeclarations) == 0 {
@@ -445,12 +445,7 @@ func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
 			continue
 		}
 		copyTool := *tool
-		copyTool.FunctionDeclarations = nil
-		for _, d := range tool.FunctionDeclarations {
-			if !approvalGatedTools[d.Name] {
-				copyTool.FunctionDeclarations = append(copyTool.FunctionDeclarations, d)
-			}
-		}
+		copyTool.FunctionDeclarations = withoutDeclarations(tool.FunctionDeclarations, drop)
 		if len(copyTool.FunctionDeclarations) > 0 {
 			out = append(out, &copyTool)
 		}

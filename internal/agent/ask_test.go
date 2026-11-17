@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -423,5 +424,82 @@ func TestLeanPrompt_CarriesTheStandingUnderstanding(t *testing.T) {
 	b.understanding = ""
 	if strings.Contains(a.LeanPrompt(t.Context(), now), "understanding of them") {
 		t.Error("lean prompt carries an understanding block with no doc to put in it")
+	}
+}
+
+// offeredToolNames reads the names of the function declarations out of one request body the Gemini text path sent.
+func offeredToolNames(t *testing.T, body string) map[string]bool {
+	t.Helper()
+	var req struct {
+		Tools []struct {
+			FunctionDeclarations []struct{ Name string } `json:"functionDeclarations"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, tool := range req.Tools {
+		for _, d := range tool.FunctionDeclarations {
+			names[d.Name] = true
+		}
+	}
+	return names
+}
+
+// A question that does not name a screen task is offered no tool that acts on the screen, so each ask does not pay to declare them. The ask that then calls a screen tool must get them from the next round on, and a thread that has already called a memory tool must get them too, because the model may still turn to the screen after it.
+func TestAskText_PlainAskWidensToScreenToolsAfterALook(t *testing.T) {
+	calls := func(names ...string) []string {
+		var replies []string
+		for _, name := range names {
+			replies = append(replies, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"`+name+`","args":{}}}]}}]}`)
+		}
+		return append(replies, `{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}]}`)
+	}
+	run := func(replies []string) []map[string]bool {
+		var seen []map[string]bool
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			round := len(seen)
+			seen = append(seen, offeredToolNames(t, string(body)))
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, replies[round])
+		}))
+		defer backend.Close()
+		geminiBaseURL = backend.URL
+		t.Cleanup(func() { geminiBaseURL = "" })
+		a, _ := observingAgent(t)
+		if _, err := a.askText(t.Context(), "gemini-test", nil, "who owns Project X"); err != nil {
+			t.Fatal(err)
+		}
+		return seen
+	}
+
+	rounds := run(calls("observe_screen"))
+	if len(rounds) != 2 {
+		t.Fatalf("%d requests, want 2", len(rounds))
+	}
+	for _, name := range []string{"query_memory", "observe_screen", "look", "open_app", "open_url", "save_note"} {
+		if !rounds[0][name] {
+			t.Errorf("a plain ask's first round must offer %q", name)
+		}
+	}
+	for name := range screenActionTools {
+		if rounds[0][name] {
+			t.Errorf("a plain ask's first round offers %q before any look at the screen", name)
+		}
+		if !rounds[1][name] {
+			t.Errorf("the round after observe_screen must offer %q", name)
+		}
+	}
+
+	rounds = run(calls("query_memory", "observe_screen"))
+	for name := range screenActionTools {
+		if !rounds[2][name] {
+			t.Errorf("the round after a memory call and a look must offer %q", name)
+		}
+	}
+	if !rounds[2]["query_memory"] {
+		t.Error("a thread that already used a memory tool keeps the full list once it has looked at the screen")
 	}
 }

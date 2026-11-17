@@ -303,6 +303,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 
 	decls := a.askToolDeclarations()
 	tools := codexTools(decls)
+	plainDecls := withoutDeclarations(decls, screenActionTools)
+	plainTools := codexTools(plainDecls)
 	screenTools := codexTools(trimToDeclarations(decls, screenRoundTools))
 	// One key names this ask to the backend for the whole of it. What ties its rounds to the prompt cache is codexPromptCacheKey, which is the same on every ask.
 	session := codexSessionKey()
@@ -340,9 +342,10 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	// steps is how many rounds have actually spent one of the maxAskIterations steps, the same hard cap askText enforces.
 	steps := 0
 	for i := 0; i < maxAskRounds; i++ {
-		prompt, thread, offered := instruction, historyItems, tools
-		offeredNames := declNames(decls)
+		prompt, thread, offered := instruction, historyItems, plainTools
+		offeredNames := declNames(plainDecls)
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
+			offered, offeredNames = tools, declNames(decls)
 			if screenPrompt == "" {
 				screenPrompt = screenTaskInstruction()
 				if personal := screenPersonalContext(personalEntries, frontFromToolHops(tr.ToolHops)); personal != "" {

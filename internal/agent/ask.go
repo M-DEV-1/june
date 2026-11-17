@@ -381,6 +381,23 @@ func trimToDeclarations(decls []*genai.FunctionDeclaration, keep map[string]bool
 	return out
 }
 
+// withoutDeclarations drops the declarations named in drop. Input: the declarations and the set of names to remove. Output: the rest, in the order they were declared.
+func withoutDeclarations(decls []*genai.FunctionDeclaration, drop map[string]bool) []*genai.FunctionDeclaration {
+	out := make([]*genai.FunctionDeclaration, 0, len(decls))
+	for _, d := range decls {
+		if !drop[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// screenActionTools are the screen declarations a plain ask leaves out until it has looked at the screen: each acts on a numbered element or on a look's picture, so none of them can be the first move of a screen task. observe_screen and look stay on the plain list, and the round after either is called is offered the screen tools (see screenTaskStarted).
+var screenActionTools = map[string]bool{
+	"point_at": true, "show_marks": true, "draw": true, "click": true, "scroll_to": true,
+	"type_text": true, "press_key": true, "scroll_at": true, "wait_for": true,
+}
+
 // trimToolsToScreen keeps only the tools a screen round needs, dropping any tool entry left with no declarations. Input: the tools an ask offers and the set of names to keep. Output: the trimmed tools.
 func trimToolsToScreen(tools []*genai.Tool, keep map[string]bool) []*genai.Tool {
 	out := make([]*genai.Tool, 0, len(tools))
@@ -619,9 +636,10 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	}
 	var trail []*genai.Content
 	tools := a.textAskTools()
+	plainTools := dropDeclarations(tools, screenActionTools)
 	screenTools := trimToolsToScreen(tools, screenRoundTools)
 	cfg := &genai.GenerateContentConfig{
-		Tools:          tools,
+		Tools:          plainTools,
 		ThinkingConfig: thinkingConfig(),
 	}
 
@@ -635,9 +653,10 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	steps := 0
 	for i := 0; i < maxAskRounds; i++ {
 		prompt, thread := instruction, history
-		cfg.Tools = tools
+		cfg.Tools = plainTools
 		if screenAsk || screenTaskStarted(tr.ToolHops) {
 			prompt, thread = screenTaskInstruction(), screenThread
+			cfg.Tools = tools
 			if screenRoundToolsSuffice(tr.ToolHops) {
 				cfg.Tools = screenTools
 			}
