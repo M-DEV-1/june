@@ -34,6 +34,8 @@ type toolTestBrain struct {
 	windowEpisodes  []db.Episode
 	windowSummaries []db.WindowSummary
 	subjectRecall   []string
+	// understanding is what DiaryEntry("", "understanding") returns, the doc both ask prompts carry.
+	understanding string
 
 	// searchMemoryResult/searchMemoryCalledFocus back SearchMemory — used by buildHandshakeContext's tests (F2) to verify the [working]-buffer focus signal actually drives a SearchMemory call.
 	searchMemoryResult      []db.MemoryHit
@@ -151,6 +153,12 @@ func (b *toolTestBrain) NotesOfKindSince(ctx context.Context, kind string, since
 		}
 	}
 	return out, nil
+}
+func (b *toolTestBrain) DiaryEntry(ctx context.Context, day, kind string) (string, error) {
+	if day == "" && kind == "understanding" {
+		return b.understanding, nil
+	}
+	return "", nil
 }
 func (b *toolTestBrain) PersonalContext(ctx context.Context) ([]db.PersonalEntry, error) {
 	if b.personalErr != nil {

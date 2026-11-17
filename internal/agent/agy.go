@@ -344,7 +344,7 @@ func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, mod
 	defer cancel()
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction := a.LeanPrompt(start)
+	instruction := a.LeanPrompt(ctx, start)
 	var handshake []string
 
 	recallCtx, cancelRecall := context.WithTimeout(ctx, recallTimeout)

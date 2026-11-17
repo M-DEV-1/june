@@ -549,7 +549,7 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	defer cancel()
 	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
 	ctx = withAskLookState(ctx)
-	instruction := a.LeanPrompt(start)
+	instruction := a.LeanPrompt(ctx, start)
 	var handshake []string
 	// A screen task (see isScreenTask in ask.go) gets the short screen prompt instead of the full handshake, and later, once the tool server exists, the short screen tool set instead of every tool the ask gate allows.
 	screenTask := isScreenTask(question, nil)

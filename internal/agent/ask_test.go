@@ -403,3 +403,25 @@ func TestAskTextWith_HandsOnAfterAReadOnlyToolButNotAfterAnAction(t *testing.T) 
 		t.Error("a turn that clicked something must count as having acted, so it is never replayed on another provider")
 	}
 }
+
+// TestLeanPrompt_CarriesTheStandingUnderstanding pins the bug from conversation 263 on 2026-10-07: asked for recommendations "based on my workstyle", June answered "I don't know your workstyle yet" while the diary's understanding row, rewritten every night by dreaming, already said how he works. The voice handshake had it through GetImplicitContext's leading "[understanding]" line; the text ask carried no context at all. The lean prompt now carries the doc once, in the tail, so the cacheable prefix stays unchanged, and the handshake is left alone so it does not carry it twice.
+func TestLeanPrompt_CarriesTheStandingUnderstanding(t *testing.T) {
+	b := &toolTestBrain{understanding: "He runs several projects in parallel and expects direct, unembellished output."}
+	a := NewAgent(nil, nil, b, nil, "")
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.Local)
+	lean := a.LeanPrompt(t.Context(), now)
+	if n := strings.Count(lean, b.understanding); n != 1 {
+		t.Errorf("lean prompt carries the understanding doc %d times, want once", n)
+	}
+	if i := strings.Index(lean, b.understanding); i >= 0 && i < strings.Index(lean, "<safety_rules>") {
+		t.Error("lean prompt puts the understanding ahead of the stable prefix")
+	}
+	if voice, _ := a.HandshakePrompt(t.Context(), now); strings.Contains(voice, "Your standing understanding") {
+		t.Error("handshake carries the lean block on top of the [understanding] context line")
+	}
+	// An empty doc, the state before the first dream, leaves nothing behind in the prompt.
+	b.understanding = ""
+	if strings.Contains(a.LeanPrompt(t.Context(), now), "understanding of them") {
+		t.Error("lean prompt carries an understanding block with no doc to put in it")
+	}
+}
