@@ -50,6 +50,9 @@ var voiceMaxReconnectDelay = 30 * time.Second
 // voiceMaxConsecutiveFailures is how many times in a row dial will redial a run that keeps failing before it gives up on the session rather than trying again. Past this many failures the cause is almost certainly not transient — an expired or revoked API key, say (a missing one is refused by Start before the microphone opens) — and retrying for ever would just hold the microphone open and fill the log with the same error. A variable only so a test can shrink it.
 var voiceMaxConsecutiveFailures = 8
 
+// voiceHealthyRun is how long a run must have lasted before it ends in a drop for the failure count and the backoff to start over. A run that cannot work, such as a bad key or a refused handshake, dies within seconds, and a working one ends on the server's own limit about every ten minutes, so two minutes tells the two apart. A variable only so a test can shrink it.
+var voiceHealthyRun = 2 * time.Minute
+
 // voiceStopTimeout bounds how long POST /voice/stop waits for the session goroutine to return before closing the audio devices anyway, so a wedged session cannot hang the request.
 var voiceStopTimeout = 5 * time.Second
 
@@ -283,6 +286,7 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 	failures := 0
 	for {
 		slog.Info("daemon voice session dialing", "id", id, "failures_so_far", failures)
+		started := time.Now()
 		err := run.Run(ctx, micChan)
 		if ctx.Err() != nil {
 			return
@@ -294,6 +298,10 @@ func (v *VoiceSession) dial(ctx context.Context, id string, run voiceRunner, mic
 		if errors.Is(err, agent.ErrGoAway) {
 			slog.Info("live session ended on GoAway, resuming", "id", id)
 			continue
+		}
+		// A run that worked for a while before it dropped is a fresh start, not the next failure in a row.
+		if time.Since(started) >= voiceHealthyRun {
+			failures, delay = 0, 0
 		}
 		failures++
 		if failures >= voiceMaxConsecutiveFailures {

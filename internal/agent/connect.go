@@ -298,8 +298,12 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	// connectttt to livee apiii
 	span.SetAttributes(attribute.String("agent.model", config.VoiceModel()))
 
-	_, ctxSpan := tracer.Start(handshakeCtx, "Agent.GetImplicitContext")
-	resp, err := a.brain.GetImplicitContext(handshakeCtx)
+	// The reads below fill the handshake prompt and may take only contextGatherTimeout between them; whatever is not back by then is left out, so a stuck store cannot hold the dial.
+	gatherCtx, cancelGather := context.WithTimeout(handshakeCtx, contextGatherTimeout)
+	defer cancelGather()
+
+	_, ctxSpan := tracer.Start(gatherCtx, "Agent.GetImplicitContext")
+	resp, err := a.brain.GetImplicitContext(gatherCtx)
 	if err != nil {
 		ctxSpan.RecordError(err)
 		ctxSpan.SetStatus(codes.Error, "failed to fetch context")
@@ -311,14 +315,14 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	for _, node := range resp {
 		contextParts = append(contextParts, "  "+node)
 	}
-	contextParts = append(contextParts, a.surfacePendingFolds(handshakeCtx)...)
+	contextParts = append(contextParts, a.surfacePendingFolds(gatherCtx)...)
 
-	contextParts = a.buildHandshakeContext(handshakeCtx, contextParts)
+	contextParts = a.buildHandshakeContext(gatherCtx, contextParts)
 
 	contextStr := strings.Join(contextParts, "\n")
 
 	// Personal context is read whole, not searched — it is small by construction and every entry is something the user stated themselves.
-	personalEntries, err := a.brain.PersonalContext(handshakeCtx)
+	personalEntries, err := a.brain.PersonalContext(gatherCtx)
 	if err != nil {
 		slog.Warn("personal context fetch failed, continuing without it", "error", err)
 	}
@@ -381,17 +385,12 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		return fmt.Errorf("live session refused: %w", err)
 	}
 	_, wsSpan := tracer.Start(handshakeCtx, "Agent.LiveConnectWebSocket")
-	session, err := client.Live.Connect(handshakeCtx, config.VoiceModel(), cfg)
+	session, err := connectLive(handshakeCtx, client, config.VoiceModel(), cfg)
 	if err != nil {
 		wsSpan.RecordError(err)
 		wsSpan.End()
 		span.RecordError(err)
 		span.End()
-		// A handle the server will not resume from fails every redial the same way, so the next dial starts a fresh session instead.
-		if priorHandle != "" {
-			slog.Warn("resumed handshake failed, dropping the resumption handle", "error", err)
-			a.setResumeHandle("")
-		}
 		return fmt.Errorf("websocket handshake failed: %w", err)
 	}
 	wsSpan.End()
@@ -445,6 +444,42 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	case <-sessCtx.Done():
 		return sessCtx.Err()
 	}
+}
+
+// contextGatherTimeout is how long the reads that fill the handshake prompt may take together, before the Live dial starts. They are local store reads that finish in milliseconds, so this only matters when something is stuck. A variable only so a test can shrink it.
+var contextGatherTimeout = 10 * time.Second
+
+// liveConnectTimeout is how long the Live websocket dial may take before connectLive gives up on it. A variable only so a test can shrink it.
+var liveConnectTimeout = 15 * time.Second
+
+// connectLive dials the Live API and returns the session, or an error once liveConnectTimeout has passed or ctx is done. The SDK's Connect ignores its context, so it is run in the background and abandoned on timeout: a server that accepts the connection and never answers would otherwise hold the redial loop for as long as the SDK's own limit. A session that arrives after the timeout is closed so no socket is left open.
+func connectLive(ctx context.Context, client *genai.Client, model string, cfg *genai.LiveConnectConfig) (*genai.Session, error) {
+	type dialed struct {
+		session *genai.Session
+		err     error
+	}
+	result := make(chan dialed, 1)
+	go func() {
+		session, err := client.Live.Connect(ctx, model, cfg)
+		result <- dialed{session, err}
+	}()
+	timer := time.NewTimer(liveConnectTimeout)
+	defer timer.Stop()
+	var cause error
+	select {
+	case r := <-result:
+		return r.session, r.err
+	case <-timer.C:
+		cause = fmt.Errorf("no answer within %s", liveConnectTimeout)
+	case <-ctx.Done():
+		cause = ctx.Err()
+	}
+	go func() {
+		if r := <-result; r.session != nil {
+			r.session.Close()
+		}
+	}()
+	return nil, cause
 }
 
 // voiceScreenScope gives every tool call of the voice conversation the same screen state for as long as the agent lives, across reconnects. Input: the connection's context. Output: a context carrying the agent's own screen state.
@@ -599,6 +634,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 	// recentJuneSpeech holds June's last few completed utterances, for telling the mic hearing her own voice apart from the user talking (see matchesRecentJuneSpeech). Session-scoped in the same way as the buffers above.
 	var recentJuneSpeech []juneUtterance
 
+	// heardServer is whether any message has arrived from the server yet on this session.
+	var heardServer bool
+
 	// turnUsage accumulates the Live API's own token counts for the turn currently in progress, the same way askVoice's eval loop does with TurnTrace.Usage — most server messages of a turn carry no UsageMetadata and addLive is then a no-op, so this only grows on the messages that do. Session-scoped in the same way as the buffers above.
 	turnUsage := TokenUsage{Provider: ProviderGemini}
 
@@ -654,9 +692,15 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if err != nil {
 			recvSpan.RecordError(err)
 			recvSpan.SetStatus(codes.Error, "receive failed")
+			// A resumed session that dies before the server has said anything is most likely one whose handle the server will not resume from, which would fail every redial the same way, so the next dial starts a fresh session. A session cut off after it has been talking keeps its handle, and so does one that is being shut down on purpose.
+			if !heardServer && recvCtx.Err() == nil && a.getResumeHandle() != "" {
+				slog.Warn("resumed session died before the server said anything, dropping the resumption handle", "error", err)
+				a.setResumeHandle("")
+			}
 			errChan <- fmt.Errorf("receive loop error: %w", err)
 			return
 		}
+		heardServer = true
 
 		// The Live API reports usage on the server message that finishes a response rather than on a response object, so a turn that runs tools reports usage once per round and they add up here the same way askVoice's eval loop totals TurnTrace.Usage (see TokenUsage.addLive in ask.go). Most messages of a turn carry no UsageMetadata at all, and addLive is then a no-op.
 		turnUsage.addLive(msg.UsageMetadata)

@@ -424,6 +424,69 @@ func TestVoiceDial_GivesUpAfterConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// voiceDroppingRunner is a voiceRunner whose first drops runs each last lived before ending in an error, and whose next run holds until cancelled, standing in for a conversation that keeps working and is cut by the network now and then.
+type voiceDroppingRunner struct {
+	lived time.Duration
+	drops int64
+	calls atomic.Int64
+}
+
+func (f *voiceDroppingRunner) Run(ctx context.Context, mic <-chan []byte) error {
+	if f.calls.Add(1) > f.drops {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	select {
+	case <-time.After(f.lived):
+		return errors.New("read: connection reset by peer")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (f *voiceDroppingRunner) Text() <-chan agent.ResponseChunk {
+	return make(chan agent.ResponseChunk)
+}
+func (f *voiceDroppingRunner) Tools() <-chan agent.ToolActivity { return make(chan agent.ToolActivity) }
+func (f *voiceDroppingRunner) Usage() agent.TokenUsage          { return agent.TokenUsage{} }
+
+// TestVoiceDial_HealthyRunsThatDropAreNotConsecutiveFailures verifies a session whose runs each work for a while before dropping is never given up on, however many times it drops, while a run that dies at once still counts (see TestVoiceDial_GivesUpAfterConsecutiveFailures).
+func TestVoiceDial_HealthyRunsThatDropAreNotConsecutiveFailures(t *testing.T) {
+	origDelay, origMax, origAttempts, origHealthy := voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures, voiceHealthyRun
+	voiceReconnectDelay = time.Millisecond
+	voiceMaxReconnectDelay = 2 * time.Millisecond
+	voiceMaxConsecutiveFailures = 2
+	voiceHealthyRun = 20 * time.Millisecond
+	t.Cleanup(func() {
+		voiceReconnectDelay, voiceMaxReconnectDelay, voiceMaxConsecutiveFailures, voiceHealthyRun = origDelay, origMax, origAttempts, origHealthy
+	})
+
+	run := &voiceDroppingRunner{lived: 40 * time.Millisecond, drops: 5}
+	s := New(nil, nil, nil, nil)
+	v := NewVoice(s, nil, "", nil)
+	v.open = func() (audio.Microphone, audio.Speaker, voiceRunner, error) {
+		return &voiceFakeMic{ch: make(chan []byte)}, &voiceFakeSpeaker{}, run, nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/voice/start", v.Start)
+	mux.HandleFunc("/voice/stop", v.Stop)
+	mux.HandleFunc("/voice/status", v.Status)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	voicePost(t, srv, "/voice/start").Body.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for run.calls.Load() <= run.drops && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := run.calls.Load(); n <= run.drops {
+		t.Fatalf("Run was called %d times, want more than the %d drops: the session was given up on", n, run.drops)
+	}
+	if active, _, _ := voiceStatus(t, srv); !active {
+		t.Error("the session is no longer active after runs that each worked before dropping")
+	}
+	voicePost(t, srv, "/voice/stop").Body.Close()
+}
+
 // TestStart_DoesNotHoldTheLockAcrossOpeningHardware checks that Start releases the session mutex before it dials the microphone and the speaker, so GET /voice/status and POST /voice/stop keep answering while that hardware call is in flight — the same shape Dictation.Start already uses. Held across it, a slow (or wedged) device open blocks every other voice route for as long as the open takes.
 func TestStart_DoesNotHoldTheLockAcrossOpeningHardware(t *testing.T) {
 	srv, v, mic, spk, run := newVoiceServer(t)
