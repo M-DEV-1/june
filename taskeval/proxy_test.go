@@ -32,6 +32,7 @@ type scriptedModel struct {
 	next     int
 	requests int
 	last     []toolResult
+	first    string
 	problems []string
 }
 
@@ -50,7 +51,14 @@ func (m *scriptedModel) url() string { return m.srv.URL }
 func (m *scriptedModel) load(steps []scriptStep) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.steps, m.next, m.requests, m.last, m.problems = steps, 0, 0, nil, nil
+	m.steps, m.next, m.requests, m.last, m.first, m.problems = steps, 0, 0, nil, "", nil
+}
+
+// firstPrompt returns the text of every part of the first request of the current script, which is what the daemon handed the model before any tool ran.
+func (m *scriptedModel) firstPrompt() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.first
 }
 
 // finish returns what the tools returned to the model in the last request of the script, how many requests the model got, and anything that went wrong (a request past the end of the script, an unreadable body, a script step never used).
@@ -77,11 +85,14 @@ func (m *scriptedModel) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.requests++
-	tools, err := toolResultsIn(body)
+	tools, text, err := readRequest(body)
 	if err != nil {
 		m.problems = append(m.problems, "unreadable request: "+err.Error())
 	}
 	m.last = tools
+	if m.requests == 1 {
+		m.first = text
+	}
 
 	if m.next >= len(m.steps) {
 		m.problems = append(m.problems, fmt.Sprintf("model asked %d times, more than the script's %d steps", m.next+1, len(m.steps)))
@@ -98,11 +109,12 @@ func (m *scriptedModel) serve(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": []any{part}}}}})
 }
 
-// toolResultsIn reads a Gemini generateContent request body and returns every function response in it, which are the tool results the daemon is handing the model.
-func toolResultsIn(body []byte) ([]toolResult, error) {
+// readRequest reads a Gemini generateContent request body. Output: every function response in it, which are the tool results the daemon is handing the model, and the text of every part joined with newlines.
+func readRequest(body []byte) ([]toolResult, string, error) {
 	var req struct {
 		Contents []struct {
 			Parts []struct {
+				Text             string `json:"text"`
 				FunctionResponse *struct {
 					Name     string         `json:"name"`
 					Response map[string]any `json:"response"`
@@ -111,18 +123,20 @@ func toolResultsIn(body []byte) ([]toolResult, error) {
 		} `json:"contents"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var out []toolResult
+	var text []string
 	for _, c := range req.Contents {
 		for _, p := range c.Parts {
+			text = append(text, p.Text)
 			if fr := p.FunctionResponse; fr != nil {
 				text, _ := fr.Response["output"].(string)
 				out = append(out, toolResult{Name: fr.Name, Output: text})
 			}
 		}
 	}
-	return out, nil
+	return out, strings.Join(text, "\n"), nil
 }
 
 // readScript loads scripts/<task>.json and replaces each {{name}} in it with the matching value from vars, escaped so it is safe inside a JSON string.

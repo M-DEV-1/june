@@ -106,7 +106,7 @@ func lineWith(text string, parts ...string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("no tool result line has all of %q", parts)
+	return fmt.Errorf("no line has all of %q", parts)
 }
 
 // TestMemory runs every memory task against its own daemon seeded with each seed's world, and appends one line per task to out/results.jsonl. A task gets a fresh daemon because the daemon keeps running an ask after the harness gives up on it, and that ask would otherwise share the model and the memory figures with the next task.
