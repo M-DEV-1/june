@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -38,11 +39,38 @@ func WaitHealthy(ctx context.Context, baseURL string, exited <-chan struct{}, ti
 	}
 }
 
-// DropDeviceArg removes the "-dev <name>" or "--device <name>" pair from a llama-server argument list. Input: the arguments. Output: a copy without the pair and the device name removed, or the arguments unchanged and an empty name when no device is pinned.
+// fullOffload is the smallest -ngl value that counts as putting every layer on the GPU. Every launch site passes 99, which is more layers than any model June runs has.
+const fullOffload = 99
+
+// MmapForDevice returns a llama-server argument list with "--no-mmap" present exactly when the server runs fully on a GPU device: "-dev" or "--device" given and "-ngl" at least 99 or "all". Input: the arguments. Output: a copy. With the weights in VRAM, mmap only keeps the model file's pages resident in RAM a second time; on the CPU the flag is removed so the kernel can still drop the mapped pages under memory pressure.
+func MmapForDevice(args []string) []string {
+	out := make([]string, 0, len(args)+1)
+	hasDevice, offloaded := false, false
+	for i, a := range args {
+		switch a {
+		case "--no-mmap":
+			continue
+		case "-dev", "--device":
+			hasDevice = true
+		case "-ngl", "--gpu-layers", "--n-gpu-layers":
+			if i+1 < len(args) {
+				n, err := strconv.Atoi(args[i+1])
+				offloaded = args[i+1] == "all" || (err == nil && n >= fullOffload)
+			}
+		}
+		out = append(out, a)
+	}
+	if hasDevice && offloaded {
+		out = append(out, "--no-mmap")
+	}
+	return out
+}
+
+// DropDeviceArg removes the "-dev <name>" or "--device <name>" pair from a llama-server argument list, and "--no-mmap" with it since the server then runs on the CPU. Input: the arguments. Output: a copy without the pair and the device name removed, or the arguments unchanged and an empty name when no device is pinned.
 func DropDeviceArg(args []string) (rest []string, device string) {
 	for i, a := range args {
 		if (a == "--device" || a == "-dev") && i+1 < len(args) {
-			return append(append([]string{}, args[:i]...), args[i+2:]...), args[i+1]
+			return MmapForDevice(append(append([]string{}, args[:i]...), args[i+2:]...)), args[i+1]
 		}
 	}
 	return args, ""
