@@ -1,3 +1,5 @@
+//go:build taskeval
+
 // Package fixture builds a small invented world (people, projects, who said what) from a seed and writes it into a June store through the store's own write functions.
 package fixture
 
