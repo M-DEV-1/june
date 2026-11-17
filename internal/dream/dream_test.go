@@ -106,9 +106,6 @@ func TestTick_ConditionsGate(t *testing.T) {
 		prep  func(t *testing.T, s *db.Store, r *Runner)
 		wants bool
 	}{
-		{"outside the window", func(t *testing.T, s *db.Store, r *Runner) {
-			r.now = func() time.Time { return at(12, 0) }
-		}, false},
 		{"disabled by a negative hour", func(t *testing.T, s *db.Store, r *Runner) {
 			r.dreamHour = -1
 		}, false},
@@ -178,6 +175,27 @@ func TestTick_ConditionsGate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A night the machine slept through runs the next day, as soon as the usual idle-on-mains conditions hold: five nights in a row went undreamt in October 2026 because the laptop was off between 23:00 and 03:28 every night, while it sat idle on mains for stretches of every afternoon. At noon the night key is yesterday, and yesterday's run is the one that finishes.
+func TestTick_MissedNightRunsTheNextDay(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	noon := at(12, 0)
+	night := noon.AddDate(0, 0, -1).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, night, "day", "A day the machine slept through the end of."); err != nil {
+		t.Fatal(err)
+	}
+	brain := &fakeBrain{verdicts: "[]", extract: "[]", und: "An understanding."}
+	r := newRunner(store, brain, yesProbes(), noon)
+	r.Tick(ctx)
+
+	if len(brain.askedKinds()) == 0 {
+		t.Fatal("the missed night was not dreamt at noon")
+	}
+	if run, ok, _ := store.DreamRun(ctx, night); !ok || !run.Finished {
+		t.Errorf("yesterday's run = %+v ok=%v, want finished", run, ok)
 	}
 }
 
