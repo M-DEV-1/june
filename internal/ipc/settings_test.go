@@ -162,3 +162,16 @@ func TestSettings_PostClaudeUsageFromLoginPersists(t *testing.T) {
 		t.Errorf("claude_usage_from_login on disk is still enabled after turning it off")
 	}
 }
+
+// TestInstallScriptsNameTheCommandWindowHotkeyReads checks packaging/install.sh and uninstall.sh both name the command windowHotkey looks for, so a rename on either side cannot leave the shortcut registered but unseen, or seen but never removed.
+func TestInstallScriptsNameTheCommandWindowHotkeyReads(t *testing.T) {
+	for _, script := range []string{"install.sh", "uninstall.sh"} {
+		src, err := os.ReadFile(filepath.Join("..", "..", "packaging", script))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(src), windowToggleCommand) {
+			t.Errorf("packaging/%s never mentions %q, the command windowHotkey finds the shortcut by", script, windowToggleCommand)
+		}
+	}
+}
