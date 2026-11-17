@@ -239,7 +239,6 @@ func toolDefinitions() []*genai.Tool {
 					"Whenever the question is anchored to a time, a day, a part of a day, a range, pass since/until: " +
 					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day, and one busy stretch can drown out the rest of its own day. " +
 					"A part of a day gets timestamp bounds, not the whole day: morning is roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
-					"When a question narrows the time, run a fresh narrower query, do not answer a narrow question from a wider fetch you already have. " +
 					"For pure day/timeline questions, or 'what was I just doing', use recall. " +
 					"For what a meeting was about, what it decided, or who was in it, pass kind='meeting': that lists the minutes themselves for the window, newest first, instead of ranking, a ranked search finds screens of the user reading minutes before it finds the minutes.",
 				Parameters: &genai.Schema{
@@ -281,7 +280,7 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
-					"A part of a day gets timestamp bounds rather than the whole day, morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that, and a question that narrows the time deserves a fresh narrower call, not an answer read off a wider fetch. " +
+					"A part of a day gets timestamp bounds rather than the whole day, morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
 					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
 					"Returns short content+context lines, not raw screen dumps.",
 				Parameters: &genai.Schema{
@@ -340,7 +339,7 @@ func toolDefinitions() []*genai.Tool {
 					"Tasks: if the user asked for a todo and you called save_note, you did not do what they asked. " +
 					"Write the title as the work itself, in the user's own words, short enough to read in a list: " +
 					"\"add source pdfs to the excel files and link to the exact pages\", not \"the user wants to...\". " +
-					"Only say it is on their list once this has come back saying it was added. It comes back with the task's ref, \"task#N\", which revise takes if they correct or drop it a moment later.",
+					"It comes back with the task's ref, \"task#N\", which revise takes if they correct or drop it a moment later.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
@@ -389,7 +388,7 @@ func toolDefinitions() []*genai.Tool {
 					"Look it up first with query_memory or recall to get its ref, the \"[note#N]\" or \"[thread#N]\" a result showed you, then call this. A task's ref is the \"task#N\" add_task handed back, or its id in user_tasks. " +
 					"Pass content to correct the text. For an action item, pass state (open, done, or dropped) instead, never leave a task the user says is done still open, and priority (high, normal, or low) when they say how much it matters. " +
 					"Pass remove to delete a note or a task entirely (a thread cannot be removed, only corrected). A task the user says to drop is deleted, since the list has nowhere to keep a dropped one. " +
-					"Use this instead of just apologizing out loud and leaving the wrong fact in memory, and never say you cannot change something on the list.",
+					"Never say you cannot change something on the list.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
