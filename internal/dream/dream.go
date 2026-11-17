@@ -323,7 +323,7 @@ func (r *Runner) consumeForceMarker() bool {
 	return true
 }
 
-// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
+// dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A failed hypothesis stage lets the other stages run first, then returns its error without the morning report. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
 func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) error {
 	if r.OnNight != nil {
 		r.OnNight(true)
@@ -365,15 +365,21 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		notes = append(notes, "Tonight's diary entry was missing, so the day's screen summaries stood in for it.")
 	}
 
+	// No later stage reads the hypothesis stage's report, so a failed hypothesis stage does not hold them back: they run and commit their own tokens, the night is left unfinished below, and the next wake retries the hypothesis stage alone.
 	var hyp *stageReport
+	var hypErr error
 	if !slices.Contains(done, db.StageHyp) {
 		rep, err := r.hypStage(ctx, night, fallback)
 		if err != nil {
 			slog.Warn("dreaming: hypothesis stage did not commit", "night", night, "error", err)
-			return stageFailure(ctx, err)
+			if ctx.Err() != nil {
+				return nil
+			}
+			hypErr = err
+		} else {
+			hyp = &rep
+			slog.Info("dreaming: hypothesis stage committed", "night", night, "tested", rep.tested, "promoted", rep.promoted, "retired", rep.retired, "adopted", rep.adopted)
 		}
-		hyp = &rep
-		slog.Info("dreaming: hypothesis stage committed", "night", night, "tested", rep.tested, "promoted", rep.promoted, "retired", rep.retired, "adopted", rep.adopted)
 	}
 
 	undRan := false
@@ -457,6 +463,9 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		}
 	}
 
+	if hypErr != nil {
+		return hypErr
+	}
 	if err := r.finish(ctx, night, r.now().Sub(started), hyp, undRan, comp, replay, notes); err != nil {
 		slog.Warn("dreaming: finishing the night failed", "night", night, "error", err)
 		return stageFailure(ctx, err)
