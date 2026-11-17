@@ -3,6 +3,7 @@ package recorder
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +25,9 @@ const (
 // defaultClusterThreshold is the cosine distance at which two stretches of speech stop being the same voice. It is only ever used when the number of people in the call is unknown, because as a way of getting the speaker count right it does not work: on the 2026-08-31 16:17 recording, a call with exactly one other person in it, thresholds of 0.85, 0.9 and 0.95 all returned four voices, while on a six-person standup the same range swung the answer from 35 down to 6. There is no value that transfers between two meetings, so tuning it is not a path to a correct answer, only to a differently wrong one.
 // What does transfer is being told the number outright: given --clustering.num-clusters the diarizer returns exactly that many, so the count is right by construction rather than by calibration. June can read that count off the meeting's own window, which is why this constant is the fallback and not the mechanism.
 const defaultClusterThreshold = 0.8
+
+// minClusterSpeech is the least total speech a voice needs to count as a person when the diarizer had to estimate how many there are. A voice with less than this is almost always one person's voice split in two, or a cough or a laugh, and foldSmallClusters merges it into a neighbour.
+const minClusterSpeech = 15 * time.Second
 
 // clusterThreshold returns the configured threshold, or the default when none is set.
 func clusterThreshold() string {
@@ -109,6 +113,10 @@ func diarizeWAV(ctx context.Context, bin, path string, speakers int, offset time
 		return nil, fmt.Errorf("diarize %s: %w (%s)", filepath.Base(path), err, strings.TrimSpace(errOut))
 	}
 	turns := parseDiarTurns(out)
+	// A count the caller gave is exact by construction, so only an estimated one is cleaned up.
+	if speakers <= 0 {
+		turns = foldSmallClusters(turns)
+	}
 	for i := range turns {
 		turns[i].Start += offset
 		turns[i].End += offset
@@ -120,6 +128,43 @@ func diarizeWAV(ctx context.Context, bin, path string, speakers int, offset time
 type diarTurn struct {
 	Start, End time.Duration
 	Speaker    int
+}
+
+// foldSmallClusters gives every turn of a voice with under minClusterSpeech of speech in total to the voice whose nearest turn in time is closest, among the voices with at least that much. Turns that overlap in time count as zero apart. The turns keep their times and order, only their Speaker changes.
+// When no voice reaches the minimum, as in a very short call, the turns are returned as they were, since there is nothing larger to fold into. The diarizer prints only turns, with no voice embeddings to measure distance with, so closeness in time is what decides.
+func foldSmallClusters(turns []diarTurn) []diarTurn {
+	total := map[int]time.Duration{}
+	for _, t := range turns {
+		total[t.Speaker] += t.End - t.Start
+	}
+	var large []diarTurn
+	for _, t := range turns {
+		if total[t.Speaker] >= minClusterSpeech {
+			large = append(large, t)
+		}
+	}
+	if len(large) == 0 {
+		return turns
+	}
+	out := make([]diarTurn, len(turns))
+	for i, t := range turns {
+		out[i] = t
+		if total[t.Speaker] >= minClusterSpeech {
+			continue
+		}
+		nearest := time.Duration(math.MaxInt64)
+		for _, l := range large {
+			if gap := timeGap(t, l); gap < nearest {
+				nearest, out[i].Speaker = gap, l.Speaker
+			}
+		}
+	}
+	return out
+}
+
+// timeGap is how long a stretch of silence lies between two turns, zero when they touch or overlap.
+func timeGap(a, b diarTurn) time.Duration {
+	return max(a.Start-b.End, b.Start-a.End, 0)
 }
 
 // callSpeaker is the label for one clustered voice on the call side, replacing the pooled speakerCall. Numbering starts at one because these are read by a human and by a model, neither of which expects a zeroth speaker.
