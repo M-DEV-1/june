@@ -125,7 +125,7 @@ const
   WebView2Client = 'Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WebView2Url = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
   { What June writes at the top of its data folder (config.DataDir and what the daemon hands it to): files, which may be patterns, then folders, each list separated by '|'. }
-  JuneDataFiles = 'db|db-wal|db-shm|db-journal|june-config.json*|ipc-token*|env|env.tmp-*|june.log*|window.log|crash.log|brain_quota.json*|brain_usage.json*|codex-install-id|open-window|paused|dream-now|portal-input-token|june-config.set-aside';
+  JuneDataFiles = 'db|db-wal|db-shm|db-journal|june-config.json*|ipc-token*|env|env.tmp-*|june.log*|spans.jsonl*|window.log|crash.log|brain_quota.json*|brain_usage.json*|codex-install-id|open-window|paused|dream-now|portal-input-token|june-config.set-aside';
   JuneDataFolders = 'components|recordings|frames|vectors|models|whispercpp|sherpa|llama.cpp|update|dreams|study|replays|voice-previews';
 
 var
