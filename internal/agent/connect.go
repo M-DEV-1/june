@@ -637,6 +637,9 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 	// heardServer is whether any message has arrived from the server yet on this session.
 	var heardServer bool
 
+	// lastUserSaid is the latest finished thing the user said, which each tool call carries as its question (see WithQuestion): the stop line before an irreversible click or key press reads the user's go-ahead from it, as it does from a typed question. It is cleared when the model's turn completes, so a go-ahead only counts in the turn it was given in. Session-scoped in the same way as the buffers above.
+	var lastUserSaid string
+
 	// turnUsage accumulates the Live API's own token counts for the turn currently in progress, the same way askVoice's eval loop does with TurnTrace.Usage — most server messages of a turn carry no UsageMetadata and addLive is then a no-op, so this only grows on the messages that do. Session-scoped in the same way as the buffers above.
 	turnUsage := TokenUsage{Provider: ProviderGemini}
 
@@ -675,6 +678,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			return false
 		}
 		slog.Info("user said (voice)", "text", utterance)
+		lastUserSaid = utterance
 		select {
 		case a.TextResponseChan <- ResponseChunk{Text: utterance, Sender: SenderYou}:
 		default:
@@ -848,6 +852,10 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 		if msg.ServerContent != nil && (msg.ServerContent.TurnComplete || msg.ServerContent.GenerationComplete) {
 			a.endTurn()
 			clock.turnDone()
+			// Forgotten before the flush below, which may set it again from speech that arrived after the turn's last word. Only TurnComplete counts: GenerationComplete can arrive part-way through a run of tool calls that is still one turn.
+			if msg.ServerContent.TurnComplete {
+				lastUserSaid = ""
+			}
 			flushInputTranscript()
 			flushJuneSpeech()
 			flushTurnUsage()
@@ -869,7 +877,7 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 			for _, fc := range calls {
 				slog.Info("tool call received", "tool", fc.Name, "args", fc.Args)
 			}
-			toolCtx := WithTurnID(recvCtx, a.currentTurnID())
+			toolCtx := WithQuestion(WithTurnID(recvCtx, a.currentTurnID()), lastUserSaid)
 			go func() {
 				for _, fc := range calls {
 					a.runToolCall(toolCtx, otelTracer, session, fc)
