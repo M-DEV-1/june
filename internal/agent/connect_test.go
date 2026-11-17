@@ -722,6 +722,41 @@ func TestReceiveLoop_NoiseInterruptWhileJuneSpeaks_IsNotABargeIn(t *testing.T) {
 	}
 }
 
+// TestReceiveLoop_InterruptWithNoSpeechAndQuietSpeaker_LeavesTheSpeakerAlone covers the interrupt that is neither held open nor attributed to a tool delivery: nobody was transcribed and the speaker reads quiet, as in a pause between sentences. The audio already queued must not be thrown away and no stop notice written.
+func TestReceiveLoop_InterruptWithNoSpeechAndQuietSpeaker_LeavesTheSpeakerAlone(t *testing.T) {
+	speaker := &fakeSpeaker{}
+	a := NewAgent(nil, speaker, nil, nil, "")
+	fs := &fakeLiveSession{
+		msgCh:     make(chan *genai.LiveServerMessage, 4),
+		responses: make(chan genai.LiveSendToolResponseParameters, 1),
+		closeErr:  errors.New("fake session closed"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.receiveLoop(ctx, fs, "test-model", make(chan error, 2))
+
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{Interrupted: true}}
+	// A message the loop must still process, so "no stop notice" can be told apart from "not read yet".
+	fs.msgCh <- &genai.LiveServerMessage{ServerContent: &genai.LiveServerContent{TurnComplete: true}}
+
+	for {
+		select {
+		case chunk := <-a.TextResponseChan:
+			if chunk.Sender == SenderSystem {
+				t.Fatalf("an interrupt with no user speech must not write a stop notice, got %+v", chunk)
+			}
+			if chunk.TurnBoundary {
+				if n := speaker.flushes.Load(); n != 0 {
+					t.Errorf("an interrupt with no user speech must not flush the speaker, got %d flushes", n)
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for the turn boundary chunk")
+		}
+	}
+}
+
 // TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn is the production bug: the mic transcribed June's own greeting back as a "user said (voice)" turn 4 seconds after she said it, so June answered herself and then answered that answer, looping for minutes with no one talking to it. A transcript that duplicates what June just said, arriving inside the echo window, must never reach TextResponseChan as a user turn.
 func TestReceiveLoop_EchoOfJuneSpeech_NotTreatedAsUserTurn(t *testing.T) {
 	logs := captureLogs(t)
