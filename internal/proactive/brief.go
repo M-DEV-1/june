@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"june/internal/memory"
+	"june/internal/obs"
 )
 
 // maybeBrief delivers the morning brief once the brief hour has passed and the user's first activity of the day shows up — the newest episode inside activityWindow is that signal. Today's kind='brief' diary row is the once-per-day marker.
@@ -56,6 +57,8 @@ Principles:
 
 // deliverBrief composes the brief from live threads, recent meeting minutes, and yesterday's diary entry, asks the brain for it, records the kind='brief' marker, and posts the notification. The marker is written before the notification so a failure after the brain call can at worst lose one notification, never repeat one every minute.
 func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string) error {
+	ctx, span := obs.StartSpan(ctx, "Duty.Brief")
+	defer span.End()
 	threads, err := s.store.GetLiveThreads(ctx, 8)
 	if err != nil {
 		return err

@@ -87,9 +87,23 @@ func startDaemon(t *testing.T, world fixture.World) *daemon {
 		t.Fatal(err)
 	}
 	d := &daemon{cmd: cmd, base: "http://127.0.0.1:" + port, dir: data}
-	t.Cleanup(func() {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	exited := make(chan struct{})
+	go func() {
 		cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		if keepSpans {
+			// SIGTERM lets the daemon flush its buffered spans to spans.jsonl before the file is copied.
+			cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-exited:
+			case <-time.After(5 * time.Second):
+			}
+			keepSpansFile(t, filepath.Join(data, "spans.jsonl"))
+		}
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-exited
 		out.Close()
 		if t.Failed() {
 			t.Logf("daemon log tail:\n%s", tail(filepath.Join(data, "june.log"), 15))
@@ -98,6 +112,34 @@ func startDaemon(t *testing.T, world fixture.World) *daemon {
 	})
 	d.waitReady(t)
 	return d
+}
+
+// keepSpans is true when TASKEVAL_KEEP_SPANS=1: each daemon is then stopped with SIGTERM and its spans.jsonl is appended to taskeval/out/spans-<run start>.jsonl, which go run ./taskeval/spansummary reads.
+var keepSpans = os.Getenv("TASKEVAL_KEEP_SPANS") == "1"
+
+// spansOut is the one file every daemon of this run appends its spans to.
+var spansOut = filepath.Join("out", "spans-"+time.Now().Format("20060102-150405")+".jsonl")
+
+// keepSpansFile appends the daemon's spans.jsonl to spansOut, because the temp data directory is deleted when the test ends.
+func keepSpansFile(t *testing.T, spansPath string) {
+	raw, err := os.ReadFile(spansPath)
+	if err != nil {
+		t.Logf("could not keep the daemon's spans: %v", err)
+		return
+	}
+	if err := os.MkdirAll("out", 0o755); err != nil {
+		t.Logf("could not keep the daemon's spans: %v", err)
+		return
+	}
+	f, err := os.OpenFile(spansOut, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Logf("could not keep the daemon's spans: %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(raw); err != nil {
+		t.Logf("could not keep the daemon's spans: %v", err)
+	}
 }
 
 // keepLog copies the daemon's log to out/ under the failed test's name and the time, because the temp data directory is deleted when the test ends.

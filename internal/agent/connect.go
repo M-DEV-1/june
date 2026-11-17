@@ -301,6 +301,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 	// The reads below fill the handshake prompt and may take only contextGatherTimeout between them; whatever is not back by then is left out, so a stuck store cannot hold the dial.
 	gatherCtx, cancelGather := context.WithTimeout(handshakeCtx, contextGatherTimeout)
 	defer cancelGather()
+	gatherCtx, gatherSpan := tracer.Start(gatherCtx, "Agent.GatherContext")
 
 	_, ctxSpan := tracer.Start(gatherCtx, "Agent.GetImplicitContext")
 	resp, err := a.brain.GetImplicitContext(gatherCtx)
@@ -327,6 +328,7 @@ func (a *Agent) Connect(ctx context.Context, micChan <-chan []byte) error {
 		slog.Warn("personal context fetch failed, continuing without it", "error", err)
 	}
 	personal := personalContextBlock(personalEntries)
+	gatherSpan.End()
 
 	tools := liveTools()
 	toolsCount := 0
@@ -829,8 +831,11 @@ func (a *Agent) receiveLoop(ctx context.Context, session liveSession, model stri
 				}
 				// if part is audio
 				if part.InlineData != nil {
-					if d, ok := clock.firstSound(time.Now()); ok {
+					heard := time.Now()
+					if d, ok := clock.firstSound(heard); ok {
 						slog.Info("first sound", "after_user_ms", d.Milliseconds())
+						_, firstSpan := otelTracer.Start(recvCtx, "Agent.TimeToFirstAudio", trace.WithTimestamp(heard.Add(-d)))
+						firstSpan.End(trace.WithTimestamp(heard))
 					}
 					audioBytes += len(part.InlineData.Data)
 					a.speaker.Play(part.InlineData.Data)

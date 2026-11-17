@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"june/internal/memory"
+	"june/internal/obs"
 )
 
 // rrfK is Reciprocal Rank Fusion's smoothing constant. June's small corpus (thousands, not millions, of items) favors a lower k (~40-60) than the textbook default (60-100) — sharpens the gap between an item both retrievers agree on and one only a single retriever found. See the worked example in docs/june-memory-deck.html §02.
@@ -313,6 +314,8 @@ func (s *Store) HybridSearch(ctx context.Context, query, domainFilter string, li
 // The window is applied inside the lexical SQL (before each FTS query's LIMIT) and to the vector candidate pool before fusion — never to the fused top-k after ranking, which for a sparse window (the whole point of a dated question) usually leaves nothing. A window containing nothing returns an honestly empty result, not a fallback to unwindowed matches.
 // Under a window, a vector candidate with no readable created_at metadata is dropped: its membership in the window can't be shown. Unwindowed search keeps such candidates.
 func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter string, since, until time.Time, limit int) ([]MemoryHit, error) {
+	ctx, span := obs.StartSpan(ctx, "DB.HybridSearchWindow")
+	defer span.End()
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
@@ -408,7 +411,9 @@ func (s *Store) HybridSearchWindow(ctx context.Context, query, domainFilter stri
 
 		if queryVec != nil {
 			// The domain filter is applied in Go below rather than through chromem's where clause, for the same reason the time window is: exact-match metadata would drop every note and thread, which are written with no domain key at all.
+			_, vecSpan := obs.StartSpan(ctx, "DB.VectorSearch")
 			results, err := vidx.Search(ctx, queryVec, hybridVectorPoolSize, nil)
+			vecSpan.End()
 			if err != nil {
 				slog.Warn("hybrid search: vector search failed, degrading to lexical-only", "error", err)
 			} else {

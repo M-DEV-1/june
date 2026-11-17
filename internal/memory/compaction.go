@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"june/internal/obs"
 )
 
 // NodeRef is a lightweight handle to a node row (id + content).
@@ -52,6 +54,8 @@ func NewCompactor(llm Digester, store CompactStore) *Compactor {
 // Compact digests and replaces each day's summary group (2+ summaries) with one merged digest node.
 // Single-summary days are left alone. A failed group is logged and skipped, not fatal — Compact only returns an error if the initial store lookup fails.
 func (c *Compactor) Compact(ctx context.Context, olderThan time.Duration) error {
+	ctx, span := obs.StartSpan(ctx, "Compactor.Compact")
+	defer span.End()
 	groups, err := c.store.OldSummaryGroups(ctx, olderThan)
 	if err != nil {
 		return fmt.Errorf("compaction: fetch groups: %w", err)
@@ -111,6 +115,8 @@ func (c *Compactor) Compact(ctx context.Context, olderThan time.Duration) error 
 // Digest implements Digester on GeminiSummarizer, merging the summary texts into one coarse prose description of what the user did that day.
 // Plain text out, no JSON needed.
 func (g *GeminiSummarizer) Digest(ctx context.Context, prior string, summaries []string) (string, error) {
+	ctx, span := obs.StartSpan(ctx, "GeminiSummarizer.Digest")
+	defer span.End()
 	if len(summaries) == 0 {
 		return "", nil
 	}

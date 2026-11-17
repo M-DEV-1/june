@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 // lessonsReport is what the lessons stage did: how many apps it read, how many lessons it merged away, and how many it dropped.
@@ -40,6 +41,8 @@ Answer with JSON only: {"merge":[{"from":[ids],"lesson":"the one merged line"}],
 
 // lessonsStage consolidates the lessons of every app that gained one since the day before the night. Input: the night key. Output: the report, or a store or brain transport error so the next wake retries; a reply that will not parse skips that app.
 func (r *Runner) lessonsStage(ctx context.Context, night string) (lessonsReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.LessonsStage")
+	defer span.End()
 	var rep lessonsReport
 	all, err := r.store.Lessons(ctx)
 	if err != nil {

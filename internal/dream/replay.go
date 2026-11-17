@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"june/internal/brain"
+	"june/internal/obs"
 )
 
 const (
@@ -90,6 +91,8 @@ type replayPile struct {
 
 // replayStage reads the night's day of summaries one at a time through the shadow brain and folds the answers into per-thread piles, writing the night's markdown artifact and committing the 'replay' token. It never fails: a store read error aside, every per-item problem (a call error, an unparsable reply, running out of budget, or the user coming back) is absorbed into the report instead of aborting the stage, because a partial night's piles still beat none.
 func (r *Runner) replayStage(ctx context.Context, night string) (replayReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.ReplayStage")
+	defer span.End()
 	var rep replayReport
 	if r.activeShadow == nil {
 		rep.skipped = true

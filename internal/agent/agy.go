@@ -19,7 +19,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"june/internal/obs"
 	"june/internal/util"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -342,6 +345,8 @@ func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, mod
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, agyAskTimeout)
 	defer cancel()
+	ctx, span := obs.StartSpan(ctx, "Ask.Agy", attribute.String("ask.model", model))
+	defer span.End()
 	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so the session's tool server runs each call under them and a concurrent ask never shares this one's screenshot.
 	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, start)
@@ -370,7 +375,9 @@ func (a *Agent) askAgy(ctx context.Context, newProc func() agySessionRunner, mod
 
 	reference, shownLessons := a.actReference(ctx, question, start)
 	tr.LessonsShown = shownLessons
-	res, hops, capped, err := a.runAgyTurn(ctx, newProc, model, instruction, history, start, injected, reference, question)
+	runCtx, runSpan := obs.StartSpan(ctx, "Ask.Run", attribute.String("ask.brain", ProviderAgy))
+	res, hops, capped, err := a.runAgyTurn(runCtx, newProc, model, instruction, history, start, injected, reference, question)
+	runSpan.End()
 	tr.ToolHops = hops
 	tr.Evidence = evidenceFromToolHops(hops)
 	tr.ImageTokens = lookTokensSpent(ctx)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/obs"
 )
 
 // The diarizer is a sherpa-onnx build installed the same way the whisper.cpp one is: the binary, its shared libraries and its two models together under <data dir>/sherpa. It splits the call side of a recording into voices; it never sees the microphone side, which is one known person by construction.
@@ -90,6 +91,8 @@ func parseDiarTurns(out string) []diarTurn {
 // speakers is how many voices the caller knows are in the call, from the meeting app's own window; the diarizer then returns exactly that many rather than estimating. Pass 0 when it is not known, and the distance threshold decides instead — which gets the count wrong more often than not.
 // offset shifts the turns onto the recording's clock, the same way transcribeWAV shifts its segments.
 func diarizeWAV(ctx context.Context, bin, path string, speakers int, offset time.Duration) ([]diarTurn, error) {
+	ctx, span := obs.StartSpan(ctx, "Recorder.Sherpa")
+	defer span.End()
 	// A relative binary or library folder would be looked for under wd once the child starts there.
 	if abs, err := filepath.Abs(bin); err == nil {
 		bin = abs

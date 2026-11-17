@@ -17,8 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
 
+	"june/internal/obs"
 	"june/internal/util"
 )
 
@@ -116,6 +118,8 @@ func apiErrorCode(err error, code int) bool {
 
 // round sends one Responses call and reads the stream back. Input: the system instruction, the full input so far, the tools to offer, the session key that ties every round of one ask together for the backend's prompt cache, and the callback parseCodexStream hands each drawn shape to as it arrives. A 401 is answered by one token refresh and one retry; any other non-2xx is a codexHTTPError.
 func (c *codexClient) round(ctx context.Context, instructions string, input []any, tools []codexTool, session string, onShape func(itemID string, shape map[string]any)) (codexRound, error) {
+	ctx, span := obs.StartSpan(ctx, "Ask.ModelRound", attribute.String("ask.model", c.Model))
+	defer span.End()
 	if input == nil {
 		input = []any{}
 	}
@@ -276,6 +280,8 @@ func (a *Agent) askCodex(ctx context.Context, c *codexClient, history History, q
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, codexAskTimeout)
 	defer cancel()
+	ctx, span := obs.StartSpan(ctx, "Ask.Codex", attribute.String("ask.model", c.Model))
+	defer span.End()
 	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so every tool call runs under them and a concurrent ask never shares this one's screenshot.
 	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, start)

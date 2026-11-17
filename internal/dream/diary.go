@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 // undStage rewrites the standing understanding doc, one brain call, committed with the stage token in one transaction. It reads the whole diary pyramid rather than only the last week: every year entry, the last twelve months, the last eight weeks and the recent dailies. The coarse tiers are already compressed, so the whole of the user's record costs a few thousand tokens, and the standing model is then built from all of it instead of from a seven-day window that quietly drops everything older.
 func (r *Runner) undStage(ctx context.Context, night string) error {
+	ctx, span := obs.StartSpan(ctx, "Dream.UnderstandingStage")
+	defer span.End()
 	current, err := r.store.DiaryEntry(ctx, "", "understanding")
 	if err != nil {
 		return err
@@ -77,6 +80,8 @@ type compactReport struct{ weeks, months, years int }
 
 // compactStage collapses the diary's old fine entries into coarser ones: complete Mon-Sun weeks of dailies all older than compactAfterDays become one kind='week' entry on the Monday, and a month's worth of week entries all older than compactWeeksToMonth weeks becomes one kind='month' entry on the first. One brain call per coarse entry, one transaction per tier, and the 'compact' token commits with the month tier — so a preemption between tiers costs nothing: the committed week entries simply give the next wake's re-run less to do. A night with nothing to compact commits the token with zero diary writes.
 func (r *Runner) compactStage(ctx context.Context, night string) (compactReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.CompactStage")
+	defer span.End()
 	var rep compactReport
 
 	// Week tier. Querying only through the horizon is itself the age gate: a week can only reach seven fetched dailies when its Sunday is already past the horizon.
