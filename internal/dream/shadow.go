@@ -21,13 +21,13 @@ type ShadowLifecycle struct {
 	Stop  func()
 }
 
-// shadowArgs builds the llama-server command-line arguments for serving modelPath on port. device, when non-empty, is the Vulkan device name (e.g. "Vulkan1") appended as -dev; empty leaves the choice to llama-server.
+// shadowArgs builds the llama-server command-line arguments for serving modelPath on port. device, when non-empty, is the Vulkan device name (e.g. "Vulkan1") appended as -dev; empty leaves the choice to llama-server. A pinned device also gets --no-mmap, see util.MmapForDevice.
 func shadowArgs(modelPath string, port int, device string) []string {
 	args := []string{"-m", modelPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "-c", "8192", "-ngl", "99"}
 	if device != "" {
 		args = append(args, "-dev", device)
 	}
-	return args
+	return util.MmapForDevice(args)
 }
 
 // NewLlamaServerLifecycle builds a ShadowLifecycle around llama-server: Start spawns it on 127.0.0.1:port serving modelPath and blocks until it answers /health or 120 seconds pass; Stop SIGTERMs the child and escalates to SIGKILL after five seconds if it hasn't gone. -ngl 99 offloads every layer to the GPU, the same flag the embedding engine uses; -c 8192 matches the dream prompts' context needs. device, when non-empty, is passed as -dev to pin llama-server to a specific Vulkan device (e.g. "Vulkan1") instead of whichever one it picks by default; if llama-server exits during startup with a device pinned, Start tries once more without it, the same fallback the embedding server makes.

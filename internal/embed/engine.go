@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/util"
 )
 
 // Engine is a LocalEmbedder that owns the embedding server as a child process. The daemon holds exactly one of these; nothing else may spawn the server, because two copies would fight over the same port.
@@ -45,7 +46,7 @@ func NewEngine(cfg config.EmbedConfig) *Engine {
 	if cfg.Device != "" {
 		args = append(args, "--device", cfg.Device)
 	}
-	return newEngine(cfg.LlamaServer, args, cfg.BaseURL(), config.LocalEmbedModel, cfg.IdleTimeout*time.Millisecond)
+	return newEngine(cfg.LlamaServer, util.MmapForDevice(args), cfg.BaseURL(), config.LocalEmbedModel, cfg.IdleTimeout*time.Millisecond)
 }
 
 // newEngine wires an Engine to the server binary and the arguments that make it listen at baseURL, with model sent in each embed request and idle as the no-client shutdown timeout. NewEngine is the production entry point; this exists separately so the tests can spawn a stand-in process with their own arguments.
