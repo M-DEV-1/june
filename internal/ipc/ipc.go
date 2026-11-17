@@ -17,6 +17,7 @@ import (
 
 	"june/internal/agent"
 	"june/internal/db"
+	"june/internal/obs"
 	"june/internal/tracker"
 )
 
@@ -474,6 +475,8 @@ func (s *Server) run(asker Asker, id string, convID int64, question, screenConte
 
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
 	defer cancel()
+	ctx, span := obs.StartSpan(ctx, "Ipc.Ask")
+	defer span.End()
 	ctx = agent.WithToolObserver(ctx, func(name, summary string, failed bool) {
 		s.hub.broadcast(Event{ID: id, Type: "tool", Text: name, Detail: summary, Failed: failed, Evidence: []EvidenceItem{}, Actions: []ActionItem{}})
 	})

@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/obs"
 	"june/internal/util"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Engine is a LocalEmbedder that owns the embedding server as a child process. The daemon holds exactly one of these; nothing else may spawn the server, because two copies would fight over the same port.
@@ -87,6 +90,8 @@ func (e *Engine) sinceLastClient() time.Duration {
 
 // Embed starts the server if needed and then embeds text through it, applying the same EmbeddingGemma prefixes LocalEmbedder does.
 func (e *Engine) Embed(ctx context.Context, task TaskType, text string) ([]float32, error) {
+	ctx, span := obs.StartSpan(ctx, "Embed.Request", attribute.String("embed.task", string(task)))
+	defer span.End()
 	if err := e.ensureUp(ctx); err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 
 	"june/internal/config"
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 // pruneReport is what the pruning stage hands the night's log: how many rows each pass removed, and how many rows the policy held back, split by the rule that held them. Every number is a count of rows in the store, so a person reading the log sees the policy working instead of guessing at it.
@@ -25,6 +26,8 @@ type pruneReport struct {
 // pruneStage runs the store's two retention passes in order, conversations then act runs, counting what each one held back as well as what it removed. Input: ctx. Output: the report, or the store's own error the moment one of the four calls fails.
 // A failed call stops the stage there: the pass after it does not run, nothing is counted, and the caller commits no token, so a store that cannot be reached is retried on the next wake. That is the whole reason the errors are returned rather than swallowed — an unreachable store answering nothing must never be read as a store with nothing to prune.
 func (r *Runner) pruneStage(ctx context.Context) (pruneReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.PruneStage")
+	defer span.End()
 	keep, failedGrace := r.retention()
 
 	protectedConversations, err := r.store.ProtectedConversations(ctx, db.EmptyConversationAge)

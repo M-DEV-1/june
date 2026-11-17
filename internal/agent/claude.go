@@ -24,8 +24,10 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/obs"
 	"june/internal/util"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
 )
 
@@ -547,6 +549,8 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, claudeAskTimeout)
 	defer cancel()
+	ctx, span := obs.StartSpan(ctx, "Ask.Claude", attribute.String("ask.model", model))
+	defer span.End()
 	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so the tool server runs each call under them and a concurrent ask never shares this one's screenshot.
 	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, start)
@@ -608,7 +612,9 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	for _, d := range server.decls {
 		names = append(names, d.Name)
 	}
-	out, err := run(ctx, claudeArgs(model, mcpConfigPath, systemPromptPath, names), prompt.String())
+	runCtx, runSpan := obs.StartSpan(ctx, "Ask.Run", attribute.String("ask.brain", ProviderClaude))
+	out, err := run(runCtx, claudeArgs(model, mcpConfigPath, systemPromptPath, names), prompt.String())
+	runSpan.End()
 	tr.ToolHops = server.Hops()
 	tr.Evidence = evidenceFromToolHops(tr.ToolHops)
 	tr.ImageTokens = lookTokensSpent(ctx)

@@ -15,6 +15,7 @@ import (
 
 	"june/internal/brain"
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 const (
@@ -325,6 +326,8 @@ func (r *Runner) consumeForceMarker() bool {
 
 // dream runs (or resumes) one night: start the run row, arm the preemption watcher, run the missing stages, and finish with the morning report. Any stage error returns it; nothing partial was committed and the next wake resumes from stages_done. A failed hypothesis stage lets the other stages run first, then returns its error without the morning report. A night cut short by the user coming back returns nil, because preemption is not a failure and must not spend the night's retry budget (see failedAttemptCap).
 func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exists, lockedAtStart bool, baseline time.Time, fallback, forced bool) error {
+	ctx, span := obs.StartSpan(ctx, "Dream.Night")
+	defer span.End()
 	if r.OnNight != nil {
 		r.OnNight(true)
 		defer r.OnNight(false)

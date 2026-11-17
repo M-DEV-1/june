@@ -21,6 +21,7 @@ import (
 	"june/internal/config"
 	"june/internal/db"
 	"june/internal/memory"
+	"june/internal/obs"
 	"june/internal/util"
 )
 
@@ -570,6 +571,8 @@ func (r *Recorder) stop() (*session, error) {
 
 // process turns a recording into minutes: it gets the transcript — by running whisper over both streams, or by reading the one already on disk — then writes minutes.md, files the minutes as a note and updates personal context.
 func (r *Recorder) process(ctx context.Context, s *session) (err error) {
+	ctx, span := obs.StartSpan(ctx, "Recorder.Process")
+	defer span.End()
 	// Two paths can reach the same recording — the stop that made it and the retry loop looking for deferred ones — and transcribing it twice would race two whisper runs onto the same files.
 	if !r.claim(s.dir) {
 		return nil

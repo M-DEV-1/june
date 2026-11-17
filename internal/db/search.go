@@ -494,6 +494,8 @@ func minMaxNormalize(vals []float64) []float64 {
 // RetrieveRelevant returns up to maxItems relevance-ranked lines for unsolicited inject. Uses HybridSearch so moments get recency decay, facts/periods do not, and every line is FormatHit (content + context).
 // If maxItems <= 0, defaults to 4 (stingy inject budget). An empty focus returns nil directly — there's no real query to run relevance search against, and substituting a placeholder phrase would just search for those literal words.
 func (s *Store) RetrieveRelevant(ctx context.Context, focus string, maxItems int) ([]string, error) {
+	ctx, span := obs.StartSpan(ctx, "DB.RetrieveRelevant")
+	defer span.End()
 	focus = strings.TrimSpace(focus)
 	if focus == "" {
 		return nil, nil

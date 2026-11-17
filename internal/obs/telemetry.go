@@ -11,6 +11,7 @@ import (
 	"june/internal/config"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -132,6 +133,11 @@ func shutdownProvider(closeLog func(context.Context) error) func(context.Context
 // should create segmented view in jaeger or whatever
 func GetTracer(ctx context.Context, name string) trace.Tracer {
 	return otel.Tracer(name)
+}
+
+// StartSpan starts a span named name, written Area.Operation, as a child of the span in ctx. Input: the context, the name, and optional attributes. Output: the context carrying the new span, and the span, which the caller ends.
+func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return otel.Tracer("june").Start(ctx, name, trace.WithAttributes(attrs...))
 }
 
 // apparently this is a one time setup file?

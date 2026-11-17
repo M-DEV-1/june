@@ -15,6 +15,7 @@ import (
 	"june/internal/config"
 	"june/internal/db"
 	"june/internal/memory"
+	"june/internal/obs"
 )
 
 // activityWindow is how recent the newest episode must be for the user to count as present at the keyboard. The brief waits for this so it lands when the user actually sits down, not while the machine idles overnight.
@@ -253,7 +254,10 @@ func (s *Scheduler) maybeWeeklyStudy(ctx context.Context) {
 	if err != nil || last.IsZero() || s.now().Sub(last) > activityWindow {
 		return
 	}
-	if err := s.weeklyStudy(ctx, now); err != nil {
+	studyCtx, studySpan := obs.StartSpan(ctx, "Duty.WeeklyStudy")
+	err = s.weeklyStudy(studyCtx, now)
+	studySpan.End()
+	if err != nil {
 		s.failed(weeklyStudyDuty, s.now())
 		slog.Warn("weekly study failed, backing off", "error", err)
 		return

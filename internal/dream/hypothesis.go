@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 	"june/internal/util"
 )
 
@@ -37,6 +38,8 @@ type rawHypothesis struct {
 
 // hypStage tests every open hypothesis against the week's evidence and adopts new ones from the dailies, committing everything (and the stage token) in one transaction. A brain transport error aborts the stage for this wake; a reply that never parses skips the judging but still commits the token, journaled, so the night does not burn calls retrying.
 func (r *Runner) hypStage(ctx context.Context, night string, fallback bool) (stageReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.HypothesisStage")
+	defer span.End()
 	var rep stageReport
 
 	open, err := r.store.OpenHypotheses(ctx)

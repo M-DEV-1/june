@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 const (
@@ -38,6 +39,8 @@ type procedureDraft struct {
 
 // proceduresStage turns the recent successful screen-tool runs into "How I did X" notes, one per distinct goal, and returns what it did. Input: the night key, used only for logging. Output: the report, or a store error. Goals are grouped on their trimmed, case-folded text; the shortest successful run wins a goal; a goal whose note already exists is skipped, which is what makes running the stage twice in a row write nothing the second time.
 func (r *Runner) proceduresStage(ctx context.Context, night string) (proceduresReport, error) {
+	ctx, span := obs.StartSpan(ctx, "Dream.ProceduresStage")
+	defer span.End()
 	var rep proceduresReport
 
 	runs, err := r.store.ActRuns(ctx, procedureRunCap)

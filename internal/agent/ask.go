@@ -11,11 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"june/internal/obs"
 	"june/internal/util"
 
 	"june/internal/config"
 	"june/internal/db"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
 )
 
@@ -571,6 +573,8 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// One of the two hard stops on this loop, alongside maxAskIterations: no request past this deadline can go out. See askWallClock.
 	ctx, cancel := context.WithTimeout(ctx, askWallClock)
 	defer cancel()
+	ctx, span := obs.StartSpan(ctx, "Ask.Text", attribute.String("ask.model", model))
+	defer span.End()
 	// Carried on ctx so a screen tool deep in the loop can tell whether this very question named the window it now finds in front or consented to the step it is about to take, and so a concurrent ask never shares this one's screenshot or what the pictures cost.
 	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, now)
@@ -647,7 +651,7 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 			tr.Duration = time.Since(start)
 			return tr, fmt.Errorf("ask text: generate (iteration %d): %w", i, err)
 		}
-		resp, err := client.Models.GenerateContent(ctx, model, contents, cfg)
+		resp, err := generateRound(ctx, client, model, i, contents, cfg)
 		if err != nil {
 			tr.Duration = time.Since(start)
 			return tr, fmt.Errorf("ask text: generate (iteration %d): %w", i, err)
@@ -720,6 +724,13 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	tr.Evidence = evidenceFromToolHops(tr.ToolHops)
 	tr.LastTarget = a.screenTargetPtr()
 	return tr, capError(tr.ToolHops)
+}
+
+// generateRound sends one GenerateContent request of a text ask's tool loop under an Ask.ModelRound span. Input: the client, the model, the round's index, and the request. Output: the response or the SDK's error.
+func generateRound(ctx context.Context, client *genai.Client, model string, round int, contents []*genai.Content, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	ctx, span := obs.StartSpan(ctx, "Ask.ModelRound", attribute.String("ask.model", model), attribute.Int("ask.round", round))
+	defer span.End()
+	return client.Models.GenerateContent(ctx, model, contents, cfg)
 }
 
 // maxAskRounds is the hard stop on how many times a tool loop may go round, whatever the step count says. A round that only looked at a screen it had already seen does not spend a step, so without this a model that does nothing but call observe_screen would loop forever. Twice the step cap: a task can afford one wasted look for every step it takes and still finish.
@@ -1072,6 +1083,8 @@ var jobAllowedTools = map[string]bool{"branch": true, "switch_window": true}
 
 // evalExecute runs a tool for an ask, refusing the ones outside the gate. Input: the tool's name and arguments. Output: the tool's result, or a refusal naming the tool. The refusal used to read "disabled in evals (read-only memory eval)", which describes a situation a person typing a question is not in; askTools now keeps a gated tool off the list in the first place, so anything reaching this refusal is a model calling a tool it was never offered, and the message says the plain true thing instead.
 func (a *Agent) evalExecute(ctx context.Context, name string, args map[string]any) string {
+	ctx, span := obs.StartSpan(ctx, "Ask.Tool", attribute.String("tool.name", name))
+	defer span.End()
 	if !a.evalWrites && !subtaskAllowedTools[name] && !askAllowedTools[name] && !(jobAllowedTools[name] && inJob(ctx)) {
 		return fmt.Sprintf("error: tool %q %s", name, askGateMark)
 	}

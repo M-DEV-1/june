@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 	"june/internal/util"
 )
 
@@ -65,6 +66,8 @@ func (s *Scheduler) hadActivity(ctx context.Context, at time.Time) bool {
 
 // closeDay composes the day's material, asks the brain for the diary entry and the rewritten understanding doc, persists both, and posts the close notification. The kind='day' row is written last: it is the once-per-day marker, so nothing can half-complete and still count as done.
 func (s *Scheduler) closeDay(ctx context.Context, now time.Time, day string) error {
+	ctx, span := obs.StartSpan(ctx, "Duty.EveningClose")
+	defer span.End()
 	prompt, err := s.composeDiaryPrompt(ctx, now)
 	if err != nil {
 		return err

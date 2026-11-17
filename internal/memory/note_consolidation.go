@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"june/internal/config"
+	"june/internal/obs"
 	"strings"
 )
 
 // ConsolidateNotes implements the NoteConsolidator interface internal/db's NoteCompactor asks for, on GeminiSummarizer.
 func (g *GeminiSummarizer) ConsolidateNotes(ctx context.Context, notes []string) ([]string, error) {
+	ctx, span := obs.StartSpan(ctx, "GeminiSummarizer.ConsolidateNotes")
+	defer span.End()
 	if len(notes) == 0 {
 		return nil, nil
 	}

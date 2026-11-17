@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"june/internal/config"
+	"june/internal/obs"
 	"june/internal/util"
 )
 
@@ -94,6 +95,8 @@ func whisperCPPArgs(bin string) []string {
 // Both attempts happen inside the caller's GPU turn: transcribeWAV and internal/ipc's Dictation.finish each hold GPURun across their whole decode, so the retry cannot race the local text server or the other stream any more than the first attempt could. The audio file is the caller's too, and it deletes it only once this returns.
 // whisper-cli runs without -np whoever asked for it. -np silences whisper's own log, and that log is the only place whisper says it found no GPU at the configured number, or that CUDA had no memory left for a buffer, so with it on the warning below could never fire (checked against the installed CUDA build on 2026-10-03: with -np its stderr is the backend's device list and nothing more). stdout is the same either way.
 func RunWhisper(ctx context.Context, bin string, args []string) (stdout, stderr string, err error) {
+	ctx, span := obs.StartSpan(ctx, "Recorder.Whisper")
+	defer span.End()
 	dir, args := whisperArgv(withoutNoPrints(args))
 	if dir != "" {
 		// A relative binary would be looked for under dir once the child starts there.

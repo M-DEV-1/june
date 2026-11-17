@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"june/internal/db"
+	"june/internal/obs"
 )
 
 // Schedule is one routine's parsed schedule. Kind is "daily" (Weekdays true restricts it to Monday-Friday), "interval", or "when" — the last left as free text for the model to judge for itself every time it is checked, since no clock can tell whether Vexil has replied.
@@ -197,6 +198,8 @@ func (s *Scheduler) markRun(id int64, at time.Time) {
 // A run the store will not record is still posted and still remembered in memory — the answer has already been paid for, and re-asking every minute while the disk is full costs a full tool-loop ask each time.
 // TryStart/Finish stop this from overlapping a POST /routines/{id}/run for the same routine: if one is already in flight (either path), this tick skips the routine silently rather than asking and recording its result a second time.
 func (s *Scheduler) runRoutine(ctx context.Context, r db.Routine) error {
+	ctx, span := obs.StartSpan(ctx, "Duty.Routine")
+	defer span.End()
 	if !s.store.TryStart(r.ID) {
 		return nil
 	}

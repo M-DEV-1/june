@@ -10,6 +10,9 @@ import (
 	"slices"
 
 	"june/internal/agent"
+	"june/internal/obs"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // maxDutyAnswers is how many providers one duty may reach before it gives up, two: the one it was meant for and one more. A duty carries a day of screen text or a meeting, and handing it down the whole router's order spent up to four paid plans on one summary; the breaker each refusal opens already sends the next duty past the providers that failed, so a duty that stops here loses one run, not the job.
@@ -39,7 +42,7 @@ func RoutedFor(preferred string, build func(provider string) Brain) Brain {
 				break
 			}
 			var text string
-			text, err = build(provider)(ctx, prompt)
+			text, err = callProvider(ctx, provider, build(provider), prompt)
 			if err == nil {
 				return text, nil
 			}
@@ -67,6 +70,13 @@ func RoutedFor(preferred string, build func(provider string) Brain) Brain {
 		}
 		return "", err
 	}
+}
+
+// callProvider puts one duty prompt to one provider under a Brain.Call span, so every background duty's model time shows up in one place. Input: the provider's config name, its backend and the prompt. Output: the backend's answer and error.
+func callProvider(ctx context.Context, provider string, b Brain, prompt string) (string, error) {
+	ctx, span := obs.StartSpan(ctx, "Brain.Call", attribute.String("brain.provider", provider))
+	defer span.End()
+	return b(ctx, prompt)
 }
 
 // dutyOrder is the providers to ask, with preferred first when the router offers it at all. A preferred provider the router has dropped — not installed, or its breaker open — is not forced back in: it could not answer this duty either.
