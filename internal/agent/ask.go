@@ -165,6 +165,11 @@ func questionFrom(ctx context.Context) string {
 	return q
 }
 
+// withAsk is the first thing every ask loop does with its context: it carries the ask's question and a fresh look state, so each tool the ask runs reads this ask's own words and screen state. Input: the ask's context and its question. Output: the context to run the ask's tools under, including through the tool server a command-line brain calls back into.
+func withAsk(ctx context.Context, question string) context.Context {
+	return WithQuestion(withAskLookState(ctx), question)
+}
+
 // screenTargetPtr reads the agent's remembered screen target (see tools.go's screenTarget) as the pointer TurnTrace.LastTarget carries, nil when nothing has been pointed at or acted on yet.
 func (a *Agent) screenTargetPtr() *ScreenTarget {
 	if t, ok := a.screenTarget(); ok {
@@ -566,10 +571,8 @@ func (a *Agent) askText(ctx context.Context, model string, history []*genai.Cont
 	// One of the two hard stops on this loop, alongside maxAskIterations: no request past this deadline can go out. See askWallClock.
 	ctx, cancel := context.WithTimeout(ctx, askWallClock)
 	defer cancel()
-	// Carried on ctx so a screen tool deep in the loop — click, checking whether the front window changed out from under it — can tell whether this very question named the window it now finds in front.
-	ctx = WithQuestion(ctx, question)
-	// The picture draw maps coordinates against and what the pictures cost belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
-	ctx = withAskLookState(ctx)
+	// Carried on ctx so a screen tool deep in the loop can tell whether this very question named the window it now finds in front or consented to the step it is about to take, and so a concurrent ask never shares this one's screenshot or what the pictures cost.
+	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, now)
 	var handshake []string
 
@@ -832,10 +835,8 @@ func capError(hops []ToolHop) error {
 func (a *Agent) askVoice(ctx context.Context, model string, history []*genai.Content, question string) (TurnTrace, error) {
 	start := time.Now()
 	now := start
-	// See the matching line in askText: a screen tool later in this ctx's lifetime can read the question back off it.
-	ctx = WithQuestion(ctx, question)
-	// The look allowance and the picture draw maps coordinates against belong to this ask; see the matching line in askText. A voice turn never delivers the picture itself (see lookSeen), but draw still needs the state a look leaves behind to map a point back onto the screen.
-	ctx = withAskLookState(ctx)
+	// See the matching line in askText. A voice turn never delivers the picture itself (see lookSeen), but draw still needs the state a look leaves behind to map a point back onto the screen.
+	ctx = withAsk(ctx, question)
 	instruction, handshake := a.HandshakePrompt(ctx, now)
 
 	tr := TurnTrace{

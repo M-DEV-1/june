@@ -547,8 +547,8 @@ func (a *Agent) askClaude(ctx context.Context, run claudeRunner, model string, h
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, claudeAskTimeout)
 	defer cancel()
-	// The look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so a concurrent ask never shares this one's screenshot.
-	ctx = withAskLookState(ctx)
+	// The question, the look allowance, the picture draw maps coordinates against, and what the pictures cost all belong to one ask, carried on ctx from here on so the tool server runs each call under them and a concurrent ask never shares this one's screenshot.
+	ctx = withAsk(ctx, question)
 	instruction := a.LeanPrompt(ctx, start)
 	var handshake []string
 	// A screen task (see isScreenTask in ask.go) gets the short screen prompt instead of the full handshake, and later, once the tool server exists, the short screen tool set instead of every tool the ask gate allows.
