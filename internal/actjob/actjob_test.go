@@ -920,3 +920,42 @@ func TestRunner_TakesAKnownSequenceInOneRound(t *testing.T) {
 		t.Errorf("the step line says %q, want it to say how many actions the burst took", stepLine)
 	}
 }
+
+// slowStuckStore is a memStore whose write of the stuck checkpoint takes as long as a slow disk can, and every other write takes no time at all.
+type slowStuckStore struct {
+	memStore
+	delay time.Duration
+}
+
+func (s *slowStuckStore) SaveActJob(ctx context.Context, row db.ActJobRow) error {
+	if row.State == string(Stuck) {
+		time.Sleep(s.delay)
+	}
+	return s.memStore.SaveActJob(ctx, row)
+}
+
+// TestRunner_SlowStuckCheckpointDoesNotSpendTheWallBudget is the failure the Windows runner hit on 2026-11-18: the job went stuck on its question, the write of that checkpoint was slow, and because the wait had not started yet the write was billed to the wall budget, so the guard ended a job the window already showed as waiting. The answer then reached a job that was no longer running. The write here outlasts the whole budget, so the job survives only if its wall clock stopped before the write began.
+func TestRunner_SlowStuckCheckpointDoesNotSpendTheWallBudget(t *testing.T) {
+	exec := &fakeExec{}
+	r := New(&slowStuckStore{delay: 400 * time.Millisecond}, exec, map[string]Model{"fake": script(
+		`{"ask":"Which season is it under?"}`,
+		stepReply("click", "S16 E8"),
+		doneReply("Playing now."),
+	)}, "fake", nil)
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: 300 * time.Millisecond}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Stuck, Done, Failed)
+	// Past the slow write: before the fix the guard had ended the job by now.
+	time.Sleep(500 * time.Millisecond)
+	if job, err := r.Job(context.Background(), id); err != nil || job.State != Stuck {
+		t.Fatalf("after a slow stuck checkpoint the job is %q (%v), want it still stuck on its question", job.State, err)
+	}
+	if err := r.Answer(id, "season 16"); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if job := waitState(t, r, id, Done, Failed, Stopped); job.State != Done {
+		t.Fatalf("state after the answer = %q (%s), want done", job.State, job.Err)
+	}
+}
