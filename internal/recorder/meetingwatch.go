@@ -25,6 +25,8 @@ const (
 	juneStreamPrefix = "June "
 	// juneBinary is this program's own executable name. It is compared against the last element of the stream's process path, not the whole path: the audio library reports application.process.binary as os.Args[0], which is "/home/user/.../june" or "./june" and never the bare word — so comparing the raw value matched nothing, and June's voice assistant holding the microphone read as somebody else being in a call.
 	juneBinary = "june"
+	// echoCancelNodePrefix starts the node names of the audio server's echo canceller streams ("echo-cancel-capture" and "echo-cancel-playback"). They run for as long as a voice session uses the canceller and belong to no call.
+	echoCancelNodePrefix = "echo-cancel-"
 	// maxNameRunes is how much of a window title the prompt shows. A page names its own window and some run very long, while the prompt is one line.
 	maxNameRunes = 60
 	// windowLookback is how far back June looks for the window belonging to whatever took the microphone.
@@ -45,6 +47,7 @@ type pwNode struct {
 			MediaClass string `json:"media.class"`
 			AppName    string `json:"application.name"`
 			Binary     string `json:"application.process.binary"`
+			NodeName   string `json:"node.name"`
 		} `json:"props"`
 	} `json:"info"`
 }
@@ -53,7 +56,7 @@ type pwNode struct {
 //
 // Input: the JSON pw-dump writes. Output: the names of the applications that capture and also play audio back, then the names of those that only capture; each list is in the order the dump listed them and without repeats, since a browser opens a separate stream per tab.
 //
-// A stream counts only when it is running and names an application. The audio server's own echo canceller is always present as an input stream and names no application, so requiring a name is what keeps it out; requiring "running" is what distinguishes a microphone being read from one merely being open.
+// A stream counts only when it is running and names an application. The audio server's own echo canceller is always present as an input stream and names no application, so requiring a name is what keeps it out; one loaded through the pulse server may carry that server's name, so its streams are also dropped by their node name (echoCancelNodePrefix). Requiring "running" is what distinguishes a microphone being read from one merely being open.
 //
 // A call plays the other side back through the same application that captures, so an application with a running input stream and a running output stream is in a call. One that only captures is dictating, recording or transcribing: Handy, a push-to-talk dictation tool, opens the microphone for every dictation and plays nothing back, and on 2026-09-03 it was asked about as a meeting five times in fifteen minutes.
 func micUsers(dump []byte) (calls, captureOnly []string) {
@@ -74,7 +77,7 @@ func micUsers(dump []byte) (calls, captureOnly []string) {
 		if p.MediaClass != "Stream/Input/Audio" || n.Info.State != "running" {
 			continue
 		}
-		if strings.HasPrefix(p.AppName, juneStreamPrefix) || strings.EqualFold(filepath.Base(p.Binary), juneBinary) {
+		if strings.HasPrefix(p.AppName, juneStreamPrefix) || strings.EqualFold(filepath.Base(p.Binary), juneBinary) || strings.HasPrefix(p.NodeName, echoCancelNodePrefix) {
 			continue
 		}
 		name := streamName(p.Binary, p.AppName)
