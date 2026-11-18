@@ -59,6 +59,12 @@ Principles:
 func (s *Scheduler) deliverBrief(ctx context.Context, now time.Time, day string) error {
 	ctx, span := obs.StartSpan(ctx, "Duty.Brief")
 	defer span.End()
+	// The nightly dream is what normally closes the tasks later writing says are done, and it runs only on mains power, with the user away and no meeting recording. A laptop that was in use, asleep or on battery overnight skips it, and the brief then led with work the minutes and the day's page already said was finished. The same sweep runs here first; it reads the store and makes no model call.
+	if closed, err := s.store.CloseDoneActionItems(ctx, now.Add(-briefClosingWindow)); err != nil {
+		slog.Warn("morning brief: could not close finished tasks first, the brief may name some", "error", err)
+	} else if closed > 0 {
+		slog.Info("morning brief: closed tasks the evidence says are finished", "closed", closed)
+	}
 	threads, err := s.store.GetLiveThreads(ctx, 8)
 	if err != nil {
 		return err
@@ -175,6 +181,9 @@ func (s *Scheduler) applyStaleAnswer(ctx context.Context, noteID int64, chosen s
 	}
 	return nil
 }
+
+// briefClosingWindow is how far back the brief's own evidence sweep reads: the same week the nightly sweep reads, so a run of skipped nights is covered.
+const briefClosingWindow = 7 * 24 * time.Hour
 
 // staleAfter is how long an action item may sit open before the brief stops restating it and starts asking how it is going. Roughly a working week: long enough that repeating it would have already worn out its welcome, short enough that the question still lands while the work is live.
 const staleAfter = 5 * 24 * time.Hour
