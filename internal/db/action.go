@@ -111,15 +111,15 @@ func (s *Store) Identity(ctx context.Context) string {
 		return ""
 	}
 	for _, e := range entries {
-		if e.Subject == identitySubject {
+		if e.Subject == IdentitySubject {
 			return e.Content
 		}
 	}
 	return ""
 }
 
-// identitySubject is the personal-context key the user's own identity is filed under.
-const identitySubject = "identity"
+// IdentitySubject is the personal-context key the user's own identity is filed under.
+const IdentitySubject = "identity"
 
 // CloseDoneActionItems closes the user's open tasks that some later piece of writing says are finished. Input: how far back to read evidence from (zero for all of it). Output: how many items were closed.
 // Evidence is a meeting's minutes, a day's diary page, or a compiled note, and it only counts when it was written after the task was raised: the meeting that raises "deploy the PR" must not also close it. Nothing is ever deleted — a closed item keeps its line and gains the name of the evidence that closed it, so the user can see why it moved and put it back if the evidence was wrong.
@@ -138,6 +138,10 @@ func (s *Store) CloseDoneActionItems(ctx context.Context, since time.Time) (int,
 
 	closed := 0
 	for _, a := range open {
+		// An open task that still names the evidence that once closed it is one the user put back: reopening only changes the status. The evidence is still inside the window this sweep reads, so reading it again would close the task again every night until it aged out.
+		if a.DoneSource != "" {
+			continue
+		}
 		for _, e := range evidence {
 			// The minutes that raised an item must never close it: they are filed in the same second as the item and always talk about the same work. Everything else is fair evidence as long as it was written no earlier than the item.
 			if e.when.Before(a.Created) || raisedThere(e, a) {

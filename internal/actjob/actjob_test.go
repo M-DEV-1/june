@@ -2,6 +2,7 @@ package actjob
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"strings"
@@ -517,18 +518,48 @@ func TestRunner_ActionIsCheckpointedBeforeItIsChecked(t *testing.T) {
 	}
 }
 
+// memStore is a Store held in memory, for a test about the job's own clock: every checkpoint the job writes is time it is billed for, and a write to a file on a slow CI disk takes tens of milliseconds, which is a sizeable part of a wall budget short enough to wait out in a test.
+type memStore struct {
+	mu   sync.Mutex
+	rows map[string]db.ActJobRow
+}
+
+func (m *memStore) SaveActJob(_ context.Context, row db.ActJobRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rows == nil {
+		m.rows = map[string]db.ActJobRow{}
+	}
+	m.rows[row.ID] = row
+	return nil
+}
+
+func (m *memStore) ActJob(_ context.Context, id string) (db.ActJobRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.rows[id]
+	if !ok {
+		return db.ActJobRow{}, sql.ErrNoRows
+	}
+	return row, nil
+}
+
+func (m *memStore) MaxActJobNumber(context.Context) (uint64, error) { return 0, nil }
+
 // TestRunner_TimeWaitingOnTheUserDoesNotSpendTheWallBudget checks a job stuck on a question outlives its own wall budget while it waits, because a job holding still for a person is not a job running away with the screen.
+// The store is in memory so the only time the job spends working is its own: on a Windows runner the three checkpoints written after the answer can take a good part of the 300 ms on disk.
 func TestRunner_TimeWaitingOnTheUserDoesNotSpendTheWallBudget(t *testing.T) {
 	exec := &fakeExec{}
-	r, _, _ := newRunner(t, exec, script(
+	r := New(&memStore{}, exec, map[string]Model{"fake": script(
 		`{"ask":"Which season is it under?"}`,
 		stepReply("click", "S16 E8"),
 		doneReply("Playing now."),
-	))
+	)}, "fake", nil)
 	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: 300 * time.Millisecond}})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// The job's wall clock is stopped from before it reads as stuck (see askUser), so this is the moment the wait began. The sleep is not a synchronisation: it is the wait itself, twice the wall budget long.
 	waitState(t, r, id, Stuck, Done, Failed)
 	time.Sleep(600 * time.Millisecond)
 	if job, err := r.Job(context.Background(), id); err != nil || job.State != Stuck {
@@ -887,5 +918,44 @@ func TestRunner_TakesAKnownSequenceInOneRound(t *testing.T) {
 	}
 	if !strings.Contains(stepLine, "3") {
 		t.Errorf("the step line says %q, want it to say how many actions the burst took", stepLine)
+	}
+}
+
+// slowStuckStore is a memStore whose write of the stuck checkpoint takes as long as a slow disk can, and every other write takes no time at all.
+type slowStuckStore struct {
+	memStore
+	delay time.Duration
+}
+
+func (s *slowStuckStore) SaveActJob(ctx context.Context, row db.ActJobRow) error {
+	if row.State == string(Stuck) {
+		time.Sleep(s.delay)
+	}
+	return s.memStore.SaveActJob(ctx, row)
+}
+
+// TestRunner_SlowStuckCheckpointDoesNotSpendTheWallBudget is the failure the Windows runner hit on 2026-11-18: the job went stuck on its question, the write of that checkpoint was slow, and because the wait had not started yet the write was billed to the wall budget, so the guard ended a job the window already showed as waiting. The answer then reached a job that was no longer running. The write here outlasts the whole budget, so the job survives only if its wall clock stopped before the write began.
+func TestRunner_SlowStuckCheckpointDoesNotSpendTheWallBudget(t *testing.T) {
+	exec := &fakeExec{}
+	r := New(&slowStuckStore{delay: 400 * time.Millisecond}, exec, map[string]Model{"fake": script(
+		`{"ask":"Which season is it under?"}`,
+		stepReply("click", "S16 E8"),
+		doneReply("Playing now."),
+	)}, "fake", nil)
+	id, err := r.Start(context.Background(), "play S16 E8", Opts{Budget: Budget{Wall: 300 * time.Millisecond}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitState(t, r, id, Stuck, Done, Failed)
+	// Past the slow write: before the fix the guard had ended the job by now.
+	time.Sleep(500 * time.Millisecond)
+	if job, err := r.Job(context.Background(), id); err != nil || job.State != Stuck {
+		t.Fatalf("after a slow stuck checkpoint the job is %q (%v), want it still stuck on its question", job.State, err)
+	}
+	if err := r.Answer(id, "season 16"); err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if job := waitState(t, r, id, Done, Failed, Stopped); job.State != Done {
+		t.Fatalf("state after the answer = %q (%s), want done", job.State, job.Err)
 	}
 }

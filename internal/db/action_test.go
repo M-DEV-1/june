@@ -177,6 +177,34 @@ func TestCloseDoneActionItems(t *testing.T) {
 	}
 }
 
+// A task the user reopens after the sweep closed it stays open. The writing that closed it is still inside the week the nightly sweep reads, and before this the task was closed again every night until that writing aged out.
+func TestCloseDoneActionItems_LeavesAReopenedTaskOpen(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SetPersonalContext(ctx, "identity", testIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddActionItems(ctx, []memory.ActionItem{item("Me", "deploy the Route Planning & risk-statements PR (#5632).")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LogNote(ctx, "Merged the Route Planning risk-statements PR #5632 to main.", "meeting"); err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := store.CloseDoneActionItems(ctx, time.Time{}); err != nil || closed != 1 {
+		t.Fatalf("first sweep closed %d (%v), want 1", closed, err)
+	}
+	open, err := store.ActionItemsByOwner(ctx, "all")
+	if err != nil || len(open) != 1 {
+		t.Fatalf("ActionItemsByOwner = %v, %v", open, err)
+	}
+	if err := store.SetActionStatus(ctx, open[0].NoteID, memory.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := store.CloseDoneActionItems(ctx, time.Time{}); err != nil || closed != 0 {
+		t.Fatalf("after the user reopened it the sweep closed %d (%v), want 0", closed, err)
+	}
+}
+
 // The minutes that raise an item are filed in the same second as the item and always talk about the same work, so they must never be read as evidence that it is finished. On 2026-09-02 the 1:1 minutes said the branches had been pushed in the same breath as asking for them to be pushed, and a sweep without this guard closed the task on the spot.
 func TestCloseDoneActionItems_TheMeetingThatRaisedItCannotCloseIt(t *testing.T) {
 	ctx := context.Background()

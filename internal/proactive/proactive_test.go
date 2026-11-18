@@ -261,6 +261,42 @@ func TestScheduler_Brief_CarriesOpenItemsPastTheMinutesWindow(t *testing.T) {
 	}
 }
 
+// A task the day's own writing says is finished is not in the brief, even when the nightly dream that normally closes it never ran. Dreaming waits for mains power, an idle user and no recording, so on a laptop it is skipped often, and the brief used to lead with work the user had already said was done.
+func TestScheduler_Brief_LeavesOutWorkTheEvidenceSaysIsDone(t *testing.T) {
+	ctx := context.Background()
+	store := dbtest.Open(t)
+	if _, err := store.LogEpisode(ctx, "code", "june", "morning start"); err != nil {
+		t.Fatal(err)
+	}
+	openItem(t, store, "Me", "carry PR #13 through CI and merge.", memory.PriorityHigh, 2)
+	openItem(t, store, "Me", "send Vexil the Meridian shipping file.", memory.PriorityHigh, 2)
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
+	if err := store.SetDiaryEntry(ctx, yesterday, "day", "Spent the afternoon on CI. PR #13 merged after the flaky test was fixed."); err != nil {
+		t.Fatal(err)
+	}
+
+	var prompts []string
+	s := New(store, func(ctx context.Context, prompt string) (string, error) {
+		prompts = append(prompts, prompt)
+		return "brief", nil
+	}, func(title, body string) {}, config.ProactiveConfig{CloseHour: -1})
+	s.briefHour = 0
+	s.tick(ctx)
+
+	if len(prompts) != 1 {
+		t.Fatalf("brain called %d times, want 1", len(prompts))
+	}
+	// Yesterday's page is quoted further down the prompt in its own section, so only the task sections are checked.
+	_, tasks, _ := strings.Cut(prompts[0], "--- Open action items ---")
+	tasks, _, _ = strings.Cut(tasks, "--- Live threads ---")
+	if strings.Contains(tasks, "PR #13") {
+		t.Errorf("the brief still chases a task yesterday's page says is merged:\n%s", tasks)
+	}
+	if !strings.Contains(tasks, "Meridian shipping file") {
+		t.Errorf("the brief dropped a task nothing says is done:\n%s", tasks)
+	}
+}
+
 // An item that has gone quiet is asked about in a notification the user can answer with one click, and the answer updates the item. This is the other half of "ask me and I'll tell you": the brief asks in words, this asks in a button.
 func TestScheduler_Brief_AsksAboutAStaleItemAndAppliesTheAnswer(t *testing.T) {
 	ctx := context.Background()
