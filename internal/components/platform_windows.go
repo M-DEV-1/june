@@ -209,6 +209,27 @@ type memoryStatusEx struct {
 
 var procGlobalMemoryStatusEx = windows.NewLazySystemDLL("kernel32.dll").NewProc("GlobalMemoryStatusEx")
 
+// systemPowerStatus is Win32's SYSTEM_POWER_STATUS. ACLineStatus is 0 on battery, 1 plugged in and 255 when Windows does not know.
+type systemPowerStatus struct {
+	ACLineStatus        byte
+	BatteryFlag         byte
+	BatteryLifePercent  byte
+	SystemStatusFlag    byte
+	BatteryLifeTime     uint32
+	BatteryFullLifeTime uint32
+}
+
+var procGetSystemPowerStatus = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetSystemPowerStatus")
+
+// onMains reports whether the machine is plugged in. A desktop, or a laptop Windows will not say about, counts as plugged in.
+func onMains() bool {
+	var s systemPowerStatus
+	if r, _, _ := procGetSystemPowerStatus.Call(uintptr(unsafe.Pointer(&s))); r == 0 {
+		return true
+	}
+	return s.ACLineStatus != 0
+}
+
 // totalRAMMB is the machine's physical memory in MB, or 0 when Windows will not say.
 func totalRAMMB() int {
 	var m memoryStatusEx

@@ -10,10 +10,11 @@ import (
 	"june/internal/util"
 )
 
-// Routes answers GET /components, POST /components/{id}/install, POST /components/{id}/cancel and DELETE /components/{id}, keyed by ServeMux pattern for cmd to register behind the IPC token. {id} is a feature id or, so CI can install one small file, a single component's.
+// Routes answers GET /components, POST /components/background, POST /components/{id}/install, POST /components/{id}/cancel and DELETE /components/{id}, keyed by ServeMux pattern for cmd to register behind the IPC token. {id} is a feature id or, so CI can install one small file, a single component's.
 func (s *Service) Routes() map[string]http.HandlerFunc {
 	return map[string]http.HandlerFunc{
 		"GET /components":               s.handleList,
+		"POST /components/background":   s.handleBackground,
 		"POST /components/{id}/install": s.handleInstall,
 		"POST /components/{id}/cancel":  s.handleCancel,
 		"DELETE /components/{id}":       s.handleRemove,
@@ -54,6 +55,19 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		features = append(features, v)
 	}
 	util.WriteJSON(w, map[string]any{"platform": p, "features": features, "restart_pending": lifecycle.RestartPending()})
+}
+
+// handleBackground queues the features first-run setup downloads unasked (see startBackground) and answers 200 with {"queued": [ids]}, an empty list when the machine is on battery or nothing qualified. Progress follows as "component" events.
+func (s *Service) handleBackground(w http.ResponseWriter, r *http.Request) {
+	if s.man == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "this build of June has no local features", nil)
+		return
+	}
+	queued := s.startBackground()
+	if queued == nil {
+		queued = []string{}
+	}
+	util.WriteJSON(w, map[string][]string{"queued": queued})
 }
 
 // handleInstall queues an install and answers 202 at once; progress follows as "component" events. Refusals are newJob's, and 503 "closing" while the daemon shuts down.
