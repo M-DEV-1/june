@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -82,7 +83,7 @@ func TestPrepMeeting_Matches(t *testing.T) {
 		{
 			name:        "matches by participant and notifies",
 			episodes:    []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: ok sure ping me"}},
-			notes:       []string{"# Meeting minutes\n\nVexil Quorin agreed to send the deck by Friday."},
+			notes:       []string{minutesFor("Deck review", "Vexil Quorin agreed to send the deck by Friday.", "Vexil Quorin")},
 			reply:       "Vexil still owes the deck from last time.",
 			wantContain: "deck",
 			checkPrompt: func(t *testing.T, prompt string) {
@@ -95,7 +96,7 @@ func TestPrepMeeting_Matches(t *testing.T) {
 			// A shared title fragment ("Acme Corp") is enough to match even when no chat sender was on screen.
 			name:        "matches by title fragment alone",
 			episodes:    []db.Episode{{Title: "Meet – Weekly sync with Acme Corp"}},
-			notes:       []string{"# Meeting minutes\n\nAcme Corp asked for the Q3 numbers."},
+			notes:       []string{minutesFor("Weekly sync with Acme Corp", "Acme Corp asked for the Q3 numbers.")},
 			reply:       "Acme Corp is still waiting on the Q3 numbers.",
 			wantContain: "q3",
 		},
@@ -104,12 +105,12 @@ func TestPrepMeeting_Matches(t *testing.T) {
 			name:     "the most recent matching note wins",
 			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: hello"}},
 			notes: []string{
-				"# Meeting minutes\n\nVexil Quorin: older meeting, decided the budget.",
-				"# Meeting minutes\n\nVexil Quorin: newest meeting, decided the venue.",
+				minutesFor("Offsite planning", "Older meeting, decided the budget.", "Vexil Quorin"),
+				minutesFor("Offsite planning", "Newest meeting, decided the venue.", "Vexil Quorin"),
 			},
 			reply: "ok",
 			checkPrompt: func(t *testing.T, prompt string) {
-				if !strings.Contains(prompt, "newest meeting") || strings.Contains(prompt, "older meeting") {
+				if !strings.Contains(prompt, "Newest meeting") || strings.Contains(prompt, "Older meeting") {
 					t.Errorf("expected the most recent matching note in the prompt, got:\n%s", prompt)
 				}
 			},
@@ -152,7 +153,7 @@ func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 	}
 	store := &fakeStore{episodes: []db.Episode{{Title: title, ScreenText: "Oskrev Thivan: joining now"}}}
 	r, _, _ := newTestRecorder(t, store)
-	if _, err := store.LogNote(context.Background(), "# Meeting minutes\n\nOskrev Thivan agreed to drop the Bill Eval Studio UI.", noteKind); err != nil {
+	if _, err := store.LogNote(context.Background(), minutesFor("Daily Platform Sprint Standup", "Oskrev Thivan agreed to drop the Bill Eval Studio UI.", "Oskrev Thivan"), noteKind); err != nil {
 		t.Fatal(err)
 	}
 	var got notifications
@@ -171,5 +172,95 @@ func TestPrepMeeting_OpensAsAConversationNamedForTheMeeting(t *testing.T) {
 	}
 	if len(got.sent) != 1 || !strings.HasPrefix(got.sent[0], "Before you join: Daily Platform Sprint Standup: ") || !strings.HasSuffix(got.sent[0], " @chats/1") {
 		t.Errorf("notice = %v, want it to open the conversation in chats", got.sent)
+	}
+}
+
+// minutesFor writes a set of minutes in the shape the minutes prompt asks for: the meeting's name as the heading, the bold name-and-time line under it, the body, and an Attendees section whose "In the meeting" list holds the user as the person recording followed by the people given.
+func minutesFor(name, body string, attended ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n**%s — Tuesday, 15 September 2026, 10:00–10:30**\n\n## %s\n%s\n\n## Attendees\n**In the meeting**\n- **Trelvo Kordis (recording)** — ran the call\n", name, name, CoveredHeading, body)
+	for _, a := range attended {
+		fmt.Fprintf(&b, "- **%s** — spoke\n", a)
+	}
+	return b.String()
+}
+
+// Each case is a call that used to get a prep about some other meeting. The user is on every call and listed in every set of minutes, a colleague can be discussed in a meeting they were not in, and a two-letter acronym in a title is a substring of ordinary words. None of these identifies the meeting, so the right answer is the older meeting that does, or silence.
+func TestPrepMeeting_DoesNotMatchTheWrongMeeting(t *testing.T) {
+	cases := []struct {
+		name     string
+		episodes []db.Episode
+		personal []db.PersonalEntry
+		notes    []string // logged in order filed
+		want     string   // text the prompt must carry; "" means the brain must not be called
+		notWant  string
+	}{
+		{
+			name:     "the user's own roster entry is not a participant",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Trelvo Kordis (You)\nMute\nLeave call"}},
+			notes:    []string{minutesFor("Hiring loop debrief", "Agreed to extend an offer.", "Trelvo Kordis", "Ossa Venn")},
+		},
+		{
+			name:     "the user named by their identity entry is not a participant",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Trelvo Kordis: can everyone hear me"}},
+			personal: []db.PersonalEntry{{Subject: db.IdentitySubject, Content: "Trelvo Kordis"}},
+			notes:    []string{minutesFor("Hiring loop debrief", "Agreed to extend an offer.", "Trelvo Kordis", "Ossa Venn")},
+		},
+		{
+			name:     "a colleague only discussed in newer minutes does not make them the match",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Vexil Quorin: morning"}},
+			notes: []string{
+				minutesFor("Route planning sync", "Vexil Quorin owes the shipping file.", "Vexil Quorin"),
+				minutesFor("Budget review", "Ossa said Vexil Quorin should see the numbers.", "Ossa Venn") + "**Mentioned or on screen only**\n- Vexil Quorin — discussed\n",
+			},
+			want:    "Vexil Quorin owes the shipping file",
+			notWant: "should see the numbers",
+		},
+		{
+			name:     "an identity written as a sentence drops only the user, not the colleague it names",
+			episodes: []db.Episode{{Title: "Meet - abc-defg-hij - Brave", ScreenText: "Trelvo Kordis: hi all\nVexil Quorin: morning"}},
+			personal: []db.PersonalEntry{{Subject: db.IdentitySubject, Content: "Trelvo Kordis, an engineer at Acme who works with Vexil Quorin"}},
+			notes: []string{
+				minutesFor("Route planning sync", "Vexil Quorin owes the shipping file.", "Vexil Quorin"),
+				minutesFor("Hiring loop debrief", "Agreed to extend an offer.", "Trelvo Kordis", "Ossa Venn"),
+			},
+			want:    "Vexil Quorin owes the shipping file",
+			notWant: "extend an offer",
+		},
+		{
+			name:     "a title acronym is not found inside another word",
+			episodes: []db.Episode{{Title: "Meet – AI review – Brave"}},
+			notes:    []string{minutesFor("Budget said yes", "Ossa said the budget was approved.", "Ossa Venn")},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := &fakeStore{episodes: c.episodes, personal: c.personal}
+			r, _, _ := newTestRecorder(t, store)
+			for _, n := range c.notes {
+				if _, err := store.LogNote(context.Background(), n, noteKind); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var got notifications
+			r.notifyAt = got.addAt
+			called, gotPrompt := false, ""
+			r.minutes = func(ctx context.Context, prompt string) (string, error) {
+				called, gotPrompt = true, prompt
+				return "brief", nil
+			}
+
+			r.prepMeeting()
+
+			if c.want == "" {
+				if called || len(got.sent) != 0 {
+					t.Fatalf("expected silence, got a prep from:\n%s", gotPrompt)
+				}
+				return
+			}
+			if !strings.Contains(gotPrompt, c.want) || (c.notWant != "" && strings.Contains(gotPrompt, c.notWant)) {
+				t.Errorf("prep was written from the wrong minutes:\n%s", gotPrompt)
+			}
+		})
 	}
 }

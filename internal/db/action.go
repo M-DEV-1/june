@@ -111,15 +111,15 @@ func (s *Store) Identity(ctx context.Context) string {
 		return ""
 	}
 	for _, e := range entries {
-		if e.Subject == identitySubject {
+		if e.Subject == IdentitySubject {
 			return e.Content
 		}
 	}
 	return ""
 }
 
-// identitySubject is the personal-context key the user's own identity is filed under.
-const identitySubject = "identity"
+// IdentitySubject is the personal-context key the user's own identity is filed under.
+const IdentitySubject = "identity"
 
 // CloseDoneActionItems closes the user's open tasks that some later piece of writing says are finished. Input: how far back to read evidence from (zero for all of it). Output: how many items were closed.
 // Evidence is a meeting's minutes, a day's diary page, or a compiled note, and it only counts when it was written after the task was raised: the meeting that raises "deploy the PR" must not also close it. Nothing is ever deleted — a closed item keeps its line and gains the name of the evidence that closed it, so the user can see why it moved and put it back if the evidence was wrong.
