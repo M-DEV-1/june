@@ -36,6 +36,8 @@ const (
 	lockProbeTimeout = time.Second
 	// visionTimeout bounds the vision model call: a few hundred kilobytes of PNG uploaded to the model and a structured reply generated from it, which is a network round trip and normally several seconds. It gets tens of seconds where the local calls get single digits because that is what the call costs when it is working, and it can afford them: minVisionInterval already limits it to one call per ninety seconds, so a slow one delays no other vision capture. Forty-five seconds covers a poor uplink and one internal retry and still returns before the next attempt is due.
 	visionTimeout = 45 * time.Second
+	// ocrTimeout bounds the tesseract run on one screenshot. Measured on this desktop at 3.4-4.1 s of one core for a 1920x1080 capture, with a peak of 68 MB; thirty seconds is about eight times that, for a laptop busy with a build, and a run that overruns is killed rather than left holding memory.
+	ocrTimeout = 30 * time.Second
 )
 
 // captureBounds holds those deadlines, and the lock probe's, on the Daemon so a test can shrink them rather than wait out the real ones.
@@ -44,6 +46,7 @@ type captureBounds struct {
 	media      time.Duration
 	screenshot time.Duration
 	vision     time.Duration
+	ocr        time.Duration
 	lock       time.Duration
 }
 
@@ -55,6 +58,7 @@ type Daemon struct {
 	eventChan chan Activity
 	capturer  func() string // injectable for tests; nil = real capture
 	visionFn  func(ctx context.Context, png []byte) Sight
+	ocr       func(ctx context.Context, png []byte) string // nil when this machine has no OCR program
 	paused    atomic.Bool
 
 	// The three calls the capture path makes outside this process, held as fields so a test can stand in one that never answers and prove the caller still comes back. NewDaemon points them at the real ones.
@@ -198,9 +202,9 @@ func NewDaemon(eye Tracker, interval time.Duration, dwellTime time.Duration, blo
 
 	return &Daemon{
 		eye: eye, interval: interval, dwellTime: dwellTime, blocklist: blocklist, eventChan: eventChan,
-		text: extractText, media: mediaPlaying, screenshot: grabScreen,
+		text: extractText, media: mediaPlaying, screenshot: grabScreen, ocr: newOCR(),
 		meeting: extractMeetingWindow, meetingEvery: meetingCaptureInterval,
-		bounds: captureBounds{text: textReadTimeout, media: mediaProbeTimeout, screenshot: screenshotTimeout, vision: visionTimeout, lock: lockProbeTimeout},
+		bounds: captureBounds{text: textReadTimeout, media: mediaProbeTimeout, screenshot: screenshotTimeout, vision: visionTimeout, ocr: ocrTimeout, lock: lockProbeTimeout},
 	}
 }
 
@@ -446,8 +450,8 @@ func applyCapture(ev *Activity, out captureOut) {
 	}
 }
 
-// tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen.
-// Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision is gated behind thinTextThreshold and minVisionInterval to keep cost down.
+// tieredCapture reads accessibility text first (free), and only escalates to vision (screenshot -> LLM) when that text is too thin to describe what's on screen. A window that published no text at all and got nothing from vision is read off the screenshot by the local OCR program instead.
+// Returns empty text when content is unchanged since the last capture, so callers never re-emit the same screen. Vision and OCR share one limit, thinTextThreshold and minVisionInterval, to keep cost down.
 func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, lastVisionText *string, lastVisionTime *time.Time) captureOut {
 	// The accessibility read takes no context — the platform readers each open their own connection — so it is bounded from out here instead.
 	textCtx, cancelText := context.WithTimeout(ctx, d.bounds.text)
@@ -466,15 +470,19 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 		return out
 	}
 	d.lastCapture.Store(time.Now().UnixNano())
+	// The text length before any diffing is what says whether the window publishes anything: an unchanged screen emits no text either, so the emitted episode cannot tell blind from unchanged.
+	slog.Debug("read the focused window's text", "app", act.App, "runes", len([]rune(text)))
 
 	// vision only escalates for a real foreground app, never the bare desktop — or we'd snap and describe the wallpaper on a loop while the user is idle.
 	visionEnabled := d.visionFn != nil && isVisionWorthy(act)
+	// OCR is only for a window that published nothing: when it published some text, that text is better evidence than a guess at the pixels.
+	ocrEnabled := d.ocr != nil && text == "" && isVisionWorthy(act)
 
 	mediaCtx, cancelMedia := context.WithTimeout(ctx, d.bounds.media)
 	mediaActive := withBudget(mediaCtx, func() bool { return d.media(mediaCtx) })
 	cancelMedia()
 
-	if !shouldUseVision(len([]rune(text)), visionEnabled, mediaActive, time.Since(*lastVisionTime)) {
+	if !shouldUseVision(len([]rune(text)), visionEnabled || ocrEnabled, mediaActive, time.Since(*lastVisionTime)) {
 		return withURL(resolveCapture(lastA11yText, lastVisionText, text, false, "", Sight{}, nil))
 	}
 
@@ -491,16 +499,29 @@ func (d *Daemon) tieredCapture(ctx context.Context, act Activity, lastA11yText, 
 	}
 	png := grab.png
 
-	visionCtx, cancelVision := context.WithTimeout(ctx, d.bounds.vision)
-	sight := withBudget(visionCtx, func() Sight { return d.visionFn(visionCtx, png) })
-	cancelVision()
+	var sight Sight
+	var frames [][]byte
+	if visionEnabled {
+		visionCtx, cancelVision := context.WithTimeout(ctx, d.bounds.vision)
+		sight = withBudget(visionCtx, func() Sight { return d.visionFn(visionCtx, png) })
+		cancelVision()
+		// Frames are stored only for captures the model saw. An OCR-only capture keeps the text and no picture of the screen.
+		frames = screenFrames(png)
+	}
 	// Vision capture: drop a11y entirely. Browser/TUI chrome is why screenshots of June itself polluted memory.
-	// Searchable text is only the model's structured description (or the window title if the model returned nothing).
+	// Searchable text is the model's structured description, else the OCR text, else the window title.
 	desc := sight.Text()
+	if desc == "" && ocrEnabled {
+		ocrCtx, cancelOCR := context.WithTimeout(ctx, d.bounds.ocr)
+		started := time.Now()
+		desc = withBudget(ocrCtx, func() string { return d.ocr(ocrCtx, png) })
+		cancelOCR()
+		slog.Debug("read the screenshot by OCR", "app", act.App, "runes", len([]rune(desc)), "elapsed", time.Since(started))
+	}
 	if desc == "" {
 		desc = strings.TrimSpace(act.Title)
 	}
-	return withURL(resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, screenFrames(png)))
+	return withURL(resolveCapture(lastA11yText, lastVisionText, text, true, desc, sight, frames))
 }
 
 // resolveCapture decides what a capture emits and updates the right per-tier "last text" tracker.
