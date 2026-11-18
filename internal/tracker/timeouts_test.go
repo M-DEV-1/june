@@ -16,7 +16,7 @@ func TestTieredCapture_ReturnsWhenAnOutsideCallNeverAnswers(t *testing.T) {
 
 	cases := map[string]func(d *Daemon){
 		"the text read never comes back": func(d *Daemon) {
-			d.text = func() (string, error) { <-forever; return "", nil }
+			d.text = func() (screenRead, error) { <-forever; return screenRead{}, nil }
 		},
 		"the media player never answers the property read": func(d *Daemon) {
 			d.media = func(context.Context) bool { <-forever; return false }
@@ -34,7 +34,7 @@ func TestTieredCapture_ReturnsWhenAnOutsideCallNeverAnswers(t *testing.T) {
 			d := NewDaemon(nil, time.Second, time.Second, nil, nil)
 			d.bounds = captureBounds{text: 20 * time.Millisecond, media: 20 * time.Millisecond, screenshot: 20 * time.Millisecond, vision: 20 * time.Millisecond}
 			// Thin text so the capture escalates past accessibility and reaches the screenshot and the model.
-			d.text = func() (string, error) { return "", nil }
+			d.text = func() (screenRead, error) { return screenRead{}, nil }
 			d.media = func(context.Context) bool { return false }
 			d.screenshot = func(context.Context) ([]byte, error) { return fakePNG, nil }
 			d.visionFn = func(context.Context, []byte) Sight { return Sight{UserActivity: "reading"} }

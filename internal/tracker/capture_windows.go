@@ -21,14 +21,14 @@ const (
 )
 
 // extractText reads the text of the foreground window through UI Automation. Output: the text, "" when there is no foreground window or the read failed or ran out of time; the error is always nil, as on Linux.
-func extractText() (string, error) {
+func extractText() (screenRead, error) {
 	h := windows.GetForegroundWindow()
 	if h == 0 {
-		return "", nil
+		return screenRead{}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), uiaCaptureTimeout)
 	defer cancel()
-	return uiaWindowText(ctx, h), nil
+	return screenRead{text: uiaWindowText(ctx, h)}, nil
 }
 
 // uiaWindowText walks one window and keeps the text documentText would keep from the Linux tree: a browser page's text without the browser around it, or the whole window's text for a native app. Input: a context bounding the read and the window handle. Output: the trimmed text, capped at uiaMaxTextLen runes, or "" when the read failed.

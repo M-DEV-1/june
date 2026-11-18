@@ -11,8 +11,8 @@ import (
 // extractText is a no-op on non-Windows/Linux platforms.
 // macOS: not planned (no dev access -> would not ship tastefully).
 
-func extractText() (string, error) {
-	return "", nil
+func extractText() (screenRead, error) {
+	return screenRead{}, nil
 }
 
 func grabScreen(_ context.Context) ([]byte, error) {
