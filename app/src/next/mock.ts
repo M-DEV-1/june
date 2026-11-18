@@ -115,6 +115,7 @@ const finishedSetup: SetupView = {
   hotkey: "Ctrl+Alt+Space",
   restart_pending: false,
   data_dir: "/home/you/.june",
+  key_pattern: "^[A-Za-z0-9._\\-]{20,256}$",
 };
 
 /** The file each feature's progress names while it downloads, the largest one it fetches, as the real downloader reports it. */

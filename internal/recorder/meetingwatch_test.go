@@ -51,6 +51,16 @@ func TestMicUsers(t *testing.T) {
 			wantQuiet: nil,
 		},
 		{
+			// An echo canceller loaded through the pulse server can carry that server's name on both of its streams, which would read as an application in a call for as long as a voice session runs.
+			name: "the echo canceller's streams are dropped by node name even when they carry an application name",
+			dump: []byte(`[
+			  {"info":{"state":"running","props":{"media.class":"Stream/Input/Audio","node.name":"echo-cancel-capture","application.name":"pipewire-pulse","application.process.binary":"pipewire-pulse"}}},
+			  {"info":{"state":"running","props":{"media.class":"Stream/Output/Audio","node.name":"echo-cancel-playback","application.name":"pipewire-pulse","application.process.binary":"pipewire-pulse"}}}
+			]`),
+			wantCalls: nil,
+			wantQuiet: nil,
+		},
+		{
 			// Handy is a push-to-talk dictation tool: it opens the microphone for each dictation and plays nothing back. A call plays the other side back through the same application that captures, so an application that only captures is dictating or recording, not in a call.
 			name: "a call plays back and a dictation does not",
 			dump: []byte(`[
