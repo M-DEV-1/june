@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"june/internal/recorder"
 	"june/internal/util"
 )
 
@@ -109,6 +110,9 @@ func diskFull(err error) bool {
 
 // smartAppControl is "off": it is a Windows feature.
 func smartAppControl() string { return "off" }
+
+// onMains reports whether the machine is plugged in, by the same reading the meeting transcriber defers to.
+func onMains() bool { return recorder.OnACPower() }
 
 // totalRAMMB reads MemTotal from /proc/meminfo. Output: the machine's memory in MB, or 0 when it cannot be read.
 func totalRAMMB() int {
