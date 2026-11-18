@@ -138,6 +138,10 @@ func (s *Store) CloseDoneActionItems(ctx context.Context, since time.Time) (int,
 
 	closed := 0
 	for _, a := range open {
+		// An open task that still names the evidence that once closed it is one the user put back: reopening only changes the status. The evidence is still inside the window this sweep reads, so reading it again would close the task again every night until it aged out.
+		if a.DoneSource != "" {
+			continue
+		}
 		for _, e := range evidence {
 			// The minutes that raised an item must never close it: they are filed in the same second as the item and always talk about the same work. Everything else is fair evidence as long as it was written no earlier than the item.
 			if e.when.Before(a.Created) || raisedThere(e, a) {
