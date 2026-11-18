@@ -115,6 +115,7 @@ const finishedSetup: SetupView = {
   hotkey: "Ctrl+Alt+Space",
   restart_pending: false,
   data_dir: "/home/you/.june",
+  key_pattern: "^[A-Za-z0-9._\\-]{20,256}$",
 };
 
 /** The file each feature's progress names while it downloads, the largest one it fetches, as the real downloader reports it. */
@@ -426,6 +427,16 @@ export function daemonFetch(canned: Canned = {}, calls: Call[] = [], emit?: (ev:
       return { status: 202, body: { restarting: true, pid: 4242 } };
     }
     if (method === "GET" && path === "/components" && components) return { status: 200, body: components };
+    // Starts the features the daemon marks background, as POST /components/background does when the machine is plugged in.
+    if (method === "POST" && path === "/components/background" && components) {
+      const started = components.features.filter((x) => x.background && x.state === "not_installed");
+      for (const x of started) {
+        x.state = "queued";
+        queue.push(x.id);
+      }
+      runQueue();
+      return { status: 200, body: { queued: started.map((x) => x.id) } };
+    }
     const feature = /^\/components\/([^/]+)(\/install|\/cancel)?$/.exec(path);
     const f: Feature | undefined = feature && components ? components.features.find((x) => x.id === decodeURIComponent(feature[1])) : undefined;
     if (feature && components && !f) return { status: 404, body: { error: "no such feature" } };
@@ -582,8 +593,8 @@ function featuresFixture(gpu: boolean, states: Record<string, Feature["state"]> 
     features: [
       gpu
         ? feature("transcribe", "Voice typing & meeting transcripts", "cuda", 2_209_187_442, 2_730_000_000)
-        : feature("transcribe", "Voice typing & meeting transcripts", "cpu", 509_847_299, 560_000_000),
-      feature("speakers", "Who said what", "cpu", 61_056_987, 70_000_000, { requires: ["transcribe"] }),
+        : feature("transcribe", "Voice typing & meeting transcripts", "cpu", 509_847_299, 560_000_000, { background: true }),
+      feature("speakers", "Who said what", "cpu", 61_056_987, 70_000_000, { requires: ["transcribe"], background: true }),
       feature("memory", "Smarter memory search", "vulkan", 366_802_356, 400_000_000, { needs_restart: true }),
       feature("summaries", "On-device summaries", "vulkan", 2_874_692_596, 2_900_000_000, { needs_restart: true }),
     ],

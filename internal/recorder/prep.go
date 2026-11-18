@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"june/internal/db"
 	"june/internal/tracker"
@@ -47,12 +48,15 @@ func (r *Recorder) prepMeeting() {
 	}
 
 	var known []string
+	identity := ""
 	if entries, err := r.store.PersonalContext(ctx); err == nil {
 		known = personNamesFromContext(entries)
+		identity = identityFromContext(entries)
 	}
 
 	title := meetingTitle(episodes)
-	participants := meetingParticipants(episodes, known)
+	// The user is on every call and named in every set of minutes, so a participant list that still holds them matches whichever meeting was filed last.
+	participants := withoutSelf(meetingParticipants(episodes, known), selfNamesOnScreen(episodes), identity)
 	fragments := meetingTitleFragments(title)
 	if len(participants) == 0 && len(fragments) == 0 {
 		slog.Debug("meeting prep: nothing on screen names the meeting or its attendees", "title", title)
@@ -394,21 +398,170 @@ func rarestFragments(fragments []string, titles []string) []string {
 	return kept
 }
 
-// meetingNoteMatches reports whether a past meeting's minutes are about the same meeting as the one on screen now: either a participant named on screen is also named in those minutes, or one of the title's identifying words shows up in them. Both comparisons are case-insensitive, since a chat sender's name and the same name typed into minutes rarely share capitalisation exactly.
+// meetingNoteMatches reports whether a past meeting's minutes are about the same meeting as the one on screen now: either a participant named on screen was in that meeting, or one of the title's identifying words is in that meeting's name. Both comparisons are case-insensitive whole-word matches, since a chat sender's name and the same name typed into minutes rarely share capitalisation exactly.
 // The fragments passed here must already have been narrowed by rarestFragments. Before that narrowing existed, a single word in common was enough to call two meetings the same, and since every set of minutes contains the words "meet" and "recording", any call matched the most recent meeting whatever it had been about.
+// Neither side is looked up in the whole body any more. A person discussed in yesterday's unrelated minutes, or a client named in passing, made that meeting the match for any call they were on, and a substring test let a title's "AI" match "said". A participant counts only when they are listed as in the meeting, and a title word only when it is in the meeting's name. Minutes written before the attendee section existed have no attendees to match, and are found by their name alone.
 func meetingNoteMatches(content string, participants, titleFragments []string) bool {
-	lc := strings.ToLower(content)
+	attended := attendedSection(content)
 	for _, p := range participants {
-		if strings.Contains(lc, strings.ToLower(p)) {
+		if containsWord(attended, p) {
 			return true
 		}
 	}
+	name := minutesNameLines(content)
 	for _, f := range titleFragments {
-		if strings.Contains(lc, strings.ToLower(f)) {
+		if containsWord(name, f) {
 			return true
 		}
 	}
 	return false
+}
+
+// attendedSection is the "In the meeting" list of a set of minutes' "## Attendees" section, without the line for the person recording. Input: the minutes markdown. Output: that list's lines joined, or "" when the minutes have no such list. The recording person is the user, who is in every meeting and so identifies none of them.
+func attendedSection(minutes string) string {
+	var b strings.Builder
+	inSection, inList := false, false
+	for _, line := range strings.Split(minutes, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "# ") {
+			inSection = strings.EqualFold(trimmed, "## Attendees")
+			inList = false
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "- ") && !strings.HasPrefix(trimmed, "* ") {
+			// The two lists are introduced by their own bold lines, the same lines the window's attendee list reads (minutesAttendees in internal/ipc).
+			label := strings.ToLower(strings.Trim(trimmed, "* "))
+			if strings.HasPrefix(label, "in the meeting") {
+				inList = true
+			} else if strings.HasPrefix(label, "mentioned") {
+				inList = false
+			}
+			continue
+		}
+		if !inList || strings.Contains(strings.ToLower(trimmed), "(recording)") {
+			continue
+		}
+		b.WriteString(trimmed)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// minutesNameLines is the part of a set of minutes that names the meeting: its first "# " heading and the bold name-and-time line the minutes prompt writes directly under it. Input: the minutes markdown. Output: those lines joined, or "" when there is no heading.
+func minutesNameLines(minutes string) string {
+	var b strings.Builder
+	lines := strings.Split(minutes, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "# ") {
+			continue
+		}
+		b.WriteString(strings.TrimPrefix(trimmed, "# "))
+		for _, next := range lines[i+1:] {
+			next = strings.TrimSpace(next)
+			if next == "" {
+				continue
+			}
+			if strings.HasPrefix(next, "**") {
+				b.WriteByte('\n')
+				b.WriteString(strings.Trim(next, "* "))
+			}
+			break
+		}
+		break
+	}
+	return b.String()
+}
+
+// containsWord reports whether phrase occurs in text as whole words, ignoring case. Input: the text to search and the phrase. Output: true when an occurrence starts and ends at a word boundary, so "AI" is found in "AI review" and not in "said", and "Vexil Quorin" is not found inside "Vexil Quorinson".
+func containsWord(text, phrase string) bool {
+	text, phrase = strings.ToLower(text), strings.ToLower(strings.TrimSpace(phrase))
+	if phrase == "" {
+		return false
+	}
+	for i := 0; i+len(phrase) <= len(text); {
+		j := strings.Index(text[i:], phrase)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(phrase)
+		before, _ := utf8.DecodeLastRuneInString(text[:start])
+		after, _ := utf8.DecodeRuneInString(text[end:])
+		if (start == 0 || !isWordRune(before)) && (end == len(text) || !isWordRune(after)) {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(text[start:])
+		i = start + size
+	}
+	return false
+}
+
+// isWordRune reports whether r is part of a word: a letter, a digit or a combining mark, the last so a word in a script that writes its vowels as marks is not split at one.
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Mc, r)
+}
+
+// selfRosterName finds a name a meeting app marks as the user's own: "Trelvo Kordis (You)", "Trelvo Kordis (Host, me)".
+var selfRosterName = regexp.MustCompile(`([\p{Lu}][\p{L}'-]*(?: [\p{Lu}][\p{L}'-]*){0,3})\s*\([^()\n]*\b(?i:you|me)\b[^()\n]*\)`)
+
+// selfNamesOnScreen is every name the call's own window marks as the user's. Input: the episodes captured before the call. Output: those names, as written, without the marker.
+func selfNamesOnScreen(eps []db.Episode) []string {
+	var out []string
+	for _, e := range eps {
+		if !tracker.IsMeetingWindow(e.App, e.Title) {
+			continue
+		}
+		for _, text := range []string{e.UserActivity, e.ScreenText, e.VisibleText, e.Title} {
+			for _, m := range selfRosterName.FindAllStringSubmatch(text, -1) {
+				out = append(out, strings.TrimSpace(m[1]))
+			}
+		}
+	}
+	return out
+}
+
+// identityFromContext is the personal-context entry that says who the user is. Input: every personal-context entry. Output: its content, or "" when none says.
+func identityFromContext(entries []db.PersonalEntry) string {
+	for _, e := range entries {
+		if e.Subject == db.IdentitySubject {
+			return e.Content
+		}
+	}
+	return ""
+}
+
+// identityName is the user's name as their identity entry leads with it. Input: the entry, which may be a bare name or a sentence about the user ("Trelvo Kordis, works with Vexil Quorin at Acme"). Output: the run of capitalised words it opens with, "" when it does not open with one. Only the opening name is the user: anyone else the sentence goes on to name is a person in their life, and dropping them would drop real participants.
+func identityName(identity string) string {
+	if m := leadingName.FindStringSubmatch(identity); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// leadingName is up to four capitalised words at the very start of a text.
+var leadingName = regexp.MustCompile(`^\s*([\p{Lu}][\p{L}'-]*(?: [\p{Lu}][\p{L}'-]*){0,3})`)
+
+// withoutSelf drops the user from a list of participants. Input: the candidates, the names the meeting window marks as the user's, and the user's identity entry. Output: the candidates that are somebody else.
+// A candidate is the user when it is part of the name their identity entry opens with ("Trelvo Kordis" for "Trelvo Kordis, engineer at Acme"), or carries that whole name when the name has at least two words. A one-word name is not enough to claim a longer one: "Trelvo" would otherwise take "Trelvo Venn", who is somebody else.
+func withoutSelf(participants, selfOnScreen []string, identity string) []string {
+	name := identityName(identity)
+	multiword := len(strings.Fields(name)) >= 2
+	var out []string
+	for _, p := range participants {
+		self := name != "" && (containsWord(name, p) || (multiword && containsWord(p, name)))
+		for _, s := range selfOnScreen {
+			if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(p)) {
+				self = true
+			}
+		}
+		if !self {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // pickMeetingNote chooses the most recent past meeting that is about the same meeting as the one starting now, or reports that none is.

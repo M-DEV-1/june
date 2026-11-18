@@ -422,6 +422,11 @@ func namesRef(sentence, ref string) bool {
 	return false
 }
 
+// DistinctiveWords is distinctiveWords for callers outside this package: the words that identify a piece of work, to search for it with.
+func DistinctiveWords(text string) []string {
+	return distinctiveWords(text)
+}
+
 // distinctiveWords reduces a piece of work to the words that identify it: lower case, four letters or more, punctuation stripped, common words and duplicates dropped.
 func distinctiveWords(text string) []string {
 	var out []string

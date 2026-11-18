@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,5 +22,13 @@ func TestLoadEnvFiles_ReadsTheKeyTheDaemonReads(t *testing.T) {
 
 	if got := os.Getenv("GEMINI_API_KEY"); got != "from-the-env-file" {
 		t.Fatalf("GEMINI_API_KEY = %q, want it read from %s", got, filepath.Join(dir, "env"))
+	}
+}
+
+// A desk where install.sh never put the extension has nothing to wait for, so GET /setup says nothing about window frames rather than asking the user to log out for it.
+func TestSetupWindowFrames_SilentWithoutTheExtension(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := setupWindowFrames(context.Background()); got != nil {
+		t.Fatalf("setupWindowFrames = %v, want nil", *got)
 	}
 }

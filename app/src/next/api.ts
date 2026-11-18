@@ -332,6 +332,8 @@ export type SetupView = {
   data_dir: string;
   /** Linux only: whether June's GNOME extension answers with window frames, which screen control needs. false until the first logout after installing; absent where there is no such check. */
   window_frames?: boolean;
+  /** The daemon's rule for what a Gemini key looks like, as a regular expression; absent from a daemon that predates it. */
+  key_pattern?: string;
 };
 
 /** What POST and DELETE /setup/gemini-key answer once the key is written: the daemon restarts itself straight after, because the key is read once at start and threaded into everything built then. Both refuse 409 with "recording", "processing" or "downloading" as the error word while that restart would cut a meeting or a download short, with nothing changed. */
@@ -365,6 +367,8 @@ export type Feature = {
   error: string;
   requires: string[];
   needs_restart: boolean;
+  /** Setup downloads this one by itself when the machine is on mains power, once the person is past the brain screen; absent from a daemon that predates it. */
+  background?: boolean;
 };
 
 /** GET /components' whole body. */
@@ -722,6 +726,11 @@ export const juneApi = createApi({
       query: (id) => ({ url: `/components/${encodeURIComponent(id)}/install`, method: "POST", body: { variant: "auto" }, responseHandler: "content-type" }),
       invalidatesTags: ["Component"],
     }),
+    /** Asks the daemon to start the downloads of the small features setup fetches unasked (voice typing, who said what), which it does only while the machine is on mains power and has room, and leaves alone any already installed, queued or failed. Answers the ids it queued, none when the machine is on battery. */
+    startBackgroundFeatures: build.mutation<{ queued: string[] }, void>({
+      query: () => ({ url: "/components/background", method: "POST", responseHandler: "content-type" }),
+      invalidatesTags: ["Component"],
+    }),
     /** Stops a queued or running download; the part already fetched is kept so a later Set up resumes it. */
     cancelFeature: build.mutation<unknown, string>({
       query: (id) => ({ url: `/components/${encodeURIComponent(id)}/cancel`, method: "POST", responseHandler: "content-type" }),
@@ -819,6 +828,7 @@ export const {
   useOpenMicSettingsMutation,
   useComponentsQuery,
   useInstallFeatureMutation,
+  useStartBackgroundFeaturesMutation,
   useCancelFeatureMutation,
   useRemoveFeatureMutation,
   useUpdateQuery,

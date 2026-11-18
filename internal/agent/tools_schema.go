@@ -239,7 +239,6 @@ func toolDefinitions() []*genai.Tool {
 					"Whenever the question is anchored to a time, a day, a part of a day, a range, pass since/until: " +
 					"the search then runs and ranks entirely inside that window, whereas without it the best matches can all come from the wrong day, and one busy stretch can drown out the rest of its own day. " +
 					"A part of a day gets timestamp bounds, not the whole day: morning is roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
-					"When a question narrows the time, run a fresh narrower query, do not answer a narrow question from a wider fetch you already have. " +
 					"For pure day/timeline questions, or 'what was I just doing', use recall. " +
 					"For what a meeting was about, what it decided, or who was in it, pass kind='meeting': that lists the minutes themselves for the window, newest first, instead of ranking, a ranked search finds screens of the user reading minutes before it finds the minutes.",
 				Parameters: &genai.Schema{
@@ -259,16 +258,14 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "query_store",
 				Description: "Run one read-only SQL query straight against June's sqlite store, for structural and aggregate questions that a relevance-ranked search cannot answer, counts, group-bys, joins, \"which meetings did I attend today\", \"what hour do I usually stop working\". " +
-					"query_memory searches by meaning and ranks by relevance; this reads the tables directly, so use it whenever the real answer is a COUNT, a GROUP BY, a MIN/MAX, or a join across tables rather than the ten most-relevant rows. " +
-					"The connection itself is read-only, INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA-writes fail at the database, not by a filter on your text, so only SELECT, PRAGMA table_info(...), and EXPLAIN can do anything. " +
-					"Exactly one statement per call, no trailing statements after a semicolon. " +
+					"Only SELECT, PRAGMA table_info(...) and EXPLAIN do anything: writes fail at the database, not by a filter on your text. " +
 					"Every *_at/*_time column is UTC text, for anything the user would call \"today\" or an hour of day, wrap it: datetime(created_at,'localtime') BETWEEN ... " +
 					"Results render as a header line of column names, then one line per row with values separated by a TAB, window titles routinely contain pipes and spaces, so a tab is the only separator that stays unambiguous. A query matching nothing says \"no rows matched\" plainly. Output is capped in rows and characters, add LIMIT or aggregate rather than pulling raw rows if you hit the cap. " +
 					"Meetings are NOT episodes: an episode is a screen capture, so searching episodes for an app called Teams or Zoom finds the window and never the meeting. A meeting's minutes are a note with kind='meeting'. " +
 					"An action note carries its state as a [state/priority] prefix at the start of content, so the things still owed are kind='action' AND content LIKE '[open/%'. " +
 					"episodes_fts and memory_fts are full-text indexes: use \"episodes_fts MATCH 'word'\" and join its rowid to episodes.id, or \"memory_fts MATCH 'word'\" where source names the table ref_id points into. " +
 					"There is no table called \"memory\", and none called \"tasks\". Facts are in notes, captures in episodes, conversations in threads; memory_fts is only the full-text shadow of notes. The schema below is the whole of it, read from the store itself — nothing outside it exists. " +
-					"Schema, read from the store itself. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
+					"Schema. A column listed as \"is one of\" holds only those values:\n" + storeSchemaBlock(),
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
@@ -281,7 +278,7 @@ func toolDefinitions() []*genai.Tool {
 				Behavior: genai.BehaviorNonBlocking,
 				Name:     "recall",
 				Description: "Timeline or subject recall. Use since/until for chronological periods (yesterday, last Tuesday). " +
-					"A part of a day gets timestamp bounds rather than the whole day, morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that, and a question that narrows the time deserves a fresh narrower call, not an answer read off a wider fetch. " +
+					"A part of a day gets timestamp bounds rather than the whole day, morning roughly 06:00-12:00, afternoon 12:00-18:00, evening and night after that. " +
 					"Use subject for an ongoing arc. Use app to keep only that application's moments. " +
 					"Returns short content+context lines, not raw screen dumps.",
 				Parameters: &genai.Schema{
@@ -340,7 +337,7 @@ func toolDefinitions() []*genai.Tool {
 					"Tasks: if the user asked for a todo and you called save_note, you did not do what they asked. " +
 					"Write the title as the work itself, in the user's own words, short enough to read in a list: " +
 					"\"add source pdfs to the excel files and link to the exact pages\", not \"the user wants to...\". " +
-					"Only say it is on their list once this has come back saying it was added. It comes back with the task's ref, \"task#N\", which revise takes if they correct or drop it a moment later.",
+					"It comes back with the task's ref, \"task#N\", which revise takes if they correct or drop it a moment later.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
@@ -389,7 +386,7 @@ func toolDefinitions() []*genai.Tool {
 					"Look it up first with query_memory or recall to get its ref, the \"[note#N]\" or \"[thread#N]\" a result showed you, then call this. A task's ref is the \"task#N\" add_task handed back, or its id in user_tasks. " +
 					"Pass content to correct the text. For an action item, pass state (open, done, or dropped) instead, never leave a task the user says is done still open, and priority (high, normal, or low) when they say how much it matters. " +
 					"Pass remove to delete a note or a task entirely (a thread cannot be removed, only corrected). A task the user says to drop is deleted, since the list has nowhere to keep a dropped one. " +
-					"Use this instead of just apologizing out loud and leaving the wrong fact in memory, and never say you cannot change something on the list.",
+					"Never say you cannot change something on the list.",
 				Parameters: &genai.Schema{
 					Type: genai.TypeObject,
 					Properties: map[string]*genai.Schema{
@@ -428,7 +425,7 @@ func liveTools() []*genai.Tool {
 
 // liveToolsFor is liveTools for a named Live model. Google Search grounding rides beside the function tools on the 2.5 model; on the 3.x Live models the same pairing closes the session with "You exceeded your current quota" before the first word (probed on 2026-09-02, every other part of the handshake passes), so there it is left out and the model has no web search.
 func liveToolsFor(model string) []*genai.Tool {
-	tools := dropApprovalGated(toolDefinitions())
+	tools := dropDeclarations(toolDefinitions(), approvalGatedTools)
 	// Flip point for gemini-3.8-live: its docs list Google Search grounding as supported (read 2026-09-17), so once someone dials a real session with grounding sent beside the function tools and it survives past the first word, exempt config.Live38Model from this branch the way thinkingConfigFor already does. Until that probe it stays off, because a 429 closes the whole voice session a quarter second after connect while a missing web search only degrades it.
 	if strings.HasPrefix(model, "gemini-3") {
 		return tools
@@ -436,8 +433,8 @@ func liveToolsFor(model string) []*genai.Tool {
 	return append(tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
 }
 
-// dropApprovalGated returns the tools with every approvalGatedTools declaration taken out, the same shape askTools builds through askAllowedTools. A tool the session cannot actually run must not be declared: the model spends a round finding out. Input: the declared tools; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
-func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
+// dropDeclarations returns the tools with every declaration named in drop taken out. Input: the declared tools and the set of names to remove; the originals are not modified. Output: a copy of each tool that still has a declaration left, plus any entry carrying no declarations at all (Gemini's own search grounding) as it is.
+func dropDeclarations(tools []*genai.Tool, drop map[string]bool) []*genai.Tool {
 	out := make([]*genai.Tool, 0, len(tools))
 	for _, tool := range tools {
 		if len(tool.FunctionDeclarations) == 0 {
@@ -445,12 +442,7 @@ func dropApprovalGated(tools []*genai.Tool) []*genai.Tool {
 			continue
 		}
 		copyTool := *tool
-		copyTool.FunctionDeclarations = nil
-		for _, d := range tool.FunctionDeclarations {
-			if !approvalGatedTools[d.Name] {
-				copyTool.FunctionDeclarations = append(copyTool.FunctionDeclarations, d)
-			}
-		}
+		copyTool.FunctionDeclarations = withoutDeclarations(tool.FunctionDeclarations, drop)
 		if len(copyTool.FunctionDeclarations) > 0 {
 			out = append(out, &copyTool)
 		}

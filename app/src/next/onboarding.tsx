@@ -32,12 +32,14 @@ import {
   useSaveGeminiKeyMutation,
   useSaveSettingsMutation,
   useSettingsQuery,
+  useStartBackgroundFeaturesMutation,
+  useSetupQuery,
   type Brain,
   type MicTest,
   type SetupView,
 } from "./api";
 import { Face } from "./face";
-import { hotkeyKeys } from "./format";
+import { backgroundFeatures, bytes, hotkeyKeys, keyOnClipboard } from "./format";
 import { FeatureList, restartBlockedLine, useFeaturesUnderWay, useRestartBlocker, type UnderWay } from "./onboarding-features";
 import { Group, NO_SHORTCUT, ON_WINDOWS, useHotkeyUnavailable, useOpenLink } from "./parts";
 import { DRAFT_CHAT, progress, setupUi, ui, useAppDispatch, useAppSelector, type AppDispatch, type RestartWhy } from "./store";
@@ -141,7 +143,31 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [problem, setProblem] = useState<KeyProblem | undefined>(undefined);
+  // looking is set once the person has gone to Google for a key; fromClipboard says the box was filled by this window rather than typed.
+  const [looking, setLooking] = useState(false);
+  const [fromClipboard, setFromClipboard] = useState(false);
+  const keyPattern = useSetupQuery().data?.key_pattern;
   const showForm = manage || saved ? open : true;
+
+  // When the window is next focused after "Get a free key", the clipboard is read once. A key on it fills the box and is sent nowhere until Save is pressed; a clipboard the webview will not hand over is left alone.
+  useEffect(() => {
+    if (!looking) return;
+    const onFocus = () => {
+      setLooking(false);
+      void Promise.resolve()
+        .then(() => navigator.clipboard.readText())
+        .then((text) => {
+          const found = keyOnClipboard(text, keyPattern);
+          if (!found) return;
+          setKey(found);
+          setFromClipboard(true);
+          setProblem(undefined);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [looking, keyPattern]);
   // Saving or removing the key restarts June, so both wait for what a restart would cut short.
   const blocker = useRestartBlocker();
   const held = restartBlockedLine(blocker, saved ? "Changing the key" : "Saving a key");
@@ -159,6 +185,7 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
     try {
       const r = await save({ key: k, force }).unwrap();
       setKey("");
+      setFromClipboard(false);
       setOpen(false);
       after(Boolean(r?.restarting));
     } catch (e) {
@@ -206,10 +233,17 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
       {showForm ? (
         <div className={saved || manage ? "mt-4" : ""}>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <Button variant="outline" size="sm" onClick={() => openLink(GEMINI_KEY_URL)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setLooking(true);
+                openLink(GEMINI_KEY_URL);
+              }}
+            >
               Get a free key <ArrowUpRight />
             </Button>
-            <span className="text-meta text-muted-foreground">Sign in with Google, press Create API key, and copy it.</span>
+            <span className="text-meta text-muted-foreground">Sign in with Google, press Create API key, and copy it. When you come back, June picks it up.</span>
           </div>
           <form
             className="mt-3 flex gap-2"
@@ -224,6 +258,7 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
               value={key}
               onChange={(e) => {
                 setKey(e.target.value);
+                setFromClipboard(false);
                 setProblem(undefined);
               }}
               placeholder="Paste your key here"
@@ -247,6 +282,7 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
                 onClick={() => {
                   setOpen(false);
                   setKey("");
+                  setFromClipboard(false);
                   setProblem(undefined);
                 }}
               >
@@ -255,6 +291,7 @@ export function GeminiKey({ saved, manage = false }: { saved: boolean; manage?: 
             ) : null}
           </form>
           {checking ? <p className="mt-2 text-meta text-muted-foreground">Checking the key with Google…</p> : null}
+          {fromClipboard && !checking && !problem ? <p className="mt-2 text-meta text-muted-foreground">Found the key you copied. Press Save to use it.</p> : null}
         </div>
       ) : null}
       {held && (showForm || (saved && manage)) && !problem ? <p className="mt-2 text-meta text-muted-foreground">{held}</p> : null}
@@ -428,6 +465,8 @@ function Fact({ label, children, control }: { label: string; children: ReactNode
 function WelcomeStep({ setup, onNext }: { setup: SetupView; onNext: () => void }) {
   // Checking every login can take fifteen seconds, and the next screen has nothing to offer until it is done, so it starts while this one is read. A subscription rather than a prefetch: a prefetch holds nothing, so its answer was dropped a minute after it came and someone who read this screen for longer waited for the whole check again.
   useFreshBrainsQuery();
+  const { data: comps } = useComponentsQuery();
+  const download = backgroundFeatures(comps?.features ?? []);
   return (
     <StepFrame
       face="watching"
@@ -448,6 +487,11 @@ function WelcomeStep({ setup, onNext }: { setup: SetupView; onNext: () => void }
           <Fact label="Sent to your AI">
             Your questions, and the notes needed to answer them, go to the AI you pick next — ChatGPT, Antigravity, Claude or Google Gemini. June also sends it notes on what you've been doing, in the background, to keep its memory tidy and write up your meetings. Each service keeps what it gets under its own privacy terms.
           </Fact>
+          {download.length ? (
+            <Fact label="Downloaded to this PC">
+              After the next screen, and only while this PC is plugged in, June downloads {download.map((f) => f.title).join(" and ")} ({bytes(download.reduce((sum, f) => sum + f.download_bytes, 0))}) in the background, from GitHub and Hugging Face. You can stop them on the local features screen.
+            </Fact>
+          ) : null}
           <Fact label="Not watching yet">June doesn't look at your screen until you finish setting up. It takes about three minutes.</Fact>
         </div>
       </Group>
@@ -649,7 +693,7 @@ function FeaturesStep({ onBack, onNext }: { onBack: () => void; onNext: () => vo
   return (
     <StepFrame
       title="Add local features"
-      lead="Optional. These run on this PC instead of online. Each is a one-time download — set up any you like, or none. Downloads keep going in the background while you finish."
+      lead="Optional. These run on this PC instead of online. Each is a one-time download — set up any you like, or none. The small ones start by themselves while this PC is plugged in, and downloads keep going in the background while you finish."
       footer={
         <>
           <Back onClick={onBack} />
@@ -727,6 +771,11 @@ function stillDownloading(list: UnderWay[], restartOwed: boolean): string {
   if (!later.length) return `${going} and ${one ? "switches on by itself when it's" : "switch on by themselves when they're"} done.`;
   if (later.length === list.length) return `${going} and ${one ? "is" : "are"} switched on the next time June starts.`;
   return `${going}. ${later.map((u) => u.title).join(" and ")} ${later.length === 1 ? "is" : "are"} switched on the next time June starts; the rest as soon as they're done.`;
+}
+
+/** The header's one-line note on downloads that are going on while the person sets up something else. Input: the features still on their way. Output: "Downloading Voice typing & meeting transcripts 43%, Who said what". */
+function backgroundLine(list: UnderWay[]): string {
+  return `Downloading ${list.map((u) => (u.pct === undefined ? u.title : `${u.title} ${u.pct}%`)).join(", ")}`;
 }
 
 function DoneStep({ setup, onBack }: { setup: SetupView; onBack: () => void }) {
@@ -892,7 +941,15 @@ export function Onboarding({ setup }: { setup: SetupView }) {
     setStored(s);
     writeStep(s);
   };
-  const next = () => go(steps[Math.min(at + 1, steps.length - 1)]);
+  const [startBackground] = useStartBackgroundFeaturesMutation();
+  const underWay = useFeaturesUnderWay();
+  // The features and last screens say how their downloads are going themselves, so the header does for the screens between.
+  const noteDownloads = underWay.length > 0 && step !== "features" && step !== "done";
+  const next = () => {
+    // Saving a Gemini key on the brain screen restarts June, which a running download holds back, so the small local features are started once that screen is passed. The daemon decides whether this PC is plugged in and has room, and answers with what it started.
+    if (step === "brain") void startBackground();
+    go(steps[Math.min(at + 1, steps.length - 1)]);
+  };
   const back = () => go(steps[Math.max(at - 1, 0)]);
 
   let body: ReactNode;
@@ -917,7 +974,8 @@ export function Onboarding({ setup }: { setup: SetupView }) {
     <div className="flex h-svh flex-col bg-background">
       <header className="flex h-12 shrink-0 items-center border-b px-6">
         <span className="text-ui font-medium">Setting up June</span>
-        <div className="ml-auto">
+        {noteDownloads ? <span className="ml-auto truncate pl-4 text-meta text-muted-foreground">{backgroundLine(underWay)}</span> : null}
+        <div className={noteDownloads ? "ml-4" : "ml-auto"}>
           <Dots count={steps.length} at={at} />
         </div>
       </header>

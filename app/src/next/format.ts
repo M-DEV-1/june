@@ -7,6 +7,7 @@ import type {
   ConversationSummary,
   DaySummary,
   DayView,
+  Feature,
   Meeting,
   Notice,
   Spend,
@@ -202,6 +203,26 @@ export function hotkeyKeys(accel: string): string[] {
     .map(
       (k) => names[k.toLowerCase()] ?? (k.length === 1 ? k.toUpperCase() : k),
     );
+}
+
+/** The features setup downloads by itself. Input: GET /components' features. Output: those the daemon marks background that are not installed yet and whose required features are installed or in this list, in the daemon's order. */
+export function backgroundFeatures(features: Feature[]): Feature[] {
+  const out: Feature[] = [];
+  for (const f of features) {
+    const ready = (id: string) => out.some((x) => x.id === id) || features.some((x) => x.id === id && (x.state === "installed" || x.state === "update_available" || x.state === "external"));
+    if (f.background && f.state === "not_installed" && f.requires.every(ready)) out.push(f);
+  }
+  return out;
+}
+
+/** Picks a Gemini key out of what was copied. Input: the clipboard's text, and the daemon's rule for a plausible key as GET /setup's key_pattern (absent from an older daemon). Output: the key with the space around it trimmed, or "" when the text does not match the rule or there is no rule to match it against. */
+export function keyOnClipboard(text: string, pattern: string | undefined): string {
+  const key = text.trim();
+  try {
+    return pattern && new RegExp(pattern).test(key) ? key : "";
+  } catch {
+    return "";
+  }
 }
 
 /** How far a download has got, as one line a person can read. Input: the bytes fetched so far, the bytes in all, and the rate in bytes a second (0 when not known yet). Output: "1.2 GB of 2.1 GB · 6.3 MB/s · about 3 min left", dropping whichever part there is nothing to say about yet. */

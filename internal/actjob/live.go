@@ -58,9 +58,11 @@ func (l *live) elapsed() int64 {
 // beginWait marks the job as waiting on the user from now, and endWait folds the stretch it just waited into the time that does not count against the wall budget. endWait may be called twice; the second call does nothing.
 func (l *live) beginWait() { l.waitingSince.Store(time.Now().UnixNano()) }
 
+// The stretch is credited before the wait is cleared: the other order leaves a moment where elapsed sees neither the wait in progress nor the wait credited, and counts the whole of it against the budget. Only the job's own goroutine calls this, so the load and the store cannot interleave with another endWait.
 func (l *live) endWait() {
-	if since := l.waitingSince.Swap(0); since != 0 {
+	if since := l.waitingSince.Load(); since != 0 {
 		l.waitedMS.Add(time.Since(time.Unix(0, since)).Milliseconds())
+		l.waitingSince.Store(0)
 	}
 	select {
 	case l.working <- struct{}{}:

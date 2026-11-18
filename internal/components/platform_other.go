@@ -19,4 +19,6 @@ func totalRAMMB() int { return 0 }
 
 func smartAppControl() string { return "off" }
 
+func onMains() bool { return true }
+
 func diskFull(err error) bool { return errors.Is(err, syscall.ENOSPC) }

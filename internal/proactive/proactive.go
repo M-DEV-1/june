@@ -52,6 +52,8 @@ type Store interface {
 	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
 	SetActionStatus(ctx context.Context, noteID int64, status string) error
 	SetActionPriority(ctx context.Context, noteID int64, priority string) error
+	// CloseDoneActionItems is the evidence sweep the nightly dream runs, run again right before the brief so the brief never chases work that later writing already says is finished (see deliverBrief).
+	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
 	// ActionItemsByOwner is what maybeTaskNotices (see notify.go) reads to find the user's own action items, oldest first and note id included, so it can tell a meeting's newly-lifted items from ones already announced.
 	ActionItemsByOwner(ctx context.Context, owner string) ([]memory.ActionItem, error)
 

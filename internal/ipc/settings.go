@@ -251,7 +251,7 @@ const mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
 // customKeybindingSchemaPrefix, plus a keybinding's own D-Bus path, names the per-keybinding schema its command and binding live under.
 const customKeybindingSchemaPrefix = mediaKeysSchema + ".custom-keybinding:"
 
-// windowToggleCommand is the command the june-window-hotkey wiring registers, which marks a custom keybinding as ours among however many others GNOME holds.
+// windowToggleCommand is the script packaging/install.sh registers the shortcut to run, and uninstall.sh removes it by the same name, which marks a custom keybinding as ours among however many others GNOME holds.
 const windowToggleCommand = "june-window-toggle"
 
 // windowHotkey reads the GNOME accelerator that opens the window, live off gsettings. Output: the binding string (for example "<Control><Alt>space"), or "" when no keybinding runs june-window-toggle, gsettings is unavailable, or the platform is neither Linux nor Windows (Windows always answers the chord the window registers) — GNOME's custom-keybindings mechanism is what internal/window wires the hotkey through, and there is nothing else to fall back to.
