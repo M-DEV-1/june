@@ -450,6 +450,11 @@ func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]MemoryHit, 
 	return s.searchEpisodesWindow(ctx, query, time.Time{}, time.Time{})
 }
 
+// SearchEpisodesSince is SearchEpisodes over the episodes captured at or after since: the screen moments that could show a piece of work being finished after it was asked for.
+func (s *Store) SearchEpisodesSince(ctx context.Context, query string, since time.Time) ([]MemoryHit, error) {
+	return s.searchEpisodesWindow(ctx, query, since, time.Time{})
+}
+
 // searchEpisodesWindow is SearchEpisodes constrained to episodes whose created_at falls in [since, until]; a zero bound is open on that side. The window sits in the WHERE clause, before the LIMIT — see searchMemoryWindow for why.
 func (s *Store) searchEpisodesWindow(ctx context.Context, query string, since, until time.Time) ([]MemoryHit, error) {
 	tracer := obs.GetTracer(ctx, "june.db")

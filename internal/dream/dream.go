@@ -15,6 +15,7 @@ import (
 
 	"june/internal/brain"
 	"june/internal/db"
+	"june/internal/memory"
 	"june/internal/obs"
 )
 
@@ -111,6 +112,10 @@ type Store interface {
 
 	// CloseDoneActionItems closes the open tasks that a meeting, a day's page or a compiled note says are finished, and reports how many moved.
 	CloseDoneActionItems(ctx context.Context, since time.Time) (int, error)
+	// The screen sweep (see screendone.go): the user's open tasks, the screen moments since each was raised, and the close it records with the moment that showed the work done.
+	OpenActionItems(ctx context.Context) ([]memory.ActionItem, error)
+	SearchEpisodesSince(ctx context.Context, query string, since time.Time) ([]db.MemoryHit, error)
+	SetActionDone(ctx context.Context, noteID int64, doneSource string) error
 
 	// The two retention passes the pruning stage runs, and the counts of what each one's policy held back, so the night can log what it kept as well as what it took.
 	ProtectedConversations(ctx context.Context, olderThan time.Duration) (int64, error)
@@ -449,6 +454,13 @@ func (r *Runner) dream(ctx context.Context, night string, run db.DreamRun, exist
 		slog.Warn("dreaming: could not close the tasks the week's writing says are finished", "night", night, "error", err)
 	} else if closed > 0 {
 		slog.Info("dreaming: closed tasks the week's writing says are finished", "night", night, "closed", closed)
+	}
+
+	// The writing sweep above only reads what was written down. Work finished on screen — a PR merged in the browser, a ticket moved, a file sent — is never written in matching words, so the brain reads the screen moments since each task was raised and closes the ones they show done. Soft and tokenless like the writing sweep: it only closes, so a second run closes nothing twice.
+	if closed, err := r.screenDoneStage(ctx, night); err != nil {
+		slog.Warn("dreaming: could not check the screen for finished tasks", "night", night, "error", err)
+	} else if closed > 0 {
+		slog.Info("dreaming: closed tasks the screen shows finished", "night", night, "closed", closed)
 	}
 
 	// The pruning stage goes last, after the procedures stage has taken what it wanted from the act runs: a run only becomes safe from the count cap once the note written from it exists. Its error handling is the procedures stage's — a store that could not be reached is logged, the token is left off so the next wake retries, and the night still gets its morning report.
