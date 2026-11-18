@@ -807,13 +807,14 @@ func (r *Runner) endedWaiting(ctx context.Context, l *live) {
 
 // askUser puts the job in stuck with one plain question and waits for the answer, which is kept with the goal so every later round sees it. Input: the job's context, the live job and the question. Output: true when an answer came, false when the job was stopped or its time ran out while waiting.
 func (r *Runner) askUser(ctx context.Context, l *live, question string) bool {
+	// The wait starts before the job reads as stuck, not after its checkpoint is written: a job the window already shows as waiting on the user must not go on spending its wall budget, and on a slow disk that one write used to be enough for the guard to end a job that was sitting on its question.
+	l.beginWait()
 	job := l.set(func(j *Job) {
 		j.State = Stuck
 		j.Question = question
 	})
 	r.emit(Event{Job: job.ID, Kind: "question", State: Stuck, Text: question})
 	r.save(l, job)
-	l.beginWait()
 	select {
 	case answer := <-l.answers:
 		l.endWait()
