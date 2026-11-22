@@ -235,6 +235,16 @@ func getRoleName(ctx context.Context, conn *dbus.Conn, ref aref) string {
 	return role
 }
 
+// getDocumentURL reads the address a web document node publishes through the org.a11y.atspi.Document interface. Output: the cleaned address, or "" when the node publishes none.
+func getDocumentURL(ctx context.Context, conn *dbus.Conn, ref aref) string {
+	obj := conn.Object(ref.Name, ref.Path)
+	var attrs map[string]string
+	if err := obj.CallWithContext(ctx, "org.a11y.atspi.Document.GetAttributes", 0).Store(&attrs); err != nil {
+		return ""
+	}
+	return urlFromAttributes(attrs)
+}
+
 // buildA11yTree walks the accessible subtree from ref into an in-memory a11yNode tree (role, own text if it implements org.a11y.atspi.Text, and children), so documentText (document_text.go) can decide what to keep.
 // Bounded by maxDepth, maxNodes (via the visited counter), and the context deadline.
 func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, visited *int) a11yNode {
@@ -245,11 +255,12 @@ func buildA11yTree(ctx context.Context, conn *dbus.Conn, ref aref, depth int, vi
 
 	node := a11yNode{Role: getRoleName(ctx, conn, ref)}
 
-	ifaces := getInterfaces(ctx, conn, ref)
-	for _, iface := range ifaces {
-		if iface == "org.a11y.atspi.Text" {
+	for _, iface := range getInterfaces(ctx, conn, ref) {
+		switch {
+		case iface == "org.a11y.atspi.Text":
 			node.Text = strings.TrimSpace(getText(ctx, conn, ref))
-			break
+		case iface == "org.a11y.atspi.Document" && node.Role == roleDocumentWeb:
+			node.URL = getDocumentURL(ctx, conn, ref)
 		}
 	}
 

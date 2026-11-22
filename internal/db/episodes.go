@@ -77,7 +77,9 @@ type EpisodeWrite struct {
 	App, Title, ScreenText string
 	UserActivity           string
 	VisibleText            []string
-	ImageJPEG              []byte
+	// URL is the address of the web page the window showed, already stripped of query string and fragment by the tracker, or "".
+	URL       string
+	ImageJPEG []byte
 	// ExtraJPEG holds one frame per monitor other than the one the user was on, captured at the same moment. They are stored beside the primary as {id}-b.jpg, {id}-c.jpg and read back with EpisodeExtraImages.
 	ExtraJPEG [][]byte
 }
@@ -118,9 +120,9 @@ func (s *Store) WriteEpisode(ctx context.Context, w EpisodeWrite) (int64, error)
 	domain := obs.Context.Domain
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO episodes (app, title, screen_text, importance, domain, user_activity, visible_text) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO episodes (app, title, screen_text, importance, domain, user_activity, visible_text, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		obs.Context.App, obs.Context.Title, content, importance, string(domain),
-		strings.TrimSpace(w.UserActivity), memory.VisibleTextJSON(w.VisibleText))
+		strings.TrimSpace(w.UserActivity), memory.VisibleTextJSON(w.VisibleText), strings.TrimSpace(w.URL))
 	if err != nil {
 		span.RecordError(err)
 		return 0, fmt.Errorf("insert episode: %w", err)
@@ -193,6 +195,7 @@ type Episode struct {
 	UserActivity string
 	VisibleText  string
 	ImagePath    string
+	URL          string // the page address, "" for a capture that showed no web page
 }
 
 // EpisodeQuery is the filter for ListEpisodes. Zero Since/Until means unbounded on that side. App is a case-insensitive substring of episodes.app.
@@ -245,7 +248,7 @@ func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, er
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, created_at, app, title, screen_text, importance, domain,
-		       user_activity, visible_text, image_path
+		       user_activity, visible_text, image_path, url
 		FROM episodes
 		`+where+`
 		ORDER BY `+order+`
@@ -259,7 +262,7 @@ func (s *Store) ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, er
 	var out []Episode
 	for rows.Next() {
 		var e Episode
-		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance, &e.Domain, &e.UserActivity, &e.VisibleText, &e.ImagePath); err != nil {
+		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance, &e.Domain, &e.UserActivity, &e.VisibleText, &e.ImagePath, &e.URL); err != nil {
 			span.RecordError(err)
 			return nil, fmt.Errorf("scan episode: %w", err)
 		}

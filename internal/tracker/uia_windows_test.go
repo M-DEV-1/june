@@ -42,9 +42,9 @@ func TestUIAReadsTheWindowInFront(t *testing.T) {
 		t.Logf("%s %q at %d,%d %dx%d, err %v", n.Role, n.Label, x, y, w, h, err)
 		break
 	}
-	text, _ := extractText()
-	t.Logf("captured %d characters", len(text))
-	if text == "" {
+	read, _ := extractText()
+	t.Logf("captured %d characters", len(read.text))
+	if read.text == "" {
 		t.Error("extractText returned nothing for the window in front")
 	}
 }

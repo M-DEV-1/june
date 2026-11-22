@@ -1,12 +1,16 @@
 package tracker
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // a11yNode is an in-memory, platform-agnostic mirror of one AT-SPI (or UIA) accessible: its role, its own text (if any), and its children.
 // Kept separate from the live D-Bus walk in capture_linux.go so the rules below can be unit-tested without a real accessibility bus.
 type a11yNode struct {
 	Role     string
 	Text     string
+	URL      string // the page address a web document node reports, cleaned by pageAddress; empty on every other node
 	Children []a11yNode
 }
 
@@ -61,4 +65,41 @@ func collectTextDedupingAncestors(n a11yNode, ancestorTexts map[string]bool) []s
 		texts = append(texts, collectTextDedupingAncestors(child, ancestorTexts)...)
 	}
 	return texts
+}
+
+// pageURL returns the address of the web page a window shows. Input: the window's accessibility tree. Output: the URL of the first DOCUMENT_WEB node that reports one, or "" when the window shows no web page or the browser did not publish its address.
+func pageURL(n a11yNode) string {
+	if n.Role == roleDocumentWeb && n.URL != "" {
+		return n.URL
+	}
+	for _, child := range n.Children {
+		if u := pageURL(child); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+// urlFromAttributes picks a page's address out of the attributes an AT-SPI document node publishes. Input: the document's attribute map. Output: the cleaned address, or "" when there is none. Firefox publishes it as "DocURL" and Chromium as "URI", so both are read, ignoring case.
+func urlFromAttributes(attrs map[string]string) string {
+	for _, want := range []string{"DocURL", "URI"} {
+		for name, value := range attrs {
+			if strings.EqualFold(name, want) {
+				if u := pageAddress(value); u != "" {
+					return u
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// pageAddress cleans a page address before it is stored. Input: the address a browser reported. Output: the address without credentials, query string or fragment, or "" when it is not an http or https page. The query and fragment are dropped because they carry session tokens, one-time codes and signed-link secrets; the path still names the page.
+func pageAddress(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	u.User, u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = nil, "", false, "", ""
+	return u.String()
 }
