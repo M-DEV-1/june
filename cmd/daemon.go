@@ -328,9 +328,10 @@ func startDaemonServices(ctx context.Context, listener net.Listener) (stop func(
 			s := summarizer.AnalyzeScreen(ctx, png)
 			return tracker.Sight{UserActivity: s.UserActivity, VisibleText: s.VisibleText, Summary: s.Summary}
 		})
-
-		// prompt for screenshot permission up front (Linux portal) so the first real vision capture doesn't silently fail waiting on consent.
-		// Blocks on the dialog, so run it off the startup path. No-op on other platforms.
+	}
+	// prompt for screenshot permission up front (Linux portal) so the first real capture doesn't silently fail waiting on consent. The local OCR fallback takes screenshots too, with no model key at all, so it needs the same consent asked at the same moment rather than a portal dialog appearing mid-use.
+	// Blocks on the dialog, so run it off the startup path. No-op on other platforms.
+	if (summarizer != nil && apiKey != "") || daemon.CanOCR() {
 		go tracker.WarmUpScreenshotPermission(ctx)
 	}
 

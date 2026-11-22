@@ -424,6 +424,9 @@ func (d *Daemon) watchMeetingWindow(ctx context.Context) {
 	}
 }
 
+// CanOCR reports whether this machine has the local OCR program the capture falls back on, which takes screenshots of its own even when no vision model is set up.
+func (d *Daemon) CanOCR() bool { return d.ocr != nil }
+
 // screenRead is what one accessibility read of the focused window returned: its text, and the address of the web page it shows when it shows one.
 type screenRead struct {
 	text string
