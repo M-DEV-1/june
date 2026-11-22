@@ -140,7 +140,7 @@ func drainEpisodes(ctx context.Context, events <-chan tracker.Activity, write fu
 	for ev := range events {
 		if _, err := write(ctx, db.EpisodeWrite{
 			App: ev.App, Title: ev.Title, ScreenText: ev.ScreenText,
-			UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, ImageJPEG: ev.ImageJPEG,
+			UserActivity: ev.UserActivity, VisibleText: ev.VisibleText, URL: ev.URL, ImageJPEG: ev.ImageJPEG,
 			ExtraJPEG: ev.ExtraJPEG,
 		}); err != nil {
 			slog.Error("log episode failed", "error", err)

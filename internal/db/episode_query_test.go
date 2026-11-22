@@ -117,3 +117,31 @@ func TestAgeEpisodeImages_DropsOldJPEGsKeepsDescription(t *testing.T) {
 		t.Fatalf("recent jpeg missing: %v", err)
 	}
 }
+
+// The page a capture showed is stored with it and read back with it, so a question about "the PR I had open" can be answered with the page itself and not only its text.
+func TestWriteEpisode_StoresThePageURL(t *testing.T) {
+	ctx := context.Background()
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	since := time.Now().Add(-time.Minute)
+	if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Brave", Title: "Billing retry #88 - GitHub", ScreenText: "Billing retry pull request", URL: "https://github.com/acme/billing/pull/88"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.WriteEpisode(ctx, db.EpisodeWrite{App: "Terminal", Title: "zsh", ScreenText: "go test ./..."}); err != nil {
+		t.Fatal(err)
+	}
+	eps, err := store.ListEpisodes(ctx, db.EpisodeQuery{Since: since, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls := map[string]string{}
+	for _, e := range eps {
+		urls[e.App] = e.URL
+	}
+	if urls["Brave"] != "https://github.com/acme/billing/pull/88" || urls["Terminal"] != "" {
+		t.Errorf("page addresses read back as %v", urls)
+	}
+}

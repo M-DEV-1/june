@@ -211,7 +211,7 @@ func (s *Store) EpisodesForThread(ctx context.Context, threadID int64, limit int
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.created_at, e.app, e.title, e.screen_text, e.importance, e.domain,
-		       e.user_activity, e.visible_text, e.image_path
+		       e.user_activity, e.visible_text, e.image_path, e.url
 		FROM episodes e
 		JOIN episode_threads et ON et.episode_id = e.id
 		WHERE et.thread_id = ?
@@ -226,7 +226,7 @@ func (s *Store) EpisodesForThread(ctx context.Context, threadID int64, limit int
 	for rows.Next() {
 		var e Episode
 		if err := rows.Scan(&e.ID, &e.CreatedAt, &e.App, &e.Title, &e.ScreenText, &e.Importance,
-			&e.Domain, &e.UserActivity, &e.VisibleText, &e.ImagePath); err != nil {
+			&e.Domain, &e.UserActivity, &e.VisibleText, &e.ImagePath, &e.URL); err != nil {
 			return nil, fmt.Errorf("scan episode for thread: %w", err)
 		}
 		out = append(out, e)

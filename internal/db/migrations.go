@@ -637,6 +637,14 @@ var migrations = []Migration{
 			return nil
 		},
 	},
+	{
+		Version: 12,
+		Name:    "0012_add_episode_url",
+		Up: func(ctx context.Context, tx *sql.Tx) error {
+			// url is the address of the web page the focused window showed, without query string or fragment (see tracker.pageAddress), or '' when it showed none. A page's text says what was read; the address says where, which is what "the PR I had open" and "that doc" are asked by.
+			return ensureColumnInTx(ctx, tx, "episodes", "url", "TEXT NOT NULL DEFAULT ''")
+		},
+	},
 }
 
 // runMigrations applies all pending schema migrations sequentially in transactions.

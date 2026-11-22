@@ -84,6 +84,21 @@ func TestDrainEpisodes_WritesAfterTheRootContextIsCancelled(t *testing.T) {
 	}
 }
 
+// The page address the tracker read rides from the activity into the episode write, so it is stored with the capture.
+func TestDrainEpisodes_CarriesThePageURL(t *testing.T) {
+	events := make(chan tracker.Activity, 1)
+	events <- tracker.Activity{App: "brave", Title: "Billing retry #88", URL: "https://github.com/acme/billing/pull/88"}
+	close(events)
+	var got string
+	drainEpisodes(context.Background(), events, func(_ context.Context, w db.EpisodeWrite) (int64, error) {
+		got = w.URL
+		return 1, nil
+	}, nil)
+	if got != "https://github.com/acme/billing/pull/88" {
+		t.Fatalf("episode written with URL %q, want the activity's", got)
+	}
+}
+
 // The compiler's Ingest runs the attribution model call inline, so a hung call used to stop the drain, fill the tracker's event channel and end all capture. The ingest now runs off the drain and is dropped when it falls behind.
 func TestDrainEpisodes_KeepsWritingWhileAnIngestIsStuck(t *testing.T) {
 	const activities = ingestQueueDepth + 10
